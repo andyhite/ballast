@@ -377,6 +377,8 @@ struct MasterLayoutTests {
         #expect(plan.inView == [2, 4])
         #expect(Set(plan.covered.keys) == [3, 5])
         #expect(plan.behind == [4: [3, 5]])
+        // Only the scrolling column's windows slide as focus moves through it.
+        #expect(plan.scrolling == [3, 4, 5])
         #expect(plan.frames[4]!.minX == 750 && plan.frames[4]!.minY == 30 && plan.frames[4]!.maxY == 470)
     }
 

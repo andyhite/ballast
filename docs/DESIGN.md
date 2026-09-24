@@ -389,12 +389,22 @@ geometry for the scrolling (outermost) column:
 ## 5. Animation decision: strategy (a)
 
 **Chosen: (a).** Only the **focused** window on an **active** Space
-interpolates its AX frame on its app's worker. Frames are paced by deadline at
+interpolates its AX frame on its app's worker, plus, when a pass keeps the
+Space's windows unchanged, every window of a scrolling stack column, so
+moving focus through the stack slides it instead of jumping. Those windows
+mostly keep their size as the view scrolls, so a frame is
+usually one position write. Frames are paced by deadline at
 the display refresh interval, so a slow AX round-trip drops frames instead of
 stretching the animation. Every other window gets its final frame in one shot.
 Each animation frame is scheduled separately on the serial queue rather than
 sleeping on it. Sibling-window requests and focus operations can run between
 frames.
+
+When focus scrolls the stack and the previously focused window slides off
+the newly focused one, the newly focused window's activation and raise (and
+the deck re-ordering) wait until that slide ends. The sliding window
+uncovers the new one instead of being covered by it. A newer focus cancels
+the wait.
 
 Why not (b), yabai-style proxy windows animated with `SLSSetWindowTransform`?
 

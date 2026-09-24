@@ -38,6 +38,8 @@ public enum MasterLayout {
         /// they sit behind: the first tile's are the windows before the view,
         /// the last tile's the ones after it. That tile must stay in front.
         public var behind: [WindowID: [WindowID]] = [:]
+        /// Every window of a column that scrolls, in view or not.
+        public var scrolling: Set<WindowID> = []
     }
 
     /// `order[0..<masterCount]` are masters, the rest is the stack. Masters
@@ -123,6 +125,7 @@ public enum MasterLayout {
                 plan.covered.merge(column.covered) { a, _ in a }
                 plan.navigation.merge(column.navigation) { a, _ in a }
                 plan.behind.merge(column.behind) { a, _ in a }
+                plan.scrolling.formUnion(column.scrolling)
                 plan.inView += column.inView
             }
         }
@@ -196,7 +199,7 @@ public enum MasterLayout {
         let after = start + shown < ids.count ? inset : 0
         let slots = tileLinear(visible, in: rect.insetClamped(axis, start: before, end: after), axis: axis, gap: gap,
                                weight: { _ in 1 }, maxWeightRatio: .infinity, minSize: minSize)
-        var plan = Plan(frames: slots, navigation: slots, inView: visible)
+        var plan = Plan(frames: slots, navigation: slots, inView: visible, scrolling: Set(ids))
         guard let first = visible.first.flatMap({ slots[$0] }), let last = visible.last.flatMap({ slots[$0] }) else {
             return plan
         }

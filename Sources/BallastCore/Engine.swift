@@ -78,6 +78,9 @@ public struct SpaceLayout: Equatable, Sendable {
     /// the scrolled-out windows that belong behind it. Leaves out `raise`,
     /// which is raised anyway, and every tile `raise`'s rules forbid.
     public var behind: [WindowID: [WindowID]] = [:]
+    /// Windows of a scrolling stack column, minus any at a frame of their
+    /// own: moving focus through the column slides these along it.
+    public var scrolling: Set<WindowID> = []
     /// Positions directional focus and swap move between: `frames`, except
     /// that a scrolling stack's windows continue past either end of the view.
     var navigation: [WindowID: CGRect] = [:]
@@ -226,6 +229,7 @@ public struct Engine: Sendable {
             result.covered = plan.covered
             result.navigation = plan.navigation
             deck = plan.behind
+            result.scrolling = plan.scrolling
             // Keep the focused window in view on top of the ones tucked behind it.
             if !plan.covered.isEmpty, let recentTile, plan.inView.contains(recentTile), raisable(recentTile) {
                 result.raise = recentTile
@@ -237,6 +241,7 @@ public struct Engine: Sendable {
                 result.frames[id] = frame
                 result.navigation[id] = frame
                 result.covered[id] = nil
+                result.scrolling.remove(id)
                 pinned.insert(id)
             }
         }

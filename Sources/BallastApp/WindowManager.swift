@@ -78,6 +78,10 @@ final class WindowManager: AppObserverDelegate {
     private let hitTestQueue = DispatchQueue(label: "dev.ballast.hit-test", qos: .userInteractive)
     private var hitTestPending = false
     private var resyncPending = false
+    /// A WM-initiated focus waiting for the pass it dirtied (see `focusWindow`).
+    private var pendingFocus: (id: WindowID, covering: WindowID?, generation: UInt64)?
+    /// Bumped by every WM-initiated focus, so a superseded deferred raise never runs.
+    private var focusGeneration: UInt64 = 0
     private var axTrustObserverTarget: AXTrustObserverTarget?
     /// Settings changed by commands (hotkeys, `ballast send …`, menu),
     /// merged per-Space and flushed to the config file after a short
@@ -599,6 +603,11 @@ final class WindowManager: AppObserverDelegate {
         // same-pass departure cleanup erase it, regardless of processing order.
         var reassignedThisPass = Set<WindowID>()
         for space in spaces.sorted() { layout(space, reassignedThisPass: &reassignedThisPass) }
+        // No pass slid a window off the newly focused one: bring it forward now.
+        if let pending = pendingFocus {
+            pendingFocus = nil
+            bringForward(pending.id)
+        }
         // A layout change mid-drag (a window opened or closed) moves the landing frame.
         if !spaces.isEmpty { updateDropPreview(force: true) }
         // Focus can scroll a stack: the flash follows its window to the new slot.
@@ -613,35 +622,77 @@ final class WindowManager: AppObserverDelegate {
         // Windows that left this Space's plan (floated, minimized, moved away,
         // float-mode Space) must be re-sent when they come back, even to the
         // same slot, and must not be treated as displaced tiles meanwhile.
-        for id in laidOut[space] ?? [] where plan.frames[id] == nil && !reassignedThisPass.contains(id) {
+        let previous = laidOut[space] ?? []
+        for id in previous where plan.frames[id] == nil && !reassignedThisPass.contains(id) {
             lastRequested[id] = nil
             expected[id] = nil
         }
         laidOut[space] = Set(plan.frames.keys)
+        // Same windows as last pass: a scrolling column's windows moved
+        // because focus (or a swap) scrolled the view, so they slide too.
+        let scroll = previous == laidOut[space] ? plan.scrolling : []
         let anim = engine.config.animation
+        let animates = active && anim.enabled && !reduceMotion && anim.duration > 0 && !plan.monocle
+        // The previously focused window sliding off the newly focused one
+        // stays in front until its slide ends, uncovering the new window.
+        var revealing: (focus: WindowID, generation: UInt64)?
         for (id, frame) in plan.frames.sorted(by: { $0.key < $1.key }) {
             guard let element = elements[id], let w = engine.windows[id] else { continue }
             reassignedThisPass.insert(id)
             if lastRequested[id] == frame { continue }
+            let from = lastRequested[id]
             lastRequested[id] = frame
             expected[id] = frame
             inFlight[id, default: 0] += 1
-            // Strategy (a): only the focused window on an active Space interpolates.
-            let animate = active && anim.enabled && !reduceMotion && anim.duration > 0 && id == engine.focused && !plan.monocle
+            // Strategy (a): on an active Space, only the focused window and a
+            // scrolling stack's windows interpolate.
+            let animate = animates && (id == engine.focused || scroll.contains(id))
+            var reveal: (focus: WindowID, generation: UInt64)?
+            if animate, let pending = pendingFocus, pending.covering == id, let from,
+               let target = plan.frames[pending.id], Self.overlaps(from, target) {
+                reveal = (pending.id, pending.generation)
+                revealing = reveal
+                pendingFocus = nil
+            }
             let request = FrameApplier.Request(
                 window: id, pid: w.pid, element: element, target: frame,
                 animation: animate ? (anim.duration, anim.easing, frameInterval) : nil)
             applier.apply(request) { [weak self] id, requested, outcome in
-                self?.applied(id, requested: requested, outcome: outcome)
+                guard let self else { return }
+                applied(id, requested: requested, outcome: outcome)
+                if let reveal { finishReveal(reveal.focus, generation: reveal.generation, space: space, plan: plan) }
             }
         }
-        if active, !plan.behind.isEmpty {
+        if pendingFocus.map({ plan.frames[$0.id] != nil }) == true, let pending = pendingFocus {
+            // Focus landed on this Space without a slide to wait for.
+            pendingFocus = nil
+            bringForward(pending.id)
+        }
+        if revealing == nil, active { raiseDeck(plan) }
+    }
+
+    /// The deferred half of `focusWindow`, once the window covering the
+    /// newly focused one has slid away: skipped if focus has moved on since.
+    private func finishReveal(_ id: WindowID, generation: UInt64, space: SpaceID, plan: SpaceLayout) {
+        guard generation == focusGeneration, engine.focused == id else { return }
+        bringForward(id)
+        if engine.snapshot.isActive(space) { raiseDeck(plan) }
+    }
+
+    /// Puts a scrolling stack's windows back in their deck order.
+    private func raiseDeck(_ plan: SpaceLayout) {
+        if !plan.behind.isEmpty {
             // A window scrolled out of view can sit in front of the tile it
             // belongs behind: it had focus before the view scrolled, or its
             // app brought all of its windows forward.
             for tile in plan.tilesToRaise(frontToBack: Self.windowsFrontToBack()) { raiseWindow(tile) }
         }
-        if active, let raise = plan.raise { raiseWindow(raise) }
+        if let raise = plan.raise { raiseWindow(raise) }
+    }
+
+    private static func overlaps(_ a: CGRect, _ b: CGRect) -> Bool {
+        let common = a.intersection(b)
+        return !common.isNull && common.width > 0 && common.height > 0
     }
 
     private func raiseWindow(_ id: WindowID) {
@@ -878,21 +929,37 @@ final class WindowManager: AppObserverDelegate {
     }
 
     /// WM-initiated focus. Warps the cursor when focus crosses displays.
+    /// When focus scrolls a stack, the window comes forward (activation and
+    /// raise) once the previously focused window has slid off it.
     func focusWindow(_ id: WindowID, warp: Bool = true) {
         guard let element = elements[id], let w = engine.windows[id], !w.hidden else { return }
         let previousDisplay = engine.focused.flatMap(display(of:)) ?? displays.containing(currentMouseLocation())
-        NSRunningApplication(processIdentifier: w.pid)?.activate()
-        applier.perform(pid: w.pid) {
-            AX.setBool(element, kAXMainAttribute, true)
-            AX.raise(element)
+        let covering = engine.focused == id ? nil : engine.focused
+        focusGeneration &+= 1
+        let spaces = engine.focus(id)
+        if spaces.isEmpty {
+            pendingFocus = nil
+            bringForward(id)
+        } else {
+            pendingFocus = (id, covering, focusGeneration)
+            markDirty(spaces)
         }
-        markDirty(engine.focus(id))
         if holdDown { holdFocusFlash() }
         if warp, engine.config.cursorFollowsFocus, let target = display(of: id), target.uuid != previousDisplay?.uuid,
            let frame = expected[id] ?? AX.frame(element) {
             CGWarpMouseCursorPosition(frame.center)
         }
         refreshSurfaces()
+    }
+
+    /// Activates `id`'s app and makes `id` its frontmost, main window.
+    private func bringForward(_ id: WindowID) {
+        guard let element = elements[id], let w = engine.windows[id], !w.hidden else { return }
+        NSRunningApplication(processIdentifier: w.pid)?.activate()
+        applier.perform(pid: w.pid) {
+            AX.setBool(element, kAXMainAttribute, true)
+            AX.raise(element)
+        }
     }
 
     /// Hit-tests on a background queue (a beachballing app under the cursor

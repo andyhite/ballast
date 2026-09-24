@@ -12,7 +12,7 @@ final class FrameApplier {
         let pid: pid_t
         let element: AXUIElement
         let target: CGRect
-        /// Interpolate from the current frame (focused window on the active Space only).
+        /// Interpolate from the current frame (active Space only; see design doc §5).
         let animation: (duration: Double, easing: Easing, frameInterval: Double)?
     }
 

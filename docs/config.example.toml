@@ -21,7 +21,8 @@ cursor_follows_focus = true
 enabled = true
 duration_ms = 180                  # 0…2000
 easing = "ease_out_cubic"          # linear | ease_out_cubic | ease_in_out_cubic | ease_out_quint
-# Only the focused window interpolates; every other window snaps (design doc §5).
+# Only the focused window and a scrolling stack's windows interpolate; every
+# other window snaps (design doc §5).
 # "Reduce motion" in Accessibility settings always wins: no interpolation.
 
 # A border that marks the focused window. A Ballast command that moves focus
