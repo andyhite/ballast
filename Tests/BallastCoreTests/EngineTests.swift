@@ -331,6 +331,24 @@ struct EngineTests {
         #expect(outcome2.focus == 2)
     }
 
+    @Test(".focusMaster jumps to the master from the stack, then back to the window it came from")
+    func focusMasterToggles() {
+        var engine = Self.makeEngine()
+        for id in 1...3 as ClosedRange<WindowID> {
+            _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
+        }
+        let order = engine.spacesForTesting[1]!.liveOrder
+        let master = order[0], older = order[1], previous = order[2]
+        _ = engine.focus(older)
+        _ = engine.focus(previous)
+
+        #expect(engine.perform(.focusMaster, space: 1, area: Self.area).focus == master)
+        _ = engine.focus(master)
+
+        // Back to the stack window that had focus, not merely any other tile.
+        #expect(engine.perform(.focusMaster, space: 1, area: Self.area).focus == previous)
+    }
+
     @Test("hadFocus: fallback is computed even when focus already moved elsewhere, preferring the entry older than the closed window")
     func hadFocusFallbackPrefersOlderEntry() {
         var engine = Self.makeEngine()

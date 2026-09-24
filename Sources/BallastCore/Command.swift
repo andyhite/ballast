@@ -34,6 +34,9 @@ public enum Command: Equatable, Sendable {
     case focus(Direction)
     case swap(Direction)
     case focusLast
+    /// Focus the master (first tile); from the master, return to the window
+    /// focused before it.
+    case focusMaster
     case promote
     case reset
     case layout(LayoutChange)
@@ -50,7 +53,7 @@ public enum Command: Equatable, Sendable {
     case dumpState
 
     public static let reference: [String] = [
-        "focus left|right|up|down", "focus-last", "swap left|right|up|down",
+        "focus left|right|up|down", "focus-last", "focus-master", "swap left|right|up|down",
         "promote", "reset", "layout master_stack|bsp|float|next|prev|default", "monocle", "float",
         "grow [amount]", "shrink [amount]", "master-ratio <+/-delta>", "master-count <+/-delta>",
         "balance", "send-to-display next|prev", "focus-display next|prev", "reload", "dump-state",
@@ -94,8 +97,10 @@ public enum Command: Equatable, Sendable {
         switch verb {
         case "focus":
             if arg == "last", args.count == 1 { return .success(.focusLast) }
+            if arg == "master", args.count == 1 { return .success(.focusMaster) }
             return direction().map(Command.focus)
         case "focus-last": return noArgs(.focusLast)
+        case "focus-master": return noArgs(.focusMaster)
         case "swap", "move": return direction().map(Command.swap)
         case "promote": return noArgs(.promote)
         case "reset": return noArgs(.reset)

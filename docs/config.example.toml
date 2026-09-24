@@ -119,6 +119,7 @@ placement = { x = 0.74, y = 0.72, w = 0.25, h = 0.25 }
 "alt+shift+l" = "swap right"
 "alt+tab" = "focus-last"
 "alt+return" = "promote"
+"ctrl+return" = "focus-master"
 "alt+r" = "reset"
 "alt+space" = "layout next"
 "alt+m" = "monocle"

@@ -399,13 +399,21 @@ public struct Engine: Sendable {
         case .focusLast:
             guard let current = focusedHere ?? spaces[space]?.focus.mostRecent else { return out }
             out.focus = spaces[space]?.focus.fallback(excluding: current) { eligibleForFocus($0, on: space) }
+        case .focusMaster:
+            guard mode(for: space) != .float else { out.message = "no master in float layout"; return out }
+            guard let state = spaces[space], let master = tileOrder(state).first else { return out }
+            // Toggle: from the master, go back to the window that had focus
+            // right before it (recorded predecessor in the focus history).
+            out.focus = focusedHere == master
+                ? state.focus.fallback(excluding: master) { eligibleForFocus($0, on: space) }
+                : master
         case .promote:
             guard let f = focusedHere, let state = spaces[space], state.members.contains(f) else {
                 out.message = "focused window is not tiled"
                 return out
             }
-            let head = mode(for: space) == .bsp ? state.tree?.leaves.first : state.liveOrder.first
-            let target = head == f ? (mode(for: space) == .bsp ? state.tree?.leaves.dropFirst().first : state.liveOrder.dropFirst().first) : head
+            let order = tileOrder(state)
+            let target = order.first == f ? order.dropFirst().first : order.first
             if let target, swap(f, target, on: space) { out.dirty = [space] }
         case .reset:
             reset(space)
@@ -551,6 +559,11 @@ public struct Engine: Sendable {
         }
     }
 
+    /// Tiles on a Space in layout order; the head is the master.
+    private func tileOrder(_ state: SpaceState) -> [WindowID] {
+        mode(for: state.id) == .bsp ? (state.tree?.leaves ?? []) : state.liveOrder
+    }
+
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
         guard let w = windows[id] else { return false }
         return w.space == space && w.isManaged && !w.minimized && !w.hidden
@@ -667,7 +680,7 @@ public struct Engine: Sendable {
     /// Spaces cycle through the live order instead.
     private func neighbor(of from: WindowID?, _ direction: Direction, space: SpaceID, area: CGRect?) -> WindowID? {
         guard let state = spaces[space] else { return nil }
-        let order = mode(for: space) == .bsp ? (state.tree?.leaves ?? []) : state.liveOrder
+        let order = tileOrder(state)
         guard let from, state.members.contains(from) else { return order.first }
         if state.monocle {
             guard let i = order.firstIndex(of: from), !order.isEmpty else { return nil }

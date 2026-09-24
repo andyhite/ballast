@@ -117,7 +117,7 @@ struct EngineFuzzTests {
     static func randomCommand(_ rng: inout SplitMix64) -> Command {
         let direction = [Direction.left, .right, .up, .down].randomElement(using: &rng)!
         let cycle: Cycle = Bool.random(using: &rng) ? .next : .prev
-        switch rng.next() % 14 {
+        switch rng.next() % 15 {
         case 0: return .focus(direction)
         case 1: return .swap(direction)
         case 2: return .focusLast
@@ -131,6 +131,7 @@ struct EngineFuzzTests {
         case 10: return .masterCount(Int(rng.next() % 7) - 3)
         case 11: return .balance
         case 12: return .sendToDisplay(cycle)
+        case 13: return .focusMaster
         default: return .focusDisplay(cycle)
         }
     }
