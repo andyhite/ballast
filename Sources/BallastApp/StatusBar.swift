@@ -141,8 +141,6 @@ final class StatusBar: NSObject, NSMenuDelegate {
         if current == .bsp {
             menu.addItem(bspArrangementItem(scope: scope, baseline: baseline, effective: effective, isInherited: overrides?.bspShape == nil, enabled: enabled))
             menu.addItem(splitDirectionItem(scope: scope, baseline: baseline, effective: effective, override: overrides?.split, enabled: enabled))
-            menu.addItem(weightShareLimitItem(scope: scope, baseline: baseline, effective: effective,
-                isInherited: overrides?.bspMaxRatio == nil && overrides?.bspMinRatio == nil, enabled: enabled))
         } else if current == .masterStack {
             let ratioOverridden = overrides?.masterRatio != nil || engine.spaces[space]?.masterRatioOverride != nil
             let countOverridden = overrides?.masterCount != nil || engine.spaces[space]?.masterCountOverride != nil
@@ -151,6 +149,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(masterSizeItem(scope: scope, baseline: baseline, current: ratioValue, isInherited: !ratioOverridden, enabled: enabled))
             menu.addItem(masterCountItem(scope: scope, baseline: baseline, current: countValue, isInherited: !countOverridden, enabled: enabled))
             menu.addItem(stackSideItem(scope: scope, baseline: baseline, effective: effective, isInherited: overrides?.stackSide == nil, enabled: enabled))
+        }
+        if current != .float {
+            menu.addItem(weightShareLimitItem(scope: scope, baseline: baseline, effective: effective,
+                isInherited: overrides?.bspMaxRatio == nil && overrides?.bspMinRatio == nil, enabled: enabled))
         }
         menu.addItem(gapItem(scope: scope, title: "Inner Gap", isOuter: false, current: effective.gaps.inner, baseline: baseline, editorSnapshot: nil, enabled: enabled))
         menu.addItem(gapItem(scope: scope, title: "Outer Gap", isOuter: true, current: effective.gaps.outer, baseline: baseline, editorSnapshot: nil, enabled: enabled))
@@ -196,10 +198,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
             isInherited: !isKeySet(editorSnapshot, "bsp_shape", in: .layout), enabled: enabled))
         menu.addItem(splitDirectionItem(scope: scope, baseline: LayoutSettings(), effective: layout,
             override: isKeySet(editorSnapshot, "split", in: .layout) ? .some(layout.split) : nil, enabled: enabled))
+        menu.addItem(.separator())
         menu.addItem(weightShareLimitItem(scope: scope, baseline: LayoutSettings(), effective: layout,
             isInherited: !isKeySet(editorSnapshot, "bsp_max_ratio", in: .layout) && !isKeySet(editorSnapshot, "bsp_min_ratio", in: .layout),
             enabled: enabled))
-        menu.addItem(.separator())
         menu.addItem(gapItem(scope: scope, title: "Inner Gap", isOuter: false, current: layout.gaps.inner, baseline: LayoutSettings(), editorSnapshot: editorSnapshot, enabled: enabled))
         menu.addItem(gapItem(scope: scope, title: "Outer Gap", isOuter: true, current: layout.gaps.outer, baseline: LayoutSettings(), editorSnapshot: editorSnapshot, enabled: enabled))
         top.submenu = menu

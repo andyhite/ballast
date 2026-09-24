@@ -118,7 +118,11 @@ struct LayoutPane: View {
                     }
                     .labelsHidden()
                 }
-                bspShareRow
+            }
+            .disabled(editingDisabled)
+
+            Section("Weights") {
+                weightShareRow
             }
             .disabled(editingDisabled)
 
@@ -196,7 +200,7 @@ struct LayoutPane: View {
         }
     }
 
-    private var bspShareRow: some View {
+    private var weightShareRow: some View {
         let inherited = overrides?.bspMinRatio == nil && overrides?.bspMaxRatio == nil
         let symmetric = abs(effective.bspMinRatio - (1 - effective.bspMaxRatio)) < 0.001
         return fieldRow("Weight Share Limit", inherited: inherited) {
@@ -204,7 +208,7 @@ struct LayoutPane: View {
                 CommitSlider(
                     title: "", liveValue: effective.bspMaxRatio, range: 0.5...0.95, step: 0.05,
                     format: { "\(Int(($0 * 100).rounded()))% / \(Int(((1 - $0) * 100).rounded()))%" },
-                    commit: { commitBSPShare(max: $0) }
+                    commit: { commitWeightShare(max: $0) }
                 )
             } else {
                 HStack {
@@ -212,7 +216,7 @@ struct LayoutPane: View {
                         .foregroundStyle(.secondary)
                     Slider(value: Binding(
                         get: { effective.bspMaxRatio },
-                        set: { commitBSPShare(max: $0) }
+                        set: { commitWeightShare(max: $0) }
                     ), in: 0.5...0.95, step: 0.05)
                 }
             }
@@ -303,7 +307,7 @@ struct LayoutPane: View {
         }
     }
 
-    private func commitBSPShare(max: Double) {
+    private func commitWeightShare(max: Double) {
         let min = 1 - max
         commitDesktopField("bsp_min_ratio", .float(min))
         commitDesktopField("bsp_max_ratio", .float(max))

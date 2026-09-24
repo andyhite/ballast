@@ -18,7 +18,8 @@ each **(display, Space)** pair using that pair's layout mode.
 - **Per-desktop layouts.** Each desktop on each display has its own mode:
   `master_stack`, `bsp`, or `float`, where Ballast leaves the desktop alone.
 - **Weighted windows.** Rules give apps a weight. Heavier windows take the master
-  slot, or a larger BSP share, the moment they open.
+  slot and get more room, a taller stack slot or a bigger BSP tile, the moment
+  they open.
 - **Your arrangement stays put.** Once you swap, promote, or resize by hand,
   Ballast keeps that arrangement until you `reset`. Config reloads never undo it.
 - **Settings are saved automatically.** The menu bar, the Settings window, and
@@ -88,6 +89,10 @@ something needs your attention; open the menu to see what.
 From the menu you can change the current desktop's layout, edit the rule for
 the focused app, and open **Preferences…** (`⌘,`). Preferences has four tabs:
 General, Layout, Rules, and Keyboard. The Keyboard tab records hotkeys.
+
+Drag a window onto another tile to swap the two, or onto another display to
+move it there. While you drag, a highlight marks the window you'd swap with,
+or where the window will land on the other display.
 
 ### Configuration
 

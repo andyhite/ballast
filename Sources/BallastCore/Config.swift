@@ -38,12 +38,23 @@ public struct LayoutSettings: Equatable, Sendable {
     public var split: Axis?
     /// Shape of the weight-default BSP tree.
     public var bspShape = BSPShape.dwindle
-    /// BSP weight-ratio clamp.
+    /// Weight Share Limit, for both layouts. BSP clamps each split's first
+    /// share to `[bspMinRatio, bspMaxRatio]`; master-stack applies the same
+    /// band as `maxWeightRatio`.
     public var bspMinRatio = 0.25
     public var bspMaxRatio = 0.75
     public var gaps = Gaps(inner: 8, outer: 8)
 
     public init() {}
+
+    /// The Weight Share Limit as a master-stack factor: no window's weight
+    /// counts for more than this many times the lightest in its region, so two
+    /// windows split a region at most 75/25 by default, like the two sides of
+    /// a BSP split.
+    public var maxWeightRatio: Double {
+        let lo = min(bspMinRatio, bspMaxRatio), hi = max(bspMinRatio, bspMaxRatio)
+        return lo > 0 ? hi / lo : .infinity
+    }
 }
 
 /// Per-(display, space) partial override of `LayoutSettings`.

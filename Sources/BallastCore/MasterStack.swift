@@ -11,11 +11,14 @@ public enum StackSide: String, CaseIterable, Equatable, Sendable {
 }
 
 public enum MasterStackLayout {
-    /// `order[0..<masterCount]` are masters, the rest is the stack. Masters and
-    /// stack windows each share their region evenly (honouring learned
-    /// minimum sizes); an empty stack lets masters fill the whole area.
+    /// `order[0..<masterCount]` are masters, the rest is the stack. Masters
+    /// share the master region, and stack windows the stack, in proportion to
+    /// `weight`, no weight counting for more than `maxWeightRatio` times the
+    /// lightest in its region; learned minimum sizes come first. An empty
+    /// stack lets masters fill the whole area.
     public static func frames(order: [WindowID], in rect: CGRect, masterCount: Int, ratio: Double,
                               side: StackSide, gap: Double,
+                              weight: (WindowID) -> Double = { _ in 1 }, maxWeightRatio: Double = .infinity,
                               minSize: (WindowID) -> CGSize = { _ in .zero }) -> [WindowID: CGRect] {
         guard !order.isEmpty else { return [:] }
         let count = min(max(masterCount, 1), order.count)
@@ -23,7 +26,7 @@ public enum MasterStackLayout {
         let stack = Array(order.dropFirst(count))
         let cross = side.primaryAxis.other
         if stack.isEmpty {
-            return tileLinear(masters, in: rect, axis: cross, gap: gap, minSize: minSize)
+            return tileLinear(masters, in: rect, axis: cross, gap: gap, weight: weight, maxWeightRatio: maxWeightRatio, minSize: minSize)
         }
 
         let axis = side.primaryAxis
@@ -44,8 +47,10 @@ public enum MasterStackLayout {
         } else {
             (stackRect, masterRect) = rect.split(axis, firstLength: available - masterLength, gap: gap)
         }
-        var frames = tileLinear(masters, in: masterRect, axis: cross, gap: gap, minSize: minSize)
-        frames.merge(tileLinear(stack, in: stackRect, axis: cross, gap: gap, minSize: minSize)) { a, _ in a }
+        var frames = tileLinear(masters, in: masterRect, axis: cross, gap: gap, weight: weight,
+                                maxWeightRatio: maxWeightRatio, minSize: minSize)
+        frames.merge(tileLinear(stack, in: stackRect, axis: cross, gap: gap, weight: weight,
+                                maxWeightRatio: maxWeightRatio, minSize: minSize)) { a, _ in a }
         return frames
     }
 }

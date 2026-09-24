@@ -95,16 +95,14 @@ struct DisplayInfo: Equatable {
     static func current() -> [DisplayInfo] {
         guard let primary = NSScreen.screens.first else { return [] }
         let primaryHeight = primary.frame.height
-        func flip(_ r: NSRect) -> CGRect {
-            CGRect(x: r.minX, y: primaryHeight - r.maxY, width: r.width, height: r.height)
-        }
         return NSScreen.screens.compactMap { screen in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             let id = CGDirectDisplayID(number.uint32Value)
             guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
                   let uuid = CFUUIDCreateString(nil, cfUUID) as String? else { return nil }
             return DisplayInfo(id: id, uuid: uuid.uppercased(), name: screen.localizedName,
-                               frame: flip(screen.frame), visibleFrame: flip(screen.visibleFrame))
+                               frame: screen.frame.flipped(primaryHeight: primaryHeight),
+                               visibleFrame: screen.visibleFrame.flipped(primaryHeight: primaryHeight))
         }
         .sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
     }
@@ -126,6 +124,14 @@ extension Array where Element == DisplayInfo {
     }
 
     func with(uuid: String) -> DisplayInfo? { first { $0.uuid == uuid.uppercased() } }
+}
+
+extension CGRect {
+    /// Converts between AX/CG global coordinates (top-left origin) and AppKit
+    /// screen coordinates (bottom-left origin); the flip is its own inverse.
+    func flipped(primaryHeight: CGFloat) -> CGRect {
+        CGRect(x: minX, y: primaryHeight - maxY, width: width, height: height)
+    }
 }
 
 func currentMouseLocation() -> CGPoint {

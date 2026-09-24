@@ -64,11 +64,14 @@ extension CGRect {
     public var center: CGPoint { CGPoint(x: midX, y: midY) }
 }
 
-/// Divides `total` points into `count` segments separated by `gap`, each at
-/// least its minimum when feasible. Segments beyond the minimums are shared
-/// equally. Infeasible minimums degrade to proportional-to-minimum sizing.
-/// Total function: any input yields `count` finite, non-negative lengths.
-func distribute(total: Double, mins: [Double], gap: Double) -> [Double] {
+/// Divides `total` points into one segment per entry of `mins`, separated by
+/// `gap`. Each segment gets at least its minimum when feasible; the rest is
+/// shared in proportion to `weights`, no weight counting for more than
+/// `maxWeightRatio` times the lightest (a non-finite or non-positive weight
+/// counts as 0; segments with no weight among them share equally).
+/// Infeasible minimums degrade to proportional-to-minimum sizing.
+/// Total function: any input yields `mins.count` finite, non-negative lengths.
+func distribute(total: Double, mins: [Double], weights: [Double], maxWeightRatio: Double, gap: Double) -> [Double] {
     let count = mins.count
     guard count > 0 else { return [] }
     let available = max(0, total - gap * Double(count - 1))
@@ -78,32 +81,47 @@ func distribute(total: Double, mins: [Double], gap: Double) -> [Double] {
         guard minSum > 0 else { return Array(repeating: available / Double(count), count: count) }
         return safeMins.map { available * $0 / minSum }
     }
-    // Water-filling: equal shares, raising any segment below its minimum.
-    var sizes = Array(repeating: 0.0, count: count)
-    var fixed = Array(repeating: false, count: count)
-    var remaining = available
-    var free = count
-    var changed = true
-    while changed && free > 0 {
-        changed = false
-        let share = remaining / Double(free)
-        for i in 0..<count where !fixed[i] && safeMins[i] > share {
-            fixed[i] = true
-            sizes[i] = safeMins[i]
-            remaining -= safeMins[i]
-            free -= 1
-            changed = true
-        }
+    var safeWeights = (0..<count).map { i -> Double in
+        let w = i < weights.count ? weights[i] : 0
+        return w.isFinite && w > 0 ? w : 0
     }
-    let share = free > 0 ? max(0, remaining) / Double(free) : 0
-    for i in 0..<count where !fixed[i] { sizes[i] = share }
-    return sizes
+    // Weight Share Limit: capping at a multiple of the lightest weight keeps
+    // the lighter windows' proportions and only reins in the heavy ones.
+    if maxWeightRatio.isFinite, let lightest = safeWeights.filter({ $0 > 0 }).min() {
+        let cap = lightest * max(1, maxWeightRatio)
+        safeWeights = safeWeights.map { min($0, cap) }
+    }
+    // Weighted water-filling: a segment whose share falls below its minimum
+    // is fixed at that minimum, and the others re-share what is left. Fixing
+    // segments only lowers everyone else's share, so each round fixes every
+    // segment that is short; the loop ends within `count` rounds.
+    var lengths = safeMins
+    var free = Array(0..<count)
+    var remaining = available
+    while !free.isEmpty {
+        let freeWeight = free.reduce(0) { $0 + safeWeights[$1] }
+        let shares = free.map { i in
+            freeWeight > 0 ? remaining * (safeWeights[i] / freeWeight) : remaining / Double(free.count)
+        }
+        let short = zip(free, shares).filter { safeMins[$0.0] > $0.1 }.map(\.0)
+        if short.isEmpty {
+            for (i, share) in zip(free, shares) { lengths[i] = share }
+            break
+        }
+        for i in short { remaining -= safeMins[i] }
+        free.removeAll { short.contains($0) }
+    }
+    return lengths
 }
 
-/// Lays `ids` out in a row/column filling `rect`, honouring learned minimum sizes.
+/// Lays `ids` out in a row/column filling `rect`, honouring learned minimum
+/// sizes and sharing the rest in proportion to weight, capped at
+/// `maxWeightRatio` times the lightest.
 func tileLinear(_ ids: [WindowID], in rect: CGRect, axis: Axis, gap: Double,
+                weight: (WindowID) -> Double, maxWeightRatio: Double,
                 minSize: (WindowID) -> CGSize) -> [WindowID: CGRect] {
-    let lengths = distribute(total: rect.extent(axis), mins: ids.map { minSize($0).extent(axis) }, gap: gap)
+    let lengths = distribute(total: rect.extent(axis), mins: ids.map { minSize($0).extent(axis) },
+                             weights: ids.map(weight), maxWeightRatio: maxWeightRatio, gap: gap)
     var frames: [WindowID: CGRect] = [:]
     var cursor = rect.start(axis)
     for (id, length) in zip(ids, lengths) {

@@ -53,6 +53,14 @@ final class WindowManager: AppObserverDelegate {
     private var pendingChecks = Set<WindowID>()
     /// Windows the user is dragging (mouse was down when they moved).
     private var dragCandidates = Set<WindowID>()
+    /// Where the button was released for each candidate awaiting its AX read:
+    /// the drop resolves there, not wherever the cursor has moved since.
+    private var dropPoints: [WindowID: CGPoint] = [:]
+    /// Candidates with a `probeDrag` read in flight.
+    private var dragProbes = Set<WindowID>()
+    /// The confirmed drag while the button is down; drives `dropPreview`.
+    private var drag: DragSession?
+    private let dropPreview = DropPreview()
     private var snapBackTimes: [WindowID: [Date]] = [:]
     /// Dock "Assign To Desktop" bindings, captured when an app launches.
     private var launchBindings: [pid_t: SpaceID] = [:]
@@ -243,10 +251,17 @@ final class WindowManager: AppObserverDelegate {
 
     private func observeMouse() {
         if let up = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] _ in
-            guard let self, !dragCandidates.isEmpty else { return }
+            guard let self else { return }
+            endDrag()
+            guard !dragCandidates.isEmpty else { return }
+            let point = currentMouseLocation()
+            for id in dragCandidates { dropPoints[id] = point }
             pendingChecks.formUnion(dragCandidates)
             scheduleLayout()
         }) { eventMonitors.append(up) }
+        if let dragged = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged, handler: { [weak self] _ in
+            self?.updateDropPreview()
+        }) { eventMonitors.append(dragged) }
         if let moved = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in
             self?.focusFollowsMouse()
         }) { eventMonitors.append(moved) }
@@ -386,6 +401,8 @@ final class WindowManager: AppObserverDelegate {
         inFlight[id] = nil
         pendingChecks.remove(id)
         dragCandidates.remove(id)
+        dropPoints[id] = nil
+        if drag?.window == id { endDrag() }
         snapBackTimes[id] = nil
         applier.cancel(id)
         applier.forget(window: id)
@@ -528,6 +545,8 @@ final class WindowManager: AppObserverDelegate {
         // same-pass departure cleanup erase it, regardless of processing order.
         var reassignedThisPass = Set<WindowID>()
         for space in spaces.sorted() { layout(space, reassignedThisPass: &reassignedThisPass) }
+        // A layout change mid-drag (a window opened or closed) moves the landing frame.
+        if !spaces.isEmpty { updateDropPreview(force: true) }
         statusBar?.refresh()
     }
 
@@ -597,9 +616,12 @@ final class WindowManager: AppObserverDelegate {
             pendingChecks.remove(id)
             if mouseDown {
                 dragCandidates.insert(id) // resolved on mouse-up
+                dropPoints[id] = nil // a new press supersedes an unresolved release
+                probeDrag(id)
                 continue
             }
             let dragged = dragCandidates.remove(id) != nil
+            let dropPoint = dropPoints.removeValue(forKey: id)
             guard let element = elements[id], let pid = engine.windows[id]?.pid else { continue }
             applier.perform(pid: pid) { [weak self] in
                 let current = AX.frame(element)
@@ -607,7 +629,7 @@ final class WindowManager: AppObserverDelegate {
                     guard let self, let want = self.expected[id], let current,
                           !current.approximatelyEquals(want) else { return }
                     if dragged {
-                        self.userDragged(id, to: current, from: want)
+                        self.userDragged(id, to: current, from: want, at: dropPoint ?? currentMouseLocation())
                     } else {
                         self.selfMoved(id, to: current)
                     }
@@ -617,24 +639,20 @@ final class WindowManager: AppObserverDelegate {
     }
 
     /// A user drag between tiles is always a swap intent (or a display move).
-    private func userDragged(_ id: WindowID, to current: CGRect, from want: CGRect) {
-        let resized = abs(current.width - want.width) > 2 || abs(current.height - want.height) > 2
-        guard !resized, let space = engine.windows[id]?.space else {
+    private func userDragged(_ id: WindowID, to current: CGRect, from want: CGRect, at point: CGPoint) {
+        guard !Self.isResize(current, from: want), let space = engine.windows[id]?.space else {
             selfMoved(id, to: current)
             return
         }
-        let mouse = currentMouseLocation()
-        if let key = engine.snapshot.key(for: space), let target = displays.containing(mouse), target.uuid != key.display {
+        switch dropTarget(for: id, at: point) {
+        case .display?:
             // Dropped on another display: macOS reassigns the Space natively.
             let newSpace = resolveSpace(for: id, pid: engine.windows[id]?.pid ?? 0, element: elements[id])
             markDirty(engine.setSpace(id, newSpace))
-            reapply(id)
-            return
-        }
-        let members = engine.spaces[space]?.members ?? []
-        if let target = members.first(where: { $0 != id && (expected[$0]?.contains(mouse) ?? false) }),
-           engine.swap(id, target, on: space) {
-            reapply(target)
+        case .swap(let target)?:
+            if engine.swap(id, target, on: space) { reapply(target) }
+        case nil:
+            break
         }
         reapply(id)
     }
@@ -666,6 +684,97 @@ final class WindowManager: AppObserverDelegate {
     private func reapply(_ id: WindowID) {
         lastRequested[id] = nil
         if let space = engine.windows[id]?.space { markDirty([space]) }
+    }
+
+    // MARK: Drag preview
+
+    /// What releasing a dragged tile does. The drop and its live preview both
+    /// come from `dropTarget(for:at:)`, so they cannot disagree.
+    private enum DropTarget: Equatable {
+        case swap(WindowID)
+        case display(DisplayInfo)
+    }
+
+    /// The tile being dragged (confirmed by `probeDrag`) and its current target.
+    private struct DragSession {
+        let window: WindowID
+        var target: DropTarget?
+    }
+
+    /// Where releasing dragged window `id` at `point` sends it; nil snaps it back.
+    private func dropTarget(for id: WindowID, at point: CGPoint) -> DropTarget? {
+        guard let space = engine.windows[id]?.space else { return nil }
+        if let key = engine.snapshot.key(for: space), let display = displays.containing(point), display.uuid != key.display {
+            return .display(display)
+        }
+        let members = engine.spaces[space]?.members ?? []
+        return members.first { $0 != id && (expected[$0]?.contains(point) ?? false) }.map(DropTarget.swap)
+    }
+
+    /// The frame changed size, not just position: a resize, never a drag between tiles.
+    private static func isResize(_ current: CGRect, from want: CGRect) -> Bool {
+        abs(current.width - want.width) > 2 || abs(current.height - want.height) > 2
+    }
+
+    /// A tile moved while the button was down. One AX read tells a drag
+    /// (moved, same size) from a resize or a frame Ballast just applied; only
+    /// a drag starts the preview. At most one read per window is in flight.
+    private func probeDrag(_ id: WindowID) {
+        guard drag == nil, !dragProbes.contains(id), let element = elements[id],
+              let pid = engine.windows[id]?.pid else { return }
+        dragProbes.insert(id)
+        applier.perform(pid: pid) { [weak self] in
+            let current = AX.frame(element)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.dragProbes.remove(id)
+                guard self.drag == nil, self.dragCandidates.contains(id), NSEvent.pressedMouseButtons & 1 != 0,
+                      let current, let want = self.expected[id], !current.approximatelyEquals(want),
+                      !Self.isResize(current, from: want) else { return }
+                self.drag = DragSession(window: id)
+                self.updateDropPreview()
+            }
+        }
+    }
+
+    /// Highlights what releasing now would hit. Runs on every mouse-dragged
+    /// event, so the zone is recomputed only when the target changes, or on
+    /// `force` after a pass that may have moved the tiles.
+    private func updateDropPreview(force: Bool = false) {
+        guard let session = drag else { return }
+        guard NSEvent.pressedMouseButtons & 1 != 0 else { endDrag(); return } // mouse-up missed
+        let target = dropTarget(for: session.window, at: currentMouseLocation())
+        guard force || target != session.target else { return }
+        drag?.target = target
+        if let target, let frame = dropZone(of: session.window, on: target) {
+            dropPreview.show(frame, below: session.window)
+        } else {
+            dropPreview.hide()
+        }
+    }
+
+    private func endDrag() {
+        guard drag != nil else { return }
+        drag = nil
+        dropPreview.hide()
+    }
+
+    /// The zone for dropping `id` on `target`. A swap highlights the window it
+    /// would trade places with: exactly the area that selects it. (The dragged
+    /// window can land a different size, since minimum sizes and weights
+    /// travel with it.) Another display has no such window, so the zone is the
+    /// tile `id` gets there, from running the move on a copy of the engine.
+    private func dropZone(of id: WindowID, on target: DropTarget) -> CGRect? {
+        switch target {
+        case .swap(let other):
+            return expected[other]
+        case .display(let display):
+            var sim = engine
+            guard let space = sim.snapshot.activeSpace(ofDisplay: display.uuid) else { return nil }
+            _ = sim.setSpace(id, space)
+            guard let key = sim.snapshot.key(for: space), let area = displays.with(uuid: key.display)?.visibleFrame else { return nil }
+            return sim.layout(space: space, area: area).frames[id]
+        }
     }
 
     // MARK: Focus

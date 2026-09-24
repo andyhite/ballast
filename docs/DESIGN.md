@@ -241,10 +241,20 @@ It is a pure function of `(windows, weights, focus history, creation order)`.
 
 - **Master-stack**: masters are `liveOrder.prefix(masterCount)`. When the
   Space isn't manual, a weight-10 window launching next to a weight-1 master
-  takes the master slot on the same layout pass.
+  takes the master slot on the same layout pass. `master_ratio` divides the
+  area between the master region and the stack; inside each region, windows
+  share its length in proportion to weight (a weight-2 stack window is twice
+  as tall as a weight-1 one). The Weight Share Limit applies per region: no
+  weight counts for more than `bsp_max_ratio / bsp_min_ratio` times the
+  lightest (3× by default), so two windows split a region at most 75/25,
+  like the two sides of a BSP split. Capping relative to the lightest keeps
+  the lighter windows' proportions (10:2:1 counts as 3:2:1). A window whose
+  share is below its learned AX minimum size gets that minimum, and the
+  others re-share the rest by weight.
 - **BSP**: each split's ratio is `sum(first subtree weights) / sum(both)`,
-  clamped to `[bsp_min_ratio, bsp_max_ratio]`. A manual ratio wins. Learned
-  AX minimum sizes are honored on top of this (see §4).
+  clamped to `[bsp_min_ratio, bsp_max_ratio]` (the Weight Share Limit). A
+  manual ratio wins. Learned AX minimum sizes are honored on top of this
+  (see §4).
   Grow/shrink uses the configured BSP ratio bounds; master-stack uses the
   same ratio bounds as configuration validation, so neither command reverses
   direction at a valid starting ratio.
@@ -366,7 +376,21 @@ tracks.
   - If the mouse is down, it is a user drag and waits for mouse-up. If the
     window was dropped over another tile it becomes a **swap**. If it was
     dropped on another display, the window moves there. Otherwise it snaps
-    back.
+    back. The drop resolves where the button was released, not wherever the
+    cursor is once the app's AX read returns.
+  - While the button is down, one AX read per drag tells a move (new
+    position, same size) from a resize or a frame Ballast just applied. A
+    move shows the **drop preview**: a click-through, accent-tinted overlay
+    updated on `leftMouseDragged`. Over a tile it covers the window the drop
+    would swap with, exactly the area that selects that swap. The dragged
+    window can still land a different size there, because learned minimum
+    sizes and weights travel with it. Over another display it covers the
+    tile the window would get there, from running the move on a copy of the
+    engine. The preview and the drop share one hit test. The overlay is
+    Ballast's own normal-level AppKit window, ordered directly below the
+    dragged one (`order(.below, relativeTo:)`), so it tints the tiles
+    underneath while the window in hand stays on top: public API, no window
+    capture.
   - Otherwise the rule's `on_self_move` applies. `snap_back` re-applies the
     frame. `adopt` records the window's own frame as a manual override for
     that Space.
@@ -414,7 +438,7 @@ uses it.
 - config validation
 - weight resolution and tiebreaks
 - BSP subtree-weight ratios and clamping
-- master-stack geometry
+- master-stack geometry and weighted shares
 - engine behavior:
   - continuous weight-driven master
   - manual override persistence and reset

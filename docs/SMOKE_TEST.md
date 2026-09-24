@@ -74,8 +74,23 @@ The script ends with `N passed, 0 failed`.
 - **Reset:** promote a window to master (`ballast send promote`), open a
   heavier app (it must *not* take the master slot, because the Space is
   manual), then run `ballast send reset`. The heavy app becomes master.
+- **Weighted stack:** on a `master_stack` Space that isn't manual (run
+  `ballast send reset`), with a heavier master such as Ghostty at weight 10
+  and three weight-1 stack windows, focus a stack window and pick
+  **Focused App: …** → **Weight** → **2** in the menu. It moves to the top
+  of the stack and becomes twice as tall as each of the other two. Pick
+  **5** instead and it stops at three times their height, the default
+  Weight Share Limit (Max 75%). Set it back to **1 (default)** and the
+  stack evens out.
 - **Close fallback:** focus A, then B, then C on one Space and close C.
   Focus returns to B, not to whatever AppKit picks.
 - **Display move:** `ballast send send-to-display next` moves the focused
   window to the other display, the cursor follows it, and the window is tiled
   there.
+- **Drag preview:** drag a tile by its title bar over another tile. A
+  translucent accent-colored zone exactly covers the window you'd swap
+  with, under the dragged window (which stays untinted), and follows the
+  cursor from tile to tile; over a gap or the window's own tile it
+  disappears, and over the other display it shows the tile the window would
+  get there. Release: the two windows trade places. Dragging a tile's edge
+  (a resize) shows no zone.

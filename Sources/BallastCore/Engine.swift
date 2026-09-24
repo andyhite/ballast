@@ -162,6 +162,7 @@ public struct Engine: Sendable {
         let s = settings(for: space)
         let inner = area.insetClamped(by: s.gaps.outer)
         let minSize: (WindowID) -> CGSize = { windows[$0]?.minSize ?? .zero }
+        let weight: (WindowID) -> Double = { windows[$0]?.rule.weight ?? 1 }
         var frames: [WindowID: CGRect]
         var raise: WindowID?
         if state.monocle {
@@ -182,7 +183,7 @@ public struct Engine: Sendable {
                 order: state.liveOrder, in: inner,
                 masterCount: state.masterCountOverride ?? s.masterCount,
                 ratio: state.masterRatioOverride ?? s.masterRatio,
-                side: s.stackSide, gap: s.gaps.inner, minSize: minSize)
+                side: s.stackSide, gap: s.gaps.inner, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
         }
         if !state.monocle {
             for (id, frame) in state.frameOverrides where frames[id] != nil { frames[id] = frame }

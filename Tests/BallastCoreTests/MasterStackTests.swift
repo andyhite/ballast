@@ -56,11 +56,48 @@ struct MasterStackTests {
         #expect(abs(frames[2]!.width - 250) < 0.001)
     }
 
-    @Test("stack windows share the stack region equally")
+    @Test("equal-weight stack windows share the stack region equally")
     func stackWindowsEqual() {
         let frames = MasterStackLayout.frames(order: [1, 2, 3], in: Self.rect, masterCount: 1, ratio: 0.5, side: .right, gap: 0)
         #expect(frames[2]!.height == frames[3]!.height)
         #expect(abs(frames[2]!.height - Self.rect.height / 2) < 0.001)
+    }
+
+    @Test("masters and stack windows share their regions in proportion to weight")
+    func regionsFollowWeight() {
+        let weights: [WindowID: Double] = [1: 3, 2: 1, 3: 1, 4: 3]
+        let frames = MasterStackLayout.frames(order: [1, 2, 3, 4], in: Self.rect, masterCount: 2, ratio: 0.5, side: .right, gap: 0,
+                                              weight: { weights[$0] ?? 1 })
+        #expect(frames[1]!.height == 375) // masters
+        #expect(frames[2]!.height == 125)
+        #expect(frames[3]!.height == 125) // stack
+        #expect(frames[4]!.height == 375)
+    }
+
+    @Test("stack windows short of their minimum get it before the rest is shared by weight")
+    func weightedStackHonoursMinimums() {
+        // Weights 2:1:1 share 500 as 250/125/125. Window 4 needs 200, leaving
+        // 300 to share 2:1 as 200/100; then window 3 needs 110, leaving 190.
+        let weights: [WindowID: Double] = [2: 2, 3: 1, 4: 1]
+        let minSizes: [WindowID: CGSize] = [3: CGSize(width: 0, height: 110), 4: CGSize(width: 0, height: 200)]
+        let frames = MasterStackLayout.frames(order: [1, 2, 3, 4], in: Self.rect, masterCount: 1, ratio: 0.5, side: .right, gap: 0,
+                                              weight: { weights[$0] ?? 1 }, minSize: { minSizes[$0] ?? .zero })
+        #expect(frames[2]!.height == 190)
+        #expect(frames[3]!.height == 110)
+        #expect(frames[4]!.height == 200)
+    }
+
+    @Test("the weight share limit caps weights at maxWeightRatio times the lightest in the region")
+    func weightShareLimitCapsHeavyWindows() {
+        // At 3×, weights 10:2:1 count as 3:2:1: the heavy window is reined in
+        // and the lighter two keep their 2:1 proportion.
+        let rect = CGRect(x: 0, y: 0, width: 1000, height: 600)
+        let weights: [WindowID: Double] = [2: 10, 3: 2, 4: 1]
+        let frames = MasterStackLayout.frames(order: [1, 2, 3, 4], in: rect, masterCount: 1, ratio: 0.5, side: .right, gap: 0,
+                                              weight: { weights[$0] ?? 1 }, maxWeightRatio: 3)
+        #expect(frames[2]!.height == 300)
+        #expect(frames[3]!.height == 200)
+        #expect(frames[4]!.height == 100)
     }
 
     @Test("gaps appear between tiles and never outside rect")
@@ -112,7 +149,7 @@ struct MasterStackTests {
     func minSizeFeasibleClamp() {
         let rect = CGRect(x: 0, y: 0, width: 1000, height: 500)
         let minSizes: [WindowID: CGSize] = [2: CGSize(width: 500, height: 0)]
-        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10) { minSizes[$0] ?? .zero }
+        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10, minSize: { minSizes[$0] ?? .zero })
         #expect(abs(frames[1]!.width - 490) < 0.001)
         #expect(abs(frames[2]!.width - 500) < 0.001)
     }
@@ -121,7 +158,7 @@ struct MasterStackTests {
     func minSizeInfeasibleFallback() {
         let rect = CGRect(x: 0, y: 0, width: 1000, height: 500)
         let minSizes: [WindowID: CGSize] = [1: CGSize(width: 600, height: 0), 2: CGSize(width: 500, height: 0)]
-        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10) { minSizes[$0] ?? .zero }
+        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10, minSize: { minSizes[$0] ?? .zero })
         #expect(abs(frames[1]!.width - 540) < 0.001)
         #expect(abs(frames[2]!.width - 450) < 0.001)
     }
