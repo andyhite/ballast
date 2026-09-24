@@ -52,7 +52,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
-  <key>NSHumanReadableCopyright</key><string>Ballast</string>
+  <key>NSHumanReadableCopyright</key><string>Copyright © 2026 Andrew Hite. MIT License.</string>
 </dict>
 </plist>
 PLIST

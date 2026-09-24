@@ -184,3 +184,7 @@ scripts/smoke-test.sh                     # live-desktop checks; see docs/SMOKE_
 
 [`docs/DESIGN.md`](docs/DESIGN.md) explains the architecture, the crash-safety
 model, the animation strategy, and how Ballast handles edge cases.
+
+## License
+
+[MIT](LICENSE) © 2026 Andrew Hite
