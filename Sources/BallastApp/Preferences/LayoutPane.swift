@@ -1,10 +1,11 @@
 import BallastCore
 import SwiftUI
 
-/// Master-stack/BSP layout defaults, plus per-desktop overrides. Every field
-/// carries its own "Inherit" toggle when a specific desktop is selected: on
-/// means the key is absent from that desktop's `[[space]]` block (it falls
-/// back to `[layout]`); off writes the field's current effective value.
+/// Master-grid/master-stack/BSP layout defaults, plus per-desktop overrides.
+/// Every field carries its own "Inherit" toggle when a specific desktop is
+/// selected: on means the key is absent from that desktop's `[[space]]`
+/// block (it falls back to `[layout]`); off writes the field's current
+/// effective value.
 struct LayoutPane: View {
     @ObservedObject var model: ConfigModel
     @State private var scope: Scope = .defaults
@@ -58,14 +59,17 @@ struct LayoutPane: View {
             }
             .disabled(editingDisabled)
 
-            Section("Master-Stack") {
+            Section("Master-Grid & Master-Stack") {
                 fieldRow("Mode", inherited: modeInherited) {
                     Picker("", selection: Binding(
-                        get: { effective.mode },
+                        get: { modeSelection },
                         set: { commitMode($0) }
                     )) {
+                        if case .defaults = scope {
+                            Text(automaticModeLabel).tag(LayoutMode?.none)
+                        }
                         ForEach(LayoutMode.allCases, id: \.self) { mode in
-                            Text(modeLabel(mode)).tag(mode)
+                            Text(modeLabel(mode)).tag(LayoutMode?.some(mode))
                         }
                     }
                     .labelsHidden()
@@ -92,6 +96,22 @@ struct LayoutPane: View {
                         }
                     }
                     .labelsHidden()
+                }
+                fieldRow("Grid Max", inherited: overrides?.gridMax == nil) {
+                    Stepper(
+                        value: Binding(get: { effective.gridMax }, set: { commitDesktopField("grid_max", .integer($0)) }),
+                        in: 0...16
+                    ) {
+                        Text(effective.gridMax == 0 ? "No limit" : "\(effective.gridMax)").monospacedDigit()
+                    }
+                }
+                fieldRow("Stack Peek", inherited: overrides?.stackPeek == nil) {
+                    Stepper(
+                        value: Binding(get: { Int(effective.stackPeek) }, set: { commitDesktopField("stack_peek", .integer($0)) }),
+                        in: 0...200, step: 2
+                    ) {
+                        Text("\(Int(effective.stackPeek)) pt").monospacedDigit()
+                    }
                 }
             }
             .disabled(editingDisabled)
@@ -231,6 +251,21 @@ struct LayoutPane: View {
     }
 
     private var modeInherited: Bool { overrides?.mode == nil }
+
+    /// Defaults: the `[layout]` mode, `nil` for automatic. A desktop: the
+    /// mode it resolves to on its display.
+    private var modeSelection: LayoutMode? {
+        switch scope {
+        case .defaults: config.layout.mode
+        case .desktop(let key): effective.mode(builtin: model.desktops.first { $0.key == key }?.builtin ?? false)
+        }
+    }
+
+    private var automaticModeLabel: String {
+        let automatic = LayoutSettings()
+        return "Automatic (\(modeLabel(automatic.mode(builtin: true))) on Built-in, \(modeLabel(automatic.mode(builtin: false))) on External)"
+    }
+
     private var splitInherited: Bool { splitOverride == nil }
 
     /// `overrides?.split` on a `Axis??` field: `nil` at the outer level means
@@ -246,6 +281,7 @@ struct LayoutPane: View {
 
     private func modeLabel(_ mode: LayoutMode) -> String {
         switch mode {
+        case .masterGrid: "Master-Grid"
         case .masterStack: "Master-Stack"
         case .bsp: "BSP"
         case .float: "Float (Passthrough)"
@@ -266,12 +302,12 @@ struct LayoutPane: View {
         editError = error?.description
     }
 
-    private func commitMode(_ mode: LayoutMode) {
+    private func commitMode(_ mode: LayoutMode?) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set("mode", .string(mode.rawValue), in: .layout) })
+            setError(manager.editConfig { $0.set("mode", mode.map { .string($0.rawValue) }, in: .layout) })
         case .desktop(let key):
-            guard let space = spaceID(for: key) else { return }
+            guard let mode, let space = spaceID(for: key) else { return }
             setError(manager.setSpaceSetting("mode", .string(mode.rawValue), space: space))
         }
     }
@@ -329,13 +365,17 @@ struct LayoutPane: View {
         guard case .desktop = scope else { return }
         switch title {
         case "Mode":
-            commitMode0(inheriting ? nil : effective.mode)
+            commitMode0(inheriting ? nil : modeSelection)
         case "Master Ratio":
             commitMasterRatio0(inheriting ? nil : effective.masterRatio)
         case "Master Count":
             commitMasterCount0(inheriting ? nil : effective.masterCount)
         case "Stack Side":
             commitDesktopField("stack_side", inheriting ? nil : .string(effective.stackSide.rawValue))
+        case "Grid Max":
+            commitDesktopField("grid_max", inheriting ? nil : .integer(effective.gridMax))
+        case "Stack Peek":
+            commitDesktopField("stack_peek", inheriting ? nil : .integer(Int(effective.stackPeek)))
         case "Split Direction":
             commitDesktopField("split", inheriting ? nil : .string(effective.split?.rawValue ?? "auto"))
         case "Arrangement":

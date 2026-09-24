@@ -96,6 +96,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         menu.addItem(action("Reload Config") { [unowned self] in manager.reloadConfig() })
         menu.addItem(action("Open Config File") { [unowned self] in openConfig() })
         menu.addItem(action("Run Doctor…") { Self.showDoctor() })
+        menu.addItem(action("Window Inspector…") { [unowned self] in InspectorWindow.show(manager: manager) })
         if let login = loginItemMenuItem() { menu.addItem(login) }
         menu.addItem(.separator())
         menu.addItem(action("Quit Ballast") { NSApp.terminate(nil) })
@@ -110,6 +111,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     private func modeLabel(_ mode: LayoutMode) -> String {
         switch mode {
+        case .masterGrid: return "Master-Grid"
         case .masterStack: return "Master-Stack"
         case .bsp: return "BSP"
         case .float: return "Floating"
@@ -121,14 +123,15 @@ final class StatusBar: NSObject, NSMenuDelegate {
     private func addDesktopSettingItems(to menu: NSMenu, space: SpaceID, key: SpaceKey, enabled: Bool) {
         let engine = manager.engine
         let current = engine.mode(for: space)
-        for mode in [LayoutMode.masterStack, .bsp, .float] {
+        for mode in LayoutMode.allCases {
             let label = mode == .float ? "Floating (passthrough)" : modeLabel(mode)
             menu.addItem(choiceItem(label, checked: current == mode, enabled: enabled) { [unowned self] in
                 manager.perform(.layout(.set(mode)))
             })
         }
         let followsDefault = engine.spaces[space]?.modeOverride == nil && manager.config.spaces[key]?.mode == nil
-        menu.addItem(choiceItem("Use Default (\(modeLabel(manager.config.layout.mode)))", checked: followsDefault, enabled: enabled) { [unowned self] in
+        let defaultMode = manager.config.layout.mode(builtin: engine.snapshot.isBuiltin(display: key.display))
+        menu.addItem(choiceItem("Use Default (\(modeLabel(defaultMode)))", checked: followsDefault, enabled: enabled) { [unowned self] in
             manager.perform(.layout(.configDefault))
         })
         menu.addItem(.separator())
@@ -141,7 +144,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         if current == .bsp {
             menu.addItem(bspArrangementItem(scope: scope, baseline: baseline, effective: effective, isInherited: overrides?.bspShape == nil, enabled: enabled))
             menu.addItem(splitDirectionItem(scope: scope, baseline: baseline, effective: effective, override: overrides?.split, enabled: enabled))
-        } else if current == .masterStack {
+        } else if current.hasMaster {
             let ratioOverridden = overrides?.masterRatio != nil || engine.spaces[space]?.masterRatioOverride != nil
             let countOverridden = overrides?.masterCount != nil || engine.spaces[space]?.masterCountOverride != nil
             let ratioValue = engine.spaces[space]?.masterRatioOverride ?? effective.masterRatio
@@ -149,6 +152,12 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(masterSizeItem(scope: scope, baseline: baseline, current: ratioValue, isInherited: !ratioOverridden, enabled: enabled))
             menu.addItem(masterCountItem(scope: scope, baseline: baseline, current: countValue, isInherited: !countOverridden, enabled: enabled))
             menu.addItem(stackSideItem(scope: scope, baseline: baseline, effective: effective, isInherited: overrides?.stackSide == nil, enabled: enabled))
+            if current == .masterGrid {
+                menu.addItem(gridMaxItem(scope: scope, baseline: baseline, current: effective.gridMax, isInherited: overrides?.gridMax == nil, enabled: enabled))
+            }
+            if current == .masterStack || effective.gridMax > 0 {
+                menu.addItem(stackPeekItem(scope: scope, baseline: baseline, current: effective.stackPeek, isInherited: overrides?.stackPeek == nil, enabled: enabled))
+            }
         }
         if current != .float {
             menu.addItem(weightShareLimitItem(scope: scope, baseline: baseline, effective: effective,
@@ -173,25 +182,31 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let scope = SettingScope.global
         let layout = manager.config.layout
         let modeIsSet = isKeySet(editorSnapshot, "mode", in: .layout)
-        for mode in [LayoutMode.masterStack, .bsp, .float] {
+        for mode in LayoutMode.allCases {
             let label = mode == .float ? "Floating (passthrough)" : modeLabel(mode)
             let checked = modeIsSet && layout.mode == mode
             menu.addItem(choiceItem(label, checked: checked, enabled: enabled) { [unowned self] in
                 write(scope, "mode", .string(mode.rawValue))
             })
         }
-        menu.addItem(choiceItem("Default (\(modeLabel(LayoutSettings().mode)))", checked: !modeIsSet, enabled: enabled) { [unowned self] in
+        let automatic = LayoutSettings()
+        let automaticLabel = "Automatic (\(modeLabel(automatic.mode(builtin: true))) on Built-in, \(modeLabel(automatic.mode(builtin: false))) on External)"
+        menu.addItem(choiceItem(automaticLabel, checked: !modeIsSet, enabled: enabled) { [unowned self] in
             write(scope, "mode", nil)
         })
         menu.addItem(.separator())
 
-        menu.addItem(Self.info("Master-Stack"))
+        menu.addItem(Self.info("Master-Grid / Master-Stack"))
         menu.addItem(masterSizeItem(scope: scope, baseline: LayoutSettings(), current: layout.masterRatio,
             isInherited: !isKeySet(editorSnapshot, "master_ratio", in: .layout), enabled: enabled))
         menu.addItem(masterCountItem(scope: scope, baseline: LayoutSettings(), current: layout.masterCount,
             isInherited: !isKeySet(editorSnapshot, "master_count", in: .layout), enabled: enabled))
         menu.addItem(stackSideItem(scope: scope, baseline: LayoutSettings(), effective: layout,
             isInherited: !isKeySet(editorSnapshot, "stack_side", in: .layout), enabled: enabled))
+        menu.addItem(gridMaxItem(scope: scope, baseline: LayoutSettings(), current: layout.gridMax,
+            isInherited: !isKeySet(editorSnapshot, "grid_max", in: .layout), enabled: enabled))
+        menu.addItem(stackPeekItem(scope: scope, baseline: LayoutSettings(), current: layout.stackPeek,
+            isInherited: !isKeySet(editorSnapshot, "stack_peek", in: .layout), enabled: enabled))
         menu.addItem(.separator())
         menu.addItem(Self.info("BSP"))
         menu.addItem(bspArrangementItem(scope: scope, baseline: LayoutSettings(), effective: layout,
@@ -302,8 +317,12 @@ final class StatusBar: NSObject, NSMenuDelegate {
         menu.addItem(choiceItem("Don't Tile", checked: window.rule.manage == false, enabled: enabled) { [unowned self] in
             setRuleField(bundleID: bundleID, ruleIndex: ruleIndex, key: "manage", value: window.rule.manage == false ? nil : .bool(false))
         })
-        menu.addItem(choiceItem("Always Float", checked: window.rule.float == true, enabled: enabled) { [unowned self] in
-            setRuleField(bundleID: bundleID, ruleIndex: ruleIndex, key: "float", value: window.rule.float == true ? nil : .bool(true))
+        let explicitFloat = ruleIndex.flatMap { manager.config.rules[$0].actions.float }
+        menu.addItem(choiceItem("Always Float", checked: explicitFloat == true, enabled: enabled) { [unowned self] in
+            setRuleField(bundleID: bundleID, ruleIndex: ruleIndex, key: "float", value: explicitFloat == true ? nil : .bool(true))
+        })
+        menu.addItem(choiceItem("Always Tile", checked: explicitFloat == false, enabled: enabled) { [unowned self] in
+            setRuleField(bundleID: bundleID, ruleIndex: ruleIndex, key: "float", value: explicitFloat == false ? nil : .bool(false))
         })
         if let ruleIndex {
             menu.addItem(.separator())
@@ -394,6 +413,27 @@ final class StatusBar: NSObject, NSMenuDelegate {
             isInherited: isInherited, enabled: enabled, options: options,
             onDefault: { [unowned self] in write(scope, "stack_side", nil) },
             onSelect: { [unowned self] value in write(scope, "stack_side", value) })
+    }
+
+    private func gridMaxItem(scope: SettingScope, baseline: LayoutSettings, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = [0, 2, 3, 4, 5].map { n -> SettingOption in
+            SettingOption(label: n == 0 ? "No Limit" : "\(n)", value: .integer(n), checked: current == n)
+        }
+        let baselineLabel = baseline.gridMax == 0 ? "No Limit" : "\(baseline.gridMax)"
+        return optionSubmenu("Grid Max", defaultLabel: "Default (\(baselineLabel))",
+            isInherited: isInherited, enabled: enabled, options: options,
+            onDefault: { [unowned self] in write(scope, "grid_max", nil) },
+            onSelect: { [unowned self] value in write(scope, "grid_max", value) })
+    }
+
+    private func stackPeekItem(scope: SettingScope, baseline: LayoutSettings, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = [0, 16, 24, 30, 40].map { pt -> SettingOption in
+            SettingOption(label: "\(pt) pt", value: .integer(pt), checked: near(current, Double(pt)))
+        }
+        return optionSubmenu("Stack Peek", defaultLabel: "Default (\(Int(baseline.stackPeek)) pt)",
+            isInherited: isInherited, enabled: enabled, options: options,
+            onDefault: { [unowned self] in write(scope, "stack_peek", nil) },
+            onSelect: { [unowned self] value in write(scope, "stack_peek", value) })
     }
 
     private func bspArrangementItem(scope: SettingScope, baseline: LayoutSettings, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
@@ -638,7 +678,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     # `ballast spaces` lists display UUIDs and Space ordinals for [[space]] entries.
 
     [layout]
-    mode = "master_stack"
+    # No `mode`: master_stack on a built-in display, master_grid on external ones.
     master_ratio = 0.6
 
     [bindings]

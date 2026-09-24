@@ -186,6 +186,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
 
         var displays: [DisplaySpaces] = []
         displays.reserveCapacity(managed.count)
+        let builtin = DisplayInfo.builtinUUIDs()
 
         for entry in managed {
             guard let dict = entry as? [String: AnyObject] else { continue }
@@ -198,7 +199,8 @@ public final class SkyLightSpaceProvider: SpaceProvider {
             }()
 
             guard let rawSpaces = dict["Spaces"] as? [AnyObject] else {
-                displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: [], activeSpace: activeSpaceID))
+                displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: [], activeSpace: activeSpaceID,
+                                              builtin: builtin.contains(displayUUID)))
                 continue
             }
 
@@ -212,7 +214,8 @@ public final class SkyLightSpaceProvider: SpaceProvider {
                 spaces.append(SpaceInfo(id: id, uuid: uuid, kind: SpaceKind(rawType: rawType)))
             }
 
-            displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: spaces, activeSpace: activeSpaceID))
+            displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: spaces, activeSpace: activeSpaceID,
+                                          builtin: builtin.contains(displayUUID)))
         }
 
         return SpaceSnapshot(displays: displays)

@@ -107,7 +107,7 @@ public enum BallastCLI {
                 if space.kind == .user {
                     ordinal += 1
                     let key = SpaceKey(display: display.displayUUID, ordinal: ordinal)
-                    let mode = config.map { " mode=\($0.layoutSettings(for: key).mode.rawValue)\($0.spaces[key] != nil ? " (override)" : "")" } ?? ""
+                    let mode = config.map { " mode=\($0.layoutSettings(for: key).mode(builtin: display.builtin).rawValue)\($0.spaces[key] != nil ? " (override)" : "")" } ?? ""
                     print("  \(active) ordinal = \(ordinal)   space id \(space.id)\(mode)")
                 } else {
                     print("  \(active) (fullscreen/other Space, id \(space.id) — ignored)")

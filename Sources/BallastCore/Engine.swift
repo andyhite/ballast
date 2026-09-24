@@ -65,8 +65,34 @@ public struct SpaceLayout: Equatable, Sendable {
     public var mode: LayoutMode
     public var monocle: Bool
     public var frames: [WindowID: CGRect]
-    /// Window to raise above its siblings (monocle).
+    /// Window to raise above its siblings: monocle's front window, or the
+    /// focused window in view of a scrolling stack. Never a window of the
+    /// focused window's app but the focused window itself: raising a window
+    /// makes it its app's focused window, which steals focus from an active
+    /// app.
     public var raise: WindowID?
+    /// Stack windows tucked behind a tile while the stack scrolls, each with
+    /// the strip of it left showing (zero-length when fully hidden).
+    public var covered: [WindowID: CGRect] = [:]
+    /// Tiles in view that keep a scrolling stack's deck in order, each with
+    /// the scrolled-out windows that belong behind it. Leaves out `raise`,
+    /// which is raised anyway, and every tile `raise`'s rules forbid.
+    public var behind: [WindowID: [WindowID]] = [:]
+    /// Positions directional focus and swap move between: `frames`, except
+    /// that a scrolling stack's windows continue past either end of the view.
+    var navigation: [WindowID: CGRect] = [:]
+
+    /// Tiles in `behind` that a window belonging behind them is in front of,
+    /// given the Space's windows front to back: raising these, then `raise`,
+    /// puts the deck back in order.
+    public func tilesToRaise(frontToBack: [WindowID]) -> [WindowID] {
+        var rank: [WindowID: Int] = [:]
+        for (index, id) in frontToBack.enumerated() where rank[id] == nil { rank[id] = index }
+        return behind.keys.sorted().filter { tile in
+            guard let tileRank = rank[tile], let hidden = behind[tile] else { return false }
+            return hidden.contains { rank[$0].map { $0 < tileRank } ?? false }
+        }
+    }
 }
 
 /// Side effects the engine cannot perform itself.
@@ -146,7 +172,9 @@ public struct Engine: Sendable {
 
     public func mode(for space: SpaceID) -> LayoutMode {
         if passthrough { return .float }
-        return spaces[space]?.modeOverride ?? settings(for: space).mode
+        if let override = spaces[space]?.modeOverride { return override }
+        let key = snapshot.key(for: space)
+        return config.layoutSettings(for: key).mode(builtin: key.map { snapshot.isBuiltin(display: $0.display) } ?? false)
     }
 
     public func isTiled(_ id: WindowID) -> Bool {
@@ -163,32 +191,60 @@ public struct Engine: Sendable {
         let inner = area.insetClamped(by: s.gaps.outer)
         let minSize: (WindowID) -> CGSize = { windows[$0]?.minSize ?? .zero }
         let weight: (WindowID) -> Double = { windows[$0]?.rule.weight ?? 1 }
-        var frames: [WindowID: CGRect]
-        var raise: WindowID?
+        // No tiled member may be raised over a focused window that isn't
+        // itself a member of this Space (floating, unmanaged, or shared
+        // across every Space), even when the layout is recomputed for an
+        // unrelated structural change.
+        let mayRaise = frontmost.map { id in
+            state.members.contains(id) || windows[id].map { $0.space != space && $0.space != nil } ?? true
+        } ?? true
+        // Raising a window makes it its app's focused window: of the focused
+        // window's app, only the focused window itself may be raised.
+        let raisable: (WindowID) -> Bool = { id in
+            guard mayRaise else { return false }
+            guard let focused = frontmost, id != focused, let pid = windows[focused]?.pid else { return true }
+            return windows[id]?.pid != pid
+        }
+        let recentTile = state.focus.entries.first { state.members.contains($0) }
+        var result = SpaceLayout(mode: mode, monocle: state.monocle, frames: [:], raise: nil)
+        var deck: [WindowID: [WindowID]] = [:]
         if state.monocle {
-            frames = Dictionary(state.members.map { ($0, inner) }, uniquingKeysWith: { a, _ in a })
-            // No tiled member may be raised over a focused window that isn't
-            // itself a member of this Space (floating, unmanaged, or shared
-            // across every Space), even when the layout is recomputed for an
-            // unrelated structural change.
-            if let frontmost, let fw = windows[frontmost], !state.members.contains(frontmost), fw.space == space || fw.space == nil {
-                raise = nil
-            } else {
-                raise = state.focus.entries.first { state.members.contains($0) } ?? state.liveOrder.first
-            }
+            result.frames = Dictionary(state.members.map { ($0, inner) }, uniquingKeysWith: { a, _ in a })
+            if let front = recentTile ?? state.liveOrder.first, raisable(front) { result.raise = front }
         } else if mode == .bsp {
-            frames = state.tree?.layout(in: inner, context: bspContext(s)) ?? [:]
+            result.frames = state.tree?.layout(in: inner, context: bspContext(s)) ?? [:]
+            result.navigation = result.frames
         } else {
-            frames = MasterStackLayout.frames(
+            let plan = MasterLayout.plan(
                 order: state.liveOrder, in: inner,
                 masterCount: state.masterCountOverride ?? s.masterCount,
                 ratio: state.masterRatioOverride ?? s.masterRatio,
-                side: s.stackSide, gap: s.gaps.inner, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
+                side: s.stackSide, gap: s.gaps.inner, stackLimit: s.stackLimit(in: mode), peek: s.stackPeek,
+                recent: state.focus.entries, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
+            result.frames = plan.frames
+            result.covered = plan.covered
+            result.navigation = plan.navigation
+            deck = plan.behind
+            // Keep the focused window in view on top of the ones tucked behind it.
+            if !plan.covered.isEmpty, let recentTile, plan.inView.contains(recentTile), raisable(recentTile) {
+                result.raise = recentTile
+            }
         }
+        var pinned = Set<WindowID>()
         if !state.monocle {
-            for (id, frame) in state.frameOverrides where frames[id] != nil { frames[id] = frame }
+            for (id, frame) in state.frameOverrides where result.frames[id] != nil {
+                result.frames[id] = frame
+                result.navigation[id] = frame
+                result.covered[id] = nil
+                pinned.insert(id)
+            }
         }
-        return SpaceLayout(mode: mode, monocle: state.monocle, frames: frames, raise: raise)
+        // A window at a frame of its own is no part of the deck.
+        for (tile, hidden) in deck where tile != result.raise && !pinned.contains(tile) && raisable(tile) {
+            let kept = hidden.filter { !pinned.contains($0) }
+            if !kept.isEmpty { result.behind[tile] = kept }
+        }
+        return result
     }
 
     /// One-shot frame for a newly floating window with a `placement`/`size` rule.
@@ -331,7 +387,8 @@ public struct Engine: Sendable {
         return syncMembership(id)
     }
 
-    /// Records focus. Only dirties a Space whose rendering depends on focus (monocle).
+    /// Records focus. Only dirties a Space whose rendering depends on focus:
+    /// monocle, or a stack that scrolls to keep the focused window in view.
     @discardableResult
     public mutating func focus(_ id: WindowID?) -> Set<SpaceID> {
         guard let id, let w = windows[id] else {
@@ -347,7 +404,8 @@ public struct Engine: Sendable {
         focused = id
         guard let space = w.space else { return [] }
         spaces[space, default: SpaceState(id: space)].focus.touch(id)
-        return spaces[space]?.monocle == true ? [space] : []
+        guard let state = spaces[space] else { return [] }
+        return state.monocle || stackScrolls(state) ? [space] : []
     }
 
     /// A window refused a size: never lay it out smaller than `size` again.
@@ -565,6 +623,15 @@ public struct Engine: Sendable {
         mode(for: state.id) == .bsp ? (state.tree?.leaves ?? []) : state.liveOrder
     }
 
+    /// Whether `state`'s stack holds more windows than its layout shows at
+    /// once, so that moving focus scrolls it.
+    private func stackScrolls(_ state: SpaceState) -> Bool {
+        let s = settings(for: state.id)
+        guard let limit = s.stackLimit(in: mode(for: state.id)) else { return false }
+        let masters = max(state.masterCountOverride ?? s.masterCount, 1)
+        return state.members.count - masters > limit
+    }
+
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
         guard let w = windows[id] else { return false }
         return w.space == space && w.isManaged && !w.minimized && !w.hidden
@@ -677,8 +744,9 @@ public struct Engine: Sendable {
         spaces[space] = s
     }
 
-    /// Nearest tiled window from `from` in `direction` on `space`. Monocle
-    /// Spaces cycle through the live order instead.
+    /// Nearest tiled window from `from` in `direction` on `space`, along the
+    /// scrolling strip when the stack scrolls. Monocle Spaces cycle through
+    /// the live order instead.
     private func neighbor(of from: WindowID?, _ direction: Direction, space: SpaceID, area: CGRect?) -> WindowID? {
         guard let state = spaces[space] else { return nil }
         let order = tileOrder(state)
@@ -690,7 +758,7 @@ public struct Engine: Sendable {
             return next == from ? nil : next
         }
         guard let area else { return nil }
-        let frames = layout(space: space, area: area).frames
+        let frames = layout(space: space, area: area).navigation
         guard let origin = frames[from] else { return nil }
         return Self.nearest(from: origin, direction, among: frames.filter { $0.key != from })
     }

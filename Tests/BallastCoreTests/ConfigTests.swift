@@ -265,6 +265,39 @@ struct ConfigTests {
         #expect(bad.contains { $0.contains("inner") })
     }
 
+    @Test("grid_max accepts values within 0...16 and stack_peek within 0...200")
+    func stackKeyBoundaries() {
+        #expect(Self.messages("[layout]\ngrid_max = 16\nstack_peek = 200").isEmpty)
+        #expect(Self.messages("[layout]\ngrid_max = 17").contains { $0.contains("grid_max") })
+        #expect(Self.messages("[layout]\ngrid_max = -1").contains { $0.contains("grid_max") })
+        #expect(Self.messages("[layout]\nstack_peek = 201").contains { $0.contains("stack_peek") })
+    }
+
+    @Test("master_grid and master_stack parse as distinct modes, with per-desktop stack keys")
+    func masterModesAndStackKeysResolve() {
+        let display = "44444444-4444-4444-4444-444444444444"
+        let text = """
+        [layout]
+        mode = "master_grid"
+        grid_max = 3
+
+        [[space]]
+        display = "\(display)"
+        ordinal = 1
+        mode = "master_stack"
+        stack_peek = 12
+        """
+        guard case .success(let config) = Config.parse(text) else {
+            Issue.record("expected parse success")
+            return
+        }
+        #expect(config.layout.mode == .masterGrid)
+        #expect(config.layout.stackLimit(in: .masterGrid) == 3)
+        let desktop = config.layoutSettings(for: SpaceKey(display: display, ordinal: 1))
+        #expect(desktop.mode == .masterStack)
+        #expect(desktop.stackPeek == 12)
+    }
+
     @Test("placement/size fractions accept values within 0...1")
     func fractionBoundaries() {
         let ok = Self.messages("""

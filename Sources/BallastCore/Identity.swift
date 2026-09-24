@@ -63,11 +63,15 @@ public struct DisplaySpaces: Equatable, Sendable {
     /// All Spaces of the display, in Mission Control order.
     public let spaces: [SpaceInfo]
     public let activeSpace: SpaceID?
+    /// A built-in (laptop) display; it gets `master_stack` unless the config
+    /// says otherwise.
+    public let builtin: Bool
 
-    public init(displayUUID: String, spaces: [SpaceInfo], activeSpace: SpaceID?) {
+    public init(displayUUID: String, spaces: [SpaceInfo], activeSpace: SpaceID?, builtin: Bool = false) {
         self.displayUUID = displayUUID
         self.spaces = spaces
         self.activeSpace = activeSpace
+        self.builtin = builtin
     }
 }
 
@@ -122,6 +126,10 @@ public struct SpaceSnapshot: Equatable, Sendable {
 
     public func activeSpace(ofDisplay uuid: String) -> SpaceID? {
         displays.first { $0.displayUUID == uuid }?.activeSpace
+    }
+
+    public func isBuiltin(display uuid: String) -> Bool {
+        displays.first { $0.displayUUID == uuid }?.builtin ?? false
     }
 
     /// Every user-desktop Space id currently known.

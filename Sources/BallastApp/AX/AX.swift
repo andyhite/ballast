@@ -28,6 +28,14 @@ enum AX {
         (copy(element, attribute) as? NSNumber)?.boolValue
     }
 
+    /// Total wrapper over `AXUIElementIsAttributeSettable`: nil when the
+    /// query itself fails, else whether the attribute can be written.
+    static func isSettable(_ element: AXUIElement, _ attribute: String) -> Bool? {
+        var settable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success else { return nil }
+        return settable.boolValue
+    }
+
     static func element(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
         guard let value = copy(element, attribute), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement) // safe: type id checked above
@@ -88,6 +96,8 @@ struct DisplayInfo: Equatable {
     /// Persistent display UUID (uppercase), matching SkyLight's "Display Identifier".
     let uuid: String
     let name: String
+    /// A built-in (laptop) panel rather than an external display.
+    let builtin: Bool
     let frame: CGRect
     /// Frame minus menu bar and Dock.
     let visibleFrame: CGRect
@@ -98,13 +108,28 @@ struct DisplayInfo: Equatable {
         return NSScreen.screens.compactMap { screen in
             guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             let id = CGDirectDisplayID(number.uint32Value)
-            guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
-                  let uuid = CFUUIDCreateString(nil, cfUUID) as String? else { return nil }
-            return DisplayInfo(id: id, uuid: uuid.uppercased(), name: screen.localizedName,
+            guard let uuid = uuid(of: id) else { return nil }
+            return DisplayInfo(id: id, uuid: uuid, name: screen.localizedName, builtin: CGDisplayIsBuiltin(id) != 0,
                                frame: screen.frame.flipped(primaryHeight: primaryHeight),
                                visibleFrame: screen.visibleFrame.flipped(primaryHeight: primaryHeight))
         }
         .sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
+    }
+
+    /// UUIDs of the online built-in displays.
+    static func builtinUUIDs() -> Set<String> {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return [] }
+        return Set(ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) != 0 }.compactMap(uuid(of:)))
+    }
+
+    /// Persistent display UUID, uppercased to match SkyLight and config keys.
+    private static func uuid(of id: CGDirectDisplayID) -> String? {
+        guard let cfUUID = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
+              let uuid = CFUUIDCreateString(nil, cfUUID) as String? else { return nil }
+        return uuid.uppercased()
     }
 }
 

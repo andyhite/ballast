@@ -16,7 +16,17 @@ Space each window lives on. Ballast watches those changes and tiles whatever is 
 each **(display, Space)** pair using that pair's layout mode.
 
 - **Per-desktop layouts.** Each desktop on each display has its own mode:
-  `master_stack`, `bsp`, or `float`, where Ballast leaves the desktop alone.
+  `master_grid` (masters beside a stack that tiles every window, up to
+  `grid_max`), `master_stack` (masters beside a stack that shows one window
+  at a time, its neighbors' edges peeking, and scrolls with `focus up/down` —
+  built for laptop screens), `bsp`, or `float`, where Ballast leaves the
+  desktop alone. Until you pick a mode, a laptop's built-in display gets
+  `master_stack` and external displays get `master_grid`.
+- **Dialogs float by default.** A window that isn't a standard resizable
+  window — a settings pane, an update prompt, a confirmation sheet, anything
+  modal, fixed-size, or without a full-screen button — floats over the
+  window it belongs to instead of tiling. Set `float = false` on a rule, or
+  use the Window Inspector's rule buttons, for the exceptions.
 - **Weighted windows.** Rules give apps a weight. Heavier windows take the master
   slot and get more room, a taller stack slot or a bigger BSP tile, the moment
   they open.
@@ -86,6 +96,11 @@ The menu bar shows the current desktop and its mode, for example `2 · MS`,
 `1 · BSP`, or `3 · ⋯`. A `Z` suffix means monocle is on. Red `! …` text means
 something needs your attention; open the menu to see what.
 
+**Window Inspector…** shows the focused window's bundle id, AX role and
+subrole, why it floats or tiles (or the rule that overrides that), its
+weight, its Space id/uuid/ordinal and display uuid/id — with one-click
+buttons to float or tile it by rule.
+
 From the menu you can change the current desktop's layout, edit the rule for
 the focused app, and open **Preferences…** (`⌘,`). Preferences has four tabs:
 General, Layout, Rules, and Keyboard. The Keyboard tab records hotkeys.
@@ -102,8 +117,7 @@ config file, Ballast uses built-in defaults and has **no hotkeys**. Choose
 **Open Config File** in the menu to create a starter file.
 
 ```toml
-[layout]
-mode = "master_stack"        # master_stack | bsp | float
+[layout]                     # no `mode`: master_stack on the built-in display, master_grid on external ones
 master_ratio = 0.6
 gaps = { inner = 8, outer = 8 }
 
@@ -111,6 +125,11 @@ gaps = { inner = 8, outer = 8 }
 display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
 ordinal = 1
 mode = "bsp"
+
+[[space]]                    # a one-window stack on an external desktop too
+display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
+ordinal = 1
+mode = "master_stack"
 
 [[rule]]                     # Ghostty takes the master slot from anything lighter
 app_id = "com.mitchellh.ghostty"
@@ -140,7 +159,7 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 | `focus left\|right\|up\|down`, `focus-last`, `focus-master` | Move focus |
 | `swap left\|right\|up\|down`, `promote` | Rearrange tiles (makes the desktop manual) |
 | `reset` | Drop the manual arrangement; re-rank by weight |
-| `layout master_stack\|bsp\|float\|next\|prev\|default` | Change this desktop's mode |
+| `layout master_grid\|master_stack\|bsp\|float\|next\|prev\|default` | Change this desktop's mode |
 | `monocle`, `float` | Toggle full-tile monocle / float the focused window |
 | `grow [n]`, `shrink [n]`, `balance` | Resize the focused tile / even out splits |
 | `master-ratio <±d>`, `master-count <±d>` | Adjust the master region |
@@ -183,7 +202,7 @@ scripts/smoke-test.sh                     # live-desktop checks; see docs/SMOKE_
 
 | Target | Role |
 |---|---|
-| `BallastCore` | Config, rules, weights, BSP and master-stack layouts, and the engine state machine. Pure values with no I/O, so it can be unit-tested and fuzzed. |
+| `BallastCore` | Config, rules, weights, BSP, master-grid/master-stack layouts, and the engine state machine. Pure values with no I/O, so it can be unit-tested and fuzzed. |
 | `BallastApp` | macOS glue: Accessibility, read-only SkyLight, menu bar, hotkeys, and Preferences. |
 | `ballast` | A single binary that serves as both the app and the CLI. |
 

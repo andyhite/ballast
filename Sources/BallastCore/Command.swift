@@ -1,6 +1,9 @@
 import Foundation
 
 public enum LayoutMode: String, CaseIterable, Equatable, Sendable {
+    /// Masters beside a stack that tiles every window (up to `grid_max`, then scrolls).
+    case masterGrid = "master_grid"
+    /// Masters beside a stack that shows one window at a time and scrolls.
     case masterStack = "master_stack"
     case bsp
     case float
@@ -8,11 +11,15 @@ public enum LayoutMode: String, CaseIterable, Equatable, Sendable {
     /// Compact menu-bar glyph.
     public var glyph: String {
         switch self {
+        case .masterGrid: return "MG"
         case .masterStack: return "MS"
         case .bsp: return "BSP"
         case .float: return "⋯"
         }
     }
+
+    /// Whether the layout has a master region and a stack (master-grid or master-stack).
+    public var hasMaster: Bool { self == .masterGrid || self == .masterStack }
 }
 
 public enum LayoutChange: Equatable, Sendable {
@@ -54,7 +61,7 @@ public enum Command: Equatable, Sendable {
 
     public static let reference: [String] = [
         "focus left|right|up|down", "focus-last", "focus-master", "swap left|right|up|down",
-        "promote", "reset", "layout master_stack|bsp|float|next|prev|default", "monocle", "float",
+        "promote", "reset", "layout master_grid|master_stack|bsp|float|next|prev|default", "monocle", "float",
         "grow [amount]", "shrink [amount]", "master-ratio <+/-delta>", "master-count <+/-delta>",
         "balance", "send-to-display next|prev", "focus-display next|prev", "reload", "dump-state",
     ]
@@ -112,7 +119,7 @@ public enum Command: Equatable, Sendable {
             case "default": return .success(.layout(.configDefault))
             default:
                 guard let mode = LayoutMode(rawValue: arg) else {
-                    return .failure(.init("unknown layout '\(arg)' (master_stack|bsp|float)"))
+                    return .failure(.init("unknown layout '\(arg)' (master_grid|master_stack|bsp|float)"))
                 }
                 return .success(.layout(.set(mode)))
             }

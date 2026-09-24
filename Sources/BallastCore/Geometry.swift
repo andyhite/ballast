@@ -33,6 +33,31 @@ public struct Gaps: Equatable, Sendable {
 extension CGRect {
     func extent(_ axis: Axis) -> Double { axis == .horizontal ? width : height }
     func start(_ axis: Axis) -> Double { axis == .horizontal ? minX : minY }
+    func end(_ axis: Axis) -> Double { axis == .horizontal ? maxX : maxY }
+
+    /// Moved `delta` along `axis`.
+    func shifted(_ axis: Axis, by delta: Double) -> CGRect {
+        axis == .horizontal ? offsetBy(dx: delta, dy: 0) : offsetBy(dx: 0, dy: delta)
+    }
+
+    /// The slice from `from` to `from + length` along `axis`, spanning the
+    /// whole rect across it.
+    func band(_ axis: Axis, from: Double, length: Double) -> CGRect {
+        switch axis {
+        case .horizontal: return CGRect(x: from, y: minY, width: max(0, length), height: height)
+        case .vertical: return CGRect(x: minX, y: from, width: width, height: max(0, length))
+        }
+    }
+
+    /// Insets `start` from the start and `end` from the end along `axis`,
+    /// never producing a negative length.
+    func insetClamped(_ axis: Axis, start: Double, end: Double) -> CGRect {
+        let a = min(max(0, start), extent(axis) / 2), b = min(max(0, end), extent(axis) / 2)
+        switch axis {
+        case .horizontal: return CGRect(x: minX + a, y: minY, width: width - a - b, height: height)
+        case .vertical: return CGRect(x: minX, y: minY + a, width: width, height: height - a - b)
+        }
+    }
 
     /// Splits along `axis`: first child gets `firstLength`, then `gap`, then the rest.
     func split(_ axis: Axis, firstLength: Double, gap: Double) -> (CGRect, CGRect) {

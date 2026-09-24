@@ -30,24 +30,47 @@ public struct AnimationSettings: Equatable, Sendable {
 
 /// Fully-resolved layout settings for one (display, space).
 public struct LayoutSettings: Equatable, Sendable {
-    public var mode = LayoutMode.masterStack
+    /// `nil` leaves the mode to the display; see `mode(builtin:)`.
+    public var mode: LayoutMode?
     public var masterRatio = 0.6
     public var masterCount = 1
     public var stackSide = StackSide.right
+    /// Master-grid: the most stack windows tiled at once; more scroll with
+    /// the stack like master-stack's one window. 0 = no limit.
+    public var gridMax = 0
+    /// Points of the previous and next stack windows left showing at either
+    /// end of a scrolling stack.
+    public var stackPeek = 30.0
     /// Axis for new BSP splits; `nil` = automatic (longer side).
     public var split: Axis?
     /// Shape of the weight-default BSP tree.
     public var bspShape = BSPShape.dwindle
-    /// Weight Share Limit, for both layouts. BSP clamps each split's first
-    /// share to `[bspMinRatio, bspMaxRatio]`; master-stack applies the same
-    /// band as `maxWeightRatio`.
+    /// Weight Share Limit, for every layout. BSP clamps each split's first
+    /// share to `[bspMinRatio, bspMaxRatio]`; the master layouts apply the
+    /// same band as `maxWeightRatio`.
     public var bspMinRatio = 0.25
     public var bspMaxRatio = 0.75
     public var gaps = Gaps(inner: 8, outer: 8)
 
     public init() {}
 
-    /// The Weight Share Limit as a master-stack factor: no window's weight
+    /// The mode for a Space on a built-in (laptop) or an external display:
+    /// `mode` when set, otherwise the one-window stack on a small built-in
+    /// screen and the grid everywhere else.
+    public func mode(builtin: Bool) -> LayoutMode { mode ?? (builtin ? .masterStack : .masterGrid) }
+
+    /// How many stack windows `mode` shows at once before its stack scrolls;
+    /// `nil` = every one (no scrolling). Takes the Space's effective mode,
+    /// which a runtime override or the display can make differ from `self.mode`.
+    public func stackLimit(in mode: LayoutMode) -> Int? {
+        switch mode {
+        case .masterStack: return 1
+        case .masterGrid: return gridMax > 0 ? gridMax : nil
+        case .bsp, .float: return nil
+        }
+    }
+
+    /// The Weight Share Limit as a master-layout factor: no window's weight
     /// counts for more than this many times the lightest in its region, so two
     /// windows split a region at most 75/25 by default, like the two sides of
     /// a BSP split.
@@ -63,6 +86,8 @@ public struct LayoutOverrides: Equatable, Sendable {
     public var masterRatio: Double?
     public var masterCount: Int?
     public var stackSide: StackSide?
+    public var gridMax: Int?
+    public var stackPeek: Double?
     public var split: Axis??
     public var bspShape: BSPShape?
     public var bspMinRatio: Double?
@@ -78,6 +103,8 @@ public struct LayoutOverrides: Equatable, Sendable {
         if let masterRatio { s.masterRatio = masterRatio }
         if let masterCount { s.masterCount = masterCount }
         if let stackSide { s.stackSide = stackSide }
+        if let gridMax { s.gridMax = gridMax }
+        if let stackPeek { s.stackPeek = stackPeek }
         if let split { s.split = split }
         if let bspShape { s.bspShape = bspShape }
         if let bspMinRatio { s.bspMinRatio = bspMinRatio }
@@ -227,8 +254,8 @@ extension Config {
     }
 
     private static let layoutKeys: Set<String> = [
-        "mode", "master_ratio", "master_count", "stack_side", "split", "bsp_shape", "bsp_min_ratio", "bsp_max_ratio",
-        "gaps",
+        "mode", "master_ratio", "master_count", "stack_side", "grid_max", "stack_peek", "split", "bsp_shape",
+        "bsp_min_ratio", "bsp_max_ratio", "gaps",
     ]
 
     private static func readLayout(_ r: Reader, allowPlacement: Bool) -> LayoutOverrides {
@@ -243,6 +270,12 @@ extension Config {
             if (1...16).contains(v) { o.masterCount = v } else { r.error("master_count", "must be within 1…16") }
         }
         o.stackSide = r.enumeration("stack_side")
+        if let v = r.int("grid_max") {
+            if (0...16).contains(v) { o.gridMax = v } else { r.error("grid_max", "must be within 0…16 (0 = no limit)") }
+        }
+        if let v = r.number("stack_peek") {
+            if (0...200).contains(v) { o.stackPeek = v } else { r.error("stack_peek", "must be within 0…200") }
+        }
         if let v = r.string("split") {
             switch v {
             case "auto": o.split = .some(nil)

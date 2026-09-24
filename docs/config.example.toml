@@ -3,7 +3,7 @@
 #
 # You rarely need to edit this by hand: the menu bar item and Settings window
 # (menu > Preferences…) change every option here, and so do setting commands
-# (`layout …`, `master-ratio`, `master-count`, master-stack grow/shrink/balance).
+# (`layout …`, `master-ratio`, `master-count`, master grow/shrink/balance).
 # Ballast rewrites only the values it changes; comments and layout stay put.
 #
 # Hot-reloaded on save. An invalid file is rejected as a whole: the previous
@@ -26,10 +26,20 @@ easing = "ease_out_cubic"          # linear | ease_out_cubic | ease_in_out_cubic
 
 # Defaults for every (display, Space) pair.
 [layout]
-mode = "master_stack"              # master_stack | bsp | float (passthrough: WM never touches the Space)
+# mode = "master_grid"             # unset: master_stack on a built-in (laptop) display, master_grid on
+                                   #   external ones. Set it to pin one mode for every display:
+                                   #   master_grid: masters beside a stack that tiles every window (up to
+                                   #   grid_max, then scrolls) | master_stack: masters beside a stack that
+                                   #   shows one window at a time and scrolls | bsp | float (passthrough:
+                                   #   WM never touches the Space)
 master_ratio = 0.6                 # share of the master region, strictly between 0.05 and 0.95
 master_count = 1                   # 1…16
 stack_side = "right"               # right | left | bottom | top
+grid_max = 0                       # master_grid only: most stack windows tiled at once; the rest scroll
+                                   #   like master_stack's one window. 0 = no limit. 0…16
+stack_peek = 30                    # points of the previous/next stack window left showing at either end
+                                   #   while a stack scrolls (master_stack, or master_grid past grid_max).
+                                   #   0…200
 split = "auto"                     # BSP split direction: auto = across the longer side of each region, so
                                    # windows next to a heavy one stack. horizontal | vertical pin EVERY
                                    # split (all columns | all rows)
@@ -53,21 +63,28 @@ gaps = { inner = 12 }
 [[space]]
 display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
 ordinal = 2
-mode = "master_stack"
+mode = "master_grid"
 stack_side = "bottom"
 master_ratio = 0.65
 
-[[space]]
+[[space]]                          # one stack window at a time here too (the default on a built-in display)
 display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
 ordinal = 3
+mode = "master_stack"
+
+[[space]]
+display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
+ordinal = 4
 mode = "float"                     # hands off this Space entirely
 
 # App rules. Match fields: app_id (bundle id, exact match, case-insensitive),
 # app_name (substring, case-insensitive), title_regex, title_substring
 # (case-insensitive), ax_role, ax_subrole. The matching rule with the most
 # match fields wins; ties go to the earlier rule. Unmatched windows: weight
-# 1, tiled when they are standard windows (AXStandardWindow), floating
-# otherwise.
+# 1, tiled only when they are standard windows (AXStandardWindow) that
+# aren't modal, can be resized, and have a full-screen button — dialogs,
+# panels, and settings/update/confirmation windows float instead. Add
+# `float = false` to a rule to tile one anyway.
 #
 # Actions: weight (default 1), manage = false, float = true (+ placement,
 # size), sticky = true (best effort, see docs), on_self_move = snap_back|adopt.

@@ -45,7 +45,7 @@ flowchart LR
     SL[SpaceProvider<br/>SkyLight, read-only]
   end
   subgraph Core [BallastCore — pure values, no I/O]
-    E[Engine<br/>windows, SpaceStates,<br/>rules, weights, BSP, MS]
+    E[Engine<br/>windows, SpaceStates,<br/>rules, weights, BSP, MG/MS]
   end
   subgraph Mutation [per-app serial queues]
     FA[FrameApplier<br/>1 queue per pid]
@@ -150,7 +150,7 @@ Each `SpaceState` holds:
   *structural* change (a window joins or leaves, a weight changes, a config
   reload). Pure focus changes do not recompute it; otherwise two equal-weight
   windows would swap every time you clicked one.
-- `manual` + `manualOrder`: the live master-stack order after a user
+- `manual` + `manualOrder`: the live master order after a user
   swap/promote/drag/adopt, or a BSP resize/balance. While `manual` is set,
   the ideal keeps updating in the background but is **not applied**.
   Newcomers join the stack at their weight rank and never displace a
@@ -191,7 +191,7 @@ a `reset`; manually arranged Spaces keep their split directions until `reset`.
 ### 3.2.1 Config write-back
 
 Nothing is runtime-only: every setting the user changes from the menu bar, a
-setting command (`layout …`, `master-ratio`, `master-count`, master-stack
+setting command (`layout …`, `master-ratio`, `master-count`, master
 `grow`/`shrink`/`balance`), or the Preferences window is written to
 `~/.config/ballast/config.toml` so it survives restarts. Sources:
 
@@ -228,7 +228,7 @@ when the drag ends. While the binding editor is open,
 so a combination that is already bound is recorded instead of running its
 command.
 
-### 3.3 Weights
+### 3.3 Master-grid and master-stack
 
 `WeightResolver.rank` sorts by:
 
@@ -239,25 +239,98 @@ command.
 
 It is a pure function of `(windows, weights, focus history, creation order)`.
 
-- **Master-stack**: masters are `liveOrder.prefix(masterCount)`. When the
-  Space isn't manual, a weight-10 window launching next to a weight-1 master
-  takes the master slot on the same layout pass. `master_ratio` divides the
-  area between the master region and the stack; inside each region, windows
-  share its length in proportion to weight (a weight-2 stack window is twice
-  as tall as a weight-1 one). The Weight Share Limit applies per region: no
-  weight counts for more than `bsp_max_ratio / bsp_min_ratio` times the
-  lightest (3× by default), so two windows split a region at most 75/25,
-  like the two sides of a BSP split. Capping relative to the lightest keeps
-  the lighter windows' proportions (10:2:1 counts as 3:2:1). A window whose
-  share is below its learned AX minimum size gets that minimum, and the
-  others re-share the rest by weight.
+- **Master-grid and master-stack**: masters are `liveOrder.prefix(masterCount)`.
+  When the Space isn't manual, a weight-10 window launching next to a
+  weight-1 master takes the master slot on the same layout pass.
+  `master_ratio` divides the area between the master region and the stack;
+  inside each region, windows share its length in proportion to weight (a
+  weight-2 stack window is twice as tall as a weight-1 one). The Weight
+  Share Limit applies per region: no weight counts for more than
+  `bsp_max_ratio / bsp_min_ratio` times the lightest (3× by default), so two
+  windows split a region at most 75/25, like the two sides of a BSP split.
+  Capping relative to the lightest keeps the lighter windows' proportions
+  (10:2:1 counts as 3:2:1). A window whose share is below its learned AX
+  minimum size gets that minimum, and the others re-share the rest by
+  weight. `master_stack` always shows a one-window stack (§3.4); `master_grid`
+  tiles the whole stack unless it grows past `grid_max`, then scrolls the
+  same way.
 - **BSP**: each split's ratio is `sum(first subtree weights) / sum(both)`,
   clamped to `[bsp_min_ratio, bsp_max_ratio]` (the Weight Share Limit). A
   manual ratio wins. Learned AX minimum sizes are honored on top of this
   (see §4).
-  Grow/shrink uses the configured BSP ratio bounds; master-stack uses the
+  Grow/shrink uses the configured BSP ratio bounds; the master layouts use the
   same ratio bounds as configuration validation, so neither command reverses
   direction at a valid starting ratio.
+- **Which mode a desktop gets**: a runtime override (the menu, `layout …`)
+  wins until it is written back, then the desktop's `[[space]]` mode, then
+  `[layout]` mode. With neither set, `LayoutSettings.mode` stays `nil` and
+  `mode(builtin:)` picks `master_stack` for a built-in display, whose small
+  screen fits only one stack window, and `master_grid` for an external one.
+  The SkyLight provider marks each display in the snapshot `builtin` through
+  the public `CGDisplayIsBuiltin`, so the engine resolves it from the
+  snapshot like everything else.
+
+### 3.4 Scrolling stack
+
+A master layout's stack scrolls once it holds more windows than
+`stackLimit(in: mode)` (`LayoutSettings.stackLimit`): 1 for `master_stack`,
+`gridMax` for `master_grid` when `gridMax > 0`, otherwise unlimited (no
+scrolling — `master_grid`'s default). `MasterLayout.plan`/`stackPlan`
+(`MasterLayout.swift`) computes the geometry:
+
+- **Deck with peeks.** `stackLimit` equal-size slots fill the stack region.
+  The stack window just before the view is shifted `stack_peek` toward the
+  start, so its far edge (title bar, for a window above) shows past the
+  view; the one just after is shifted `stack_peek` toward the end the same
+  way. The slots give up `stack_peek` only at an end with a window beyond
+  it, so a view holding the first or last stack window reaches that edge of
+  the region instead of leaving an empty strip. Every other stack window is
+  tucked exactly behind the first or last slot, fully hidden. Slots ignore
+  weights, so a window's size changes only when the view reaches or leaves
+  an end of the stack.
+- **Which windows are in view.** `viewStart` is a pure function of
+  `(order, shown, recent)`: the view holds `recent`'s first stack window,
+  and among the starting positions that do, the one that also keeps the
+  next most recent one in view wins, and so on; a remaining tie goes to the
+  position nearest the start of the stack. `recent` is the Space's focus
+  history filtered to stack members, so there is no separate scroll-offset
+  state to keep in sync — the view is derived fresh from focus every layout
+  pass.
+- **Navigation.** `SpaceLayout.navigation` gives directional focus/swap a
+  virtual strip that continues past both ends of the view, so `focus
+  down`/`focus up` (or `left`/`right` when `stack_side` is `top`/`bottom`)
+  walk into the tucked windows one at a time. `Engine.focus` dirties a Space
+  whose stack scrolls, so the next layout pass pulls the newly focused window
+  into view.
+- **`SpaceLayout.covered`.** Windows tucked behind a view slot are recorded
+  with the strip of themselves still showing (zero length along the stack
+  when fully hidden). The drag hit test and the drop preview try the tiles in
+  view first, then these strips, so dragging over the peeking title bar of a
+  tucked window targets that window, not the one in front of it.
+- **Z-order.** Each tile in view must stay in front of the windows tucked
+  or peeking behind it, but macOS orders windows by focus history: a window
+  focused before the view scrolled, or one whose app came forward (⌘-Tab,
+  the Dock, a click on another of its windows), can end up over a tile.
+  `SpaceLayout.raise` names the focused window in view, and every pass
+  re-raises it. `SpaceLayout.behind` lists the other end tiles with the
+  windows that belong behind them; each pass on an active Space reads the
+  on-screen order (`CGWindowListCopyWindowInfo`, window numbers only) and
+  raises just the tiles `tilesToRaise(frontToBack:)` finds covered, so a
+  floating window over the stack stays put unless the deck is out of order.
+  Two rules bound every raise: nothing goes over a focused floating or
+  unmanaged window on that Space (monocle's guard), and no window of the
+  focused window's app is raised but the focused window itself. `AXRaise`
+  makes a window its app's focused window, which would steal focus from an
+  active app; a background app's raised window comes to the front of every
+  app's windows but the active app's, which is all the deck needs.
+- **Why not real offscreen scrolling.** macOS won't let a titled window's
+  top edge go above the menu bar or the top of a display, reassigns windows
+  pushed onto a neighboring display to that display's Space instead of
+  leaving them there, and clamps windows dragged fully offscreen back into
+  view. Any of those would undo an actual off-strip scroll position, so the
+  deck-with-peeks approach — real geometry, no off-display parking — is the
+  only one that survives macOS's own window-placement rules. AeroSpace's
+  accordion layout uses the same inset-and-peek idea.
 
 ## 4. Performance
 
@@ -360,6 +433,12 @@ tracks.
   the most recent *older* entry in that Space's history. This still holds if
   AppKit has already focused something else: a focus loss within 0.5 s
   before the close counts.
+- **Only the active app moves focus.** `AXFocusedWindowChanged` and
+  `AXMainWindowChanged` count only from the frontmost app. A background app
+  posts them too, when one of its windows closes or Ballast raises one to
+  fix a deck, and neither moves the user's focus. An app that comes forward
+  is read on `didActivateApplication`, which also covers its own
+  notification arriving before `NSWorkspace` reports it frontmost.
 - **Hidden applications.** Hidden windows release their tiles and are
   excluded from focus targets without being marked minimized. Unhiding an
   application restores its eligible windows to their Spaces.
@@ -401,6 +480,22 @@ tracks.
   `sticky = true` is therefore **best effort**: the window floats and never
   takes a tile on any Space. Windows that are already all-Spaces (SkyLight
   reports more than one Space) are left untiled.
+- **Default floating.** `WindowFacts.floatReason` (`Rules.swift`) decides
+  whether a window floats when no rule sets `float` explicitly, in this
+  order: role isn't `AXWindow`, subrole isn't `AXStandardWindow`, `AXModal`
+  is true, `AXSize` isn't settable, then no full-screen button. Unknown
+  facts count as the tiling answer, so a fact Ballast can't read never turns
+  a document window into a floater. `fullScreen` is judged only while the
+  window's close button reads `AXEnabled = true`: macOS removes the
+  full-screen button while a sheet is attached, and a window with no title
+  bar has no buttons to read either way, so both cases report `nil` instead
+  of a false `.noFullScreen`. Facts are re-read on deminiaturize and unhide:
+  AppKit reports a minimized window, and every window of a hidden app, as
+  subrole `AXDialog`, so a window first seen in either state would otherwise
+  float for good. A rule's own `float = true|false`
+  always overrides the default. This is the same "no full-screen button"
+  heuristic AeroSpace uses to catch settings, update and confirmation
+  windows.
 
 ## 9. Config
 
@@ -429,6 +524,16 @@ same trust level as any local user process, and not a scripting API.
 `dump-state` writes `~/Library/Caches/dev.ballast/state.json`; the smoke test
 uses it.
 
+**Window Inspector.** A non-activating floating panel
+(`Sources/BallastApp/Inspector.swift`, opened from the menu) shows the
+focused window's bundle id, AX role/subrole, why it floats or tiles (or the
+rule that overrides that), its weight and rule index, and its Space
+id/uuid/ordinal and display uuid/id. Its AX reads run on the inspected
+app's `FrameApplier` worker queue, so a hung app blocks only its own
+inspection, and it refreshes on `WindowManager.stateDidChange` — no polling.
+Its float/tile buttons write a rule through `WindowManager.editConfig`, the
+same path as every other config edit (§3.2.1).
+
 ## 11. Testing
 
 `swift test` runs these suites:
@@ -438,7 +543,8 @@ uses it.
 - config validation
 - weight resolution and tiebreaks
 - BSP subtree-weight ratios and clamping
-- master-stack geometry and weighted shares
+- master-grid/master-stack geometry, including scrolling-stack deck geometry and view selection
+- default-floating heuristics (`WindowFacts.floatReason` precedence)
 - engine behavior:
   - continuous weight-driven master
   - manual override persistence and reset

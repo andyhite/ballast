@@ -42,7 +42,7 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "com.tinyspeck.slackmacgap"), space: 1)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "com.ghostty.app"), space: 1)
 
-        #expect(engine.mode(for: 1) == .masterStack)
+        #expect(engine.mode(for: 1) == .masterGrid)
         let state = engine.spacesForTesting[1]!
         #expect(state.liveOrder.first == 2)
         let layout = engine.layout(space: 1, area: Self.area)
@@ -262,7 +262,7 @@ struct EngineTests {
         // Space 2 kept its live (manual) state but now resolves config via its
         // new ordinal (1), which has no override -> default mode.
         #expect(dirty.contains(2))
-        #expect(engine.mode(for: 2) == .masterStack)
+        #expect(engine.mode(for: 2) == .masterGrid)
         #expect(engine.spacesForTesting[2]!.manual)
         #expect(engine.spacesForTesting[2]!.liveOrder.first == 2)
 
@@ -416,6 +416,38 @@ struct EngineTests {
         #expect(engine.isTiled(1))
     }
 
+    @Test("dialog-like windows float by default; document windows and unknown facts tile", arguments: [
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", modal: false, resizable: true, fullScreen: true), true),
+        (WindowFacts(), true),
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", modal: true), false),
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", resizable: false), false),
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", fullScreen: false), false),
+    ])
+    func dialogHeuristics(facts: WindowFacts, tiles: Bool) {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: facts, space: 1)
+        #expect(engine.isTiled(1) == tiles)
+    }
+
+    @Test("a float = false rule tiles a window the heuristics would float")
+    func floatFalseRuleOverridesHeuristics() {
+        var config = Config()
+        config.rules = [AppRule(match: RuleMatch(appID: "com.example.fixed"), actions: RuleActions(float: false))]
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "com.example.fixed", resizable: false, fullScreen: false), space: 1)
+        #expect(engine.isTiled(1))
+    }
+
+    @Test("a window whose facts change (e.g. re-read on unhide) re-tiles or floats")
+    func factsChangeRetiles() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(subrole: "AXDialog"), space: 1)
+        #expect(!engine.isTiled(1))
+        let dirty = engine.updateFacts(1, WindowFacts(subrole: "AXStandardWindow", resizable: true, fullScreen: true))
+        #expect(dirty == [1])
+        #expect(engine.isTiled(1))
+    }
+
     @Test(".toggleFloat command flips tiling")
     func toggleFloatCommand() {
         var engine = Self.makeEngine()
@@ -504,6 +536,157 @@ struct EngineTests {
 
         // An unmanaged window on the same Space takes keyboard focus.
         _ = engine.focus(3)
+        #expect(engine.layout(space: 1, area: Self.area).raise == nil)
+    }
+
+    // MARK: - Mode by display
+
+    @Test("with no mode configured, built-in displays get master-stack and external ones master-grid; any configured mode wins")
+    func modeFollowsDisplayUnlessConfigured() {
+        let laptop = DisplaySpaces(displayUUID: Self.displayA, spaces: [
+            SpaceInfo(id: 1, uuid: "a1", kind: .user),
+            SpaceInfo(id: 2, uuid: "a2", kind: .user),
+        ], activeSpace: 1, builtin: true)
+        let external = DisplaySpaces(displayUUID: Self.displayB, spaces: [SpaceInfo(id: 4, uuid: "b1", kind: .user)], activeSpace: 4)
+        func engine(_ config: Config) -> Engine {
+            var engine = Engine(config: config)
+            _ = engine.updateSnapshot(SpaceSnapshot(displays: [laptop, external]))
+            return engine
+        }
+
+        var config = Config()
+        var automatic = engine(config)
+        #expect(automatic.mode(for: 1) == .masterStack)
+        #expect(automatic.mode(for: 4) == .masterGrid)
+        // A runtime override beats the display.
+        _ = automatic.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        #expect(automatic.mode(for: 1) == .bsp)
+
+        // A desktop's own mode beats the display.
+        var desktop = LayoutOverrides()
+        desktop.mode = .masterGrid
+        config.spaces[SpaceKey(display: Self.displayA, ordinal: 2)] = desktop
+        #expect(engine(config).mode(for: 2) == .masterGrid)
+
+        // An explicit [layout] mode applies to every display.
+        config.layout.mode = .bsp
+        #expect(engine(config).mode(for: 1) == .bsp)
+        #expect(engine(config).mode(for: 4) == .bsp)
+    }
+
+    // MARK: - Scrolling stack
+
+    /// `count` windows on Space 1 with no gaps: master 1, stack 2...count.
+    static func stackEngine(_ mode: LayoutMode = .masterStack, gridMax: Int = 0, count: Int) -> Engine {
+        var config = Config()
+        config.layout.mode = mode
+        config.layout.gridMax = gridMax
+        config.layout.gaps = Gaps(inner: 0, outer: 0)
+        var engine = Self.makeEngine(config: config)
+        for id in 1...count { _ = engine.addWindow(WindowID(id), pid: Int32(id), facts: WindowFacts(), space: 1) }
+        return engine
+    }
+
+    @Test("master-stack shows the focused stack window; the others tuck behind it, peeking at its ends")
+    func masterStackShowsOneWindow() {
+        var engine = Self.stackEngine(count: 4)
+        _ = engine.focus(3)
+        let layout = engine.layout(space: 1, area: Self.area)
+        let view = layout.frames[3]!
+        #expect(Set(layout.covered.keys) == [2, 4])
+        #expect(layout.raise == 3)
+        #expect(layout.covered[2]!.height == 30 && layout.covered[2]!.maxY == view.minY)
+        #expect(layout.covered[4]!.height == 30 && layout.covered[4]!.minY == view.maxY)
+
+        // A focused floating window on the Space stays on top.
+        _ = engine.addWindow(9, pid: 9, facts: WindowFacts(modal: true), space: 1)
+        _ = engine.focus(9)
+        let behindFloat = engine.layout(space: 1, area: Self.area)
+        #expect(behindFloat.raise == nil)
+        #expect(behindFloat.covered[3] == nil)
+    }
+
+    @Test("focus only dirties a Space whose stack scrolls")
+    func focusDirtiesScrollingStacks() {
+        var grid = Self.stackEngine(.masterGrid, count: 4)
+        #expect(grid.focus(3).isEmpty)
+        var capped = Self.stackEngine(.masterGrid, gridMax: 2, count: 4)
+        #expect(capped.focus(3) == [1])
+        var single = Self.stackEngine(count: 2)
+        #expect(single.focus(2).isEmpty)
+        var stack = Self.stackEngine(count: 3)
+        #expect(stack.focus(2) == [1])
+    }
+
+    @Test("directional focus walks the stack past the view and in and out of the master")
+    func focusWalksTheStrip() {
+        var engine = Self.stackEngine(count: 4)
+        _ = engine.focus(2)
+        #expect(engine.perform(.focus(.down), space: 1, area: Self.area).focus == 3)
+        _ = engine.focus(3)
+        #expect(engine.layout(space: 1, area: Self.area).covered[3] == nil)
+        #expect(engine.perform(.focus(.down), space: 1, area: Self.area).focus == 4)
+        #expect(engine.perform(.focus(.up), space: 1, area: Self.area).focus == 2)
+        #expect(engine.perform(.focus(.left), space: 1, area: Self.area).focus == 1)
+        // Back from the master lands on the window in view, not a tucked one.
+        _ = engine.focus(1)
+        #expect(engine.perform(.focus(.right), space: 1, area: Self.area).focus == 3)
+    }
+
+    @Test("swap moves the focused window along the stack and the view follows it")
+    func swapMovesAlongTheStack() {
+        var engine = Self.stackEngine(count: 4)
+        _ = engine.focus(2)
+        #expect(engine.perform(.swap(.down), space: 1, area: Self.area).dirty == [1])
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 3, 2, 4])
+        let layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.covered[2] == nil)
+        #expect(layout.raise == 2)
+    }
+
+    @Test("master-grid tiles grid_max stack windows, then scrolls")
+    func masterGridScrollsPastGridMax() {
+        var engine = Self.stackEngine(.masterGrid, gridMax: 2, count: 5)
+        _ = engine.focus(4)
+        let layout = engine.layout(space: 1, area: Self.area)
+        #expect(Set(layout.covered.keys) == [2, 5])
+        #expect(layout.frames[3]!.height == layout.frames[4]!.height)
+        #expect(layout.frames[3]!.maxY <= layout.frames[4]!.minY)
+    }
+
+    @Test("a tile in view is raised only while a window belonging behind it is in front of it")
+    func tilesToRaiseRestoreTheDeck() {
+        var engine = Self.stackEngine(.masterGrid, gridMax: 2, count: 5)
+        _ = engine.focus(4)
+        let layout = engine.layout(space: 1, area: Self.area)
+        // View [3, 4]: window 2 peeks above tile 3; tile 4 is `raise` anyway.
+        #expect(layout.raise == 4)
+        #expect(layout.behind == [3: [2]])
+        #expect(layout.tilesToRaise(frontToBack: [4, 2, 3, 5, 1]) == [3])
+        #expect(layout.tilesToRaise(frontToBack: [4, 3, 2, 5, 1]).isEmpty)
+
+        // Nothing is raised over a focused floating window.
+        _ = engine.addWindow(9, pid: 9, facts: WindowFacts(modal: true), space: 1)
+        _ = engine.focus(9)
+        #expect(engine.layout(space: 1, area: Self.area).behind.isEmpty)
+    }
+
+    @Test("never raises a window of the focused window's app but the focused one: raising hands it that app's focus")
+    func neverRaisesTheFocusedAppsOtherWindows() {
+        var config = Config()
+        config.layout.mode = .masterGrid
+        config.layout.gridMax = 2
+        var engine = Self.makeEngine(config: config)
+        // Windows 3 and 4 belong to one app.
+        for id: WindowID in 1...5 { _ = engine.addWindow(id, pid: id == 3 ? 4 : Int32(id), facts: WindowFacts(), space: 1) }
+        _ = engine.focus(4)
+        let layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.raise == 4)
+        #expect(layout.behind.isEmpty)
+
+        // Focus moves to a window of that app on another Space: tile 4 stays put.
+        _ = engine.addWindow(9, pid: 4, facts: WindowFacts(), space: 4)
+        _ = engine.focus(9)
         #expect(engine.layout(space: 1, area: Self.area).raise == nil)
     }
 
@@ -611,7 +794,7 @@ struct EngineTests {
         #expect(defaultOutcome.settings == SettingsChange(space: 1, mode: .some(nil)))
     }
 
-    @Test(".masterRatio and master-stack resize/balance emit a masterRatio SettingsChange")
+    @Test(".masterRatio and master-layout resize/balance emit a masterRatio SettingsChange")
     func masterRatioCommandsEmitSettingsChange() {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)

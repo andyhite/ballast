@@ -8,19 +8,59 @@ public struct WindowFacts: Equatable, Sendable {
     public var title: String?
     public var role: String?
     public var subrole: String?
+    /// `AXModal`: the app runs the window modally.
+    public var modal: Bool?
+    /// Whether the window's size can be set (`AXSize` is settable).
+    public var resizable: Bool?
+    /// Whether the window has a full-screen button. `nil` when that can't be
+    /// told, e.g. while a sheet is attached (macOS then removes the button)
+    /// or on a window without an enabled close button.
+    public var fullScreen: Bool?
 
     public init(bundleID: String? = nil, appName: String? = nil, title: String? = nil,
-                role: String? = nil, subrole: String? = nil) {
+                role: String? = nil, subrole: String? = nil,
+                modal: Bool? = nil, resizable: Bool? = nil, fullScreen: Bool? = nil) {
         self.bundleID = bundleID
         self.appName = appName
         self.title = title
         self.role = role
         self.subrole = subrole
+        self.modal = modal
+        self.resizable = resizable
+        self.fullScreen = fullScreen
     }
 
-    /// Standard document windows tile by default; dialogs, panels, sheets float.
-    public var isStandardWindow: Bool {
-        (role == nil || role == "AXWindow") && (subrole == nil || subrole == "AXStandardWindow")
+    /// Why the window floats unless a rule says otherwise; `nil` = it tiles.
+    /// Document windows tile. Dialogs, panels, sheets, modal and fixed-size
+    /// windows float, and so do windows that can't go full screen, which is
+    /// how settings, update and confirmation windows usually look. Unknown
+    /// facts count as the tiling answer.
+    public var floatReason: FloatReason? {
+        if let role, role != "AXWindow" { return .role(role) }
+        if let subrole, subrole != "AXStandardWindow" { return .subrole(subrole) }
+        if modal == true { return .modal }
+        if resizable == false { return .fixedSize }
+        if fullScreen == false { return .noFullScreen }
+        return nil
+    }
+}
+
+/// Why a window floats by default (see `WindowFacts.floatReason`).
+public enum FloatReason: Equatable, Sendable, CustomStringConvertible {
+    case role(String)
+    case subrole(String)
+    case modal
+    case fixedSize
+    case noFullScreen
+
+    public var description: String {
+        switch self {
+        case .role(let role): return "role \(role)"
+        case .subrole(let subrole): return "subrole \(subrole)"
+        case .modal: return "modal window"
+        case .fixedSize: return "fixed size"
+        case .noFullScreen: return "no full-screen button"
+        }
     }
 }
 
@@ -144,7 +184,7 @@ public struct ResolvedRule: Equatable, Sendable {
 public enum RuleResolver {
     /// Most-specific matching rule wins (most non-empty match fields); ties go
     /// to the earliest rule in file order. Unmatched windows get defaults
-    /// (weight 1, managed, tiled iff a standard window).
+    /// (weight 1, managed, tiled unless `WindowFacts.floatReason` says otherwise).
     public static func resolve(_ facts: WindowFacts, rules: [AppRule]) -> ResolvedRule {
         var best: (index: Int, specificity: Int)?
         for (index, rule) in rules.enumerated() where rule.match.matches(facts) {
@@ -154,7 +194,7 @@ public enum RuleResolver {
             }
         }
         var resolved = ResolvedRule()
-        resolved.float = !facts.isStandardWindow
+        resolved.float = facts.floatReason != nil
         guard let best, rules.indices.contains(best.index) else { return resolved }
         let actions = rules[best.index].actions
         resolved.ruleIndex = best.index

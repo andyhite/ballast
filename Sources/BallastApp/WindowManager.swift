@@ -17,19 +17,19 @@ final class WindowManager: AppObserverDelegate {
         case running
     }
 
-    private(set) var status = Status.starting { didSet { statusBar?.refresh() } }
+    private(set) var status = Status.starting { didSet { refreshSurfaces() } }
     private(set) var engine = Engine(config: Config())
     /// Latest reload error; the previous config stays live while set.
     private(set) var configError: String?
     private(set) var configNote: String?
     let configURL: URL
 
-    private let provider: (any SpaceProvider)?
+    let provider: (any SpaceProvider)?
     private let providerError: String?
-    private let applier = FrameApplier()
-    private var observers: [pid_t: AppObserver] = [:]
+    let applier = FrameApplier()
+    private(set) var observers: [pid_t: AppObserver] = [:]
     private var dockObserver: AppObserver?
-    private var elements: [WindowID: AXUIElement] = [:]
+    private(set) var elements: [WindowID: AXUIElement] = [:]
     private(set) var displays: [DisplayInfo] = []
     private var statusBar: StatusBar?
     private var hotkeys: HotKeyCenter?
@@ -44,7 +44,7 @@ final class WindowManager: AppObserverDelegate {
     private var frameInterval = 1.0 / 60
     private var reduceMotion = false
     /// Frame each window should have (last requested, then last observed result).
-    private var expected: [WindowID: CGRect] = [:]
+    private(set) var expected: [WindowID: CGRect] = [:]
     /// Last frame sent per window; identical requests are not re-sent (a
     /// window that refused a size is not retried every pass).
     private var lastRequested: [WindowID: CGRect] = [:]
@@ -316,6 +316,12 @@ final class WindowManager: AppObserverDelegate {
     /// once the app is unhidden.
     private func setHidden(pid: pid_t, _ hidden: Bool) {
         for (id, w) in engine.windows where w.pid == pid { markDirty(engine.setHidden(id, hidden)) }
+        // AppKit reports subrole AXDialog for windows of hidden apps; re-read
+        // once the app is unhidden so the resolved facts are correct again.
+        guard !hidden, let observer = observers[pid] else { return }
+        for (id, element) in elements where engine.windows[id]?.pid == pid {
+            markDirty(engine.updateFacts(id, windowFacts(element, observer: observer)))
+        }
     }
 
     // MARK: AX events
@@ -331,6 +337,11 @@ final class WindowManager: AppObserverDelegate {
         case kAXWindowCreatedNotification:
             track(element, observer: observer)
         case kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification:
+            // Only the active app's focused window is the user's focus. A
+            // background app's changes when a window of it closes, or when
+            // Ballast raises one; an app coming forward is picked up by its
+            // activation instead.
+            guard observer.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
             focusChanged(to: element)
         case kAXUIElementDestroyedNotification:
             if let id = elements.first(where: { CFEqual($0.value, element) })?.key {
@@ -340,7 +351,12 @@ final class WindowManager: AppObserverDelegate {
             }
         case kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification:
             guard let id = windowID(element) else { return }
-            markDirty(engine.setMinimized(id, notification == kAXWindowMiniaturizedNotification))
+            let deminiaturized = notification == kAXWindowDeminiaturizedNotification
+            markDirty(engine.setMinimized(id, !deminiaturized))
+            // AppKit reports subrole AXDialog while minimized; re-read on restore.
+            if deminiaturized, let pid = engine.windows[id]?.pid, let observer = observers[pid] {
+                markDirty(engine.updateFacts(id, windowFacts(element, observer: observer)))
+            }
         case kAXMovedNotification, kAXResizedNotification:
             // Only windows in the last plan can be displaced from their tile
             // (float-mode / passthrough Spaces are left alone).
@@ -351,6 +367,7 @@ final class WindowManager: AppObserverDelegate {
             guard let id = windowID(element), var facts = engine.windows[id]?.facts else { return }
             facts.title = AX.string(element, kAXTitleAttribute)
             markDirty(engine.updateFacts(id, facts))
+            if id == engine.frontmost { refreshSurfaces() }
         default:
             break
         }
@@ -365,16 +382,31 @@ final class WindowManager: AppObserverDelegate {
         for window in observer.windows { track(window, observer: observer) }
     }
 
+    /// Reads a window's `WindowFacts` from AX. `fullScreen` is judged only
+    /// when the close button exists and is enabled: macOS drops the
+    /// full-screen button while a sheet is attached, and title-bar-less
+    /// windows have no buttons at all, so both cases must read as unknown
+    /// rather than "no full-screen button".
+    private func windowFacts(_ element: AXUIElement, observer: AppObserver) -> WindowFacts {
+        let closeButton = AX.element(element, "AXCloseButton")
+        let closeEnabled = closeButton.flatMap { AX.bool($0, kAXEnabledAttribute) } == true
+        let fullScreen: Bool? = closeEnabled ? AX.element(element, "AXFullScreenButton") != nil : nil
+        return WindowFacts(bundleID: observer.bundleID, appName: observer.name,
+                           title: AX.string(element, kAXTitleAttribute),
+                           role: AX.string(element, kAXRoleAttribute),
+                           subrole: AX.string(element, kAXSubroleAttribute),
+                           modal: AX.bool(element, "AXModal"),
+                           resizable: AX.isSettable(element, kAXSizeAttribute),
+                           fullScreen: fullScreen)
+    }
+
     private func track(_ element: AXUIElement, observer: AppObserver) {
         guard let provider, let id = provider.windowID(for: element), id != 0 else { return }
         if elements[id] != nil { return }
         guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { return }
         // Native fullscreen windows live on their own Space: ignore entirely.
         if AX.bool(element, "AXFullScreen") == true { return }
-        let facts = WindowFacts(bundleID: observer.bundleID, appName: observer.name,
-                                title: AX.string(element, kAXTitleAttribute),
-                                role: AX.string(element, kAXRoleAttribute),
-                                subrole: AX.string(element, kAXSubroleAttribute))
+        let facts = windowFacts(element, observer: observer)
         guard observer.observe(window: element) else {
             Log.ax.notice("window \(id) of \(facts.appName ?? "?", privacy: .public) refused AX notifications; not tracked yet")
             return
@@ -436,7 +468,7 @@ final class WindowManager: AppObserverDelegate {
         guard let id = windowID(element) else { return }
         if let previous = engine.focused, previous != id { lastFocusLoss = (previous, Date()) }
         markDirty(engine.focus(id))
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     // MARK: Spaces
@@ -473,7 +505,7 @@ final class WindowManager: AppObserverDelegate {
             if let active = display.activeSpace { dirty.insert(active) }
         }
         scheduleLayout()
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     /// Detects windows moved between Spaces by native tools (Mission Control
@@ -547,7 +579,7 @@ final class WindowManager: AppObserverDelegate {
         for space in spaces.sorted() { layout(space, reassignedThisPass: &reassignedThisPass) }
         // A layout change mid-drag (a window opened or closed) moves the landing frame.
         if !spaces.isEmpty { updateDropPreview(force: true) }
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     private func layout(_ space: SpaceID, reassignedThisPass: inout Set<WindowID>) {
@@ -579,9 +611,25 @@ final class WindowManager: AppObserverDelegate {
                 self?.applied(id, requested: requested, outcome: outcome)
             }
         }
-        if active, let raise = plan.raise, let element = elements[raise], let pid = engine.windows[raise]?.pid {
-            applier.perform(pid: pid) { AX.raise(element) }
+        if active, !plan.behind.isEmpty {
+            // A window scrolled out of view can sit in front of the tile it
+            // belongs behind: it had focus before the view scrolled, or its
+            // app brought all of its windows forward.
+            for tile in plan.tilesToRaise(frontToBack: Self.windowsFrontToBack()) { raiseWindow(tile) }
         }
+        if active, let raise = plan.raise { raiseWindow(raise) }
+    }
+
+    private func raiseWindow(_ id: WindowID) {
+        guard let element = elements[id], let pid = engine.windows[id]?.pid else { return }
+        applier.perform(pid: pid) { AX.raise(element) }
+    }
+
+    /// On-screen windows, front to back.
+    private static func windowsFrontToBack() -> [WindowID] {
+        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        return list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
     }
 
     private func applied(_ id: WindowID, requested: CGRect, outcome: FrameApplier.Outcome) {
@@ -702,13 +750,24 @@ final class WindowManager: AppObserverDelegate {
     }
 
     /// Where releasing dragged window `id` at `point` sends it; nil snaps it back.
+    ///
+    /// Hit-tests against a fresh layout plan rather than `expected`: in a
+    /// scrolling stack, tucked windows' frames overlap the tile in view, so a
+    /// tile in view must win before a covered window's exposed strip.
     private func dropTarget(for id: WindowID, at point: CGPoint) -> DropTarget? {
         guard let space = engine.windows[id]?.space else { return nil }
         if let key = engine.snapshot.key(for: space), let display = displays.containing(point), display.uuid != key.display {
             return .display(display)
         }
-        let members = engine.spaces[space]?.members ?? []
-        return members.first { $0 != id && (expected[$0]?.contains(point) ?? false) }.map(DropTarget.swap)
+        guard let key = engine.snapshot.key(for: space), let area = displays.with(uuid: key.display)?.visibleFrame else { return nil }
+        let plan = engine.layout(space: space, area: area)
+        if let member = plan.frames.first(where: { $0.key != id && !plan.covered.keys.contains($0.key) && $0.value.contains(point) }) {
+            return .swap(member.key)
+        }
+        if let member = plan.covered.first(where: { $0.key != id && $0.value.contains(point) }) {
+            return .swap(member.key)
+        }
+        return nil
     }
 
     /// The frame changed size, not just position: a resize, never a drag between tiles.
@@ -767,7 +826,10 @@ final class WindowManager: AppObserverDelegate {
     private func dropZone(of id: WindowID, on target: DropTarget) -> CGRect? {
         switch target {
         case .swap(let other):
-            return expected[other]
+            guard let space = engine.windows[id]?.space, let key = engine.snapshot.key(for: space),
+                  let area = displays.with(uuid: key.display)?.visibleFrame else { return expected[other] }
+            let plan = engine.layout(space: space, area: area)
+            return plan.covered[other] ?? plan.frames[other]
         case .display(let display):
             var sim = engine
             guard let space = sim.snapshot.activeSpace(ofDisplay: display.uuid) else { return nil }
@@ -802,7 +864,7 @@ final class WindowManager: AppObserverDelegate {
            let frame = expected[id] ?? AX.frame(element) {
             CGWarpMouseCursorPosition(frame.center)
         }
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     /// Hit-tests on a background queue (a beachballing app under the cursor
@@ -861,7 +923,7 @@ final class WindowManager: AppObserverDelegate {
         case .dumpState?: dumpState()
         case nil: break
         }
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     private func runBinding(_ index: Int) {
@@ -987,7 +1049,7 @@ final class WindowManager: AppObserverDelegate {
         defer { if status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
         guard FileManager.default.fileExists(atPath: configURL.path) else {
             configError = "Config file missing at \(configURL.path); keeping the current config"
-            statusBar?.refresh()
+            refreshSurfaces()
             return
         }
         switch readConfig() {
@@ -1002,7 +1064,7 @@ final class WindowManager: AppObserverDelegate {
             Log.config.error("rejected config: \(error.message, privacy: .public)")
             Notifier.post(title: "Ballast config rejected", body: error.message)
         }
-        statusBar?.refresh()
+        refreshSurfaces()
     }
 
     private func applyBindings() {
@@ -1024,6 +1086,16 @@ final class WindowManager: AppObserverDelegate {
     /// Posted after every `reloadConfig()` attempt, success or rejection.
     static let configDidChange = Notification.Name("dev.ballast.configDidChange")
 
+    /// Posted whenever live state the menu bar or the Window Inspector shows
+    /// may have changed: focus, a layout pass, a resync, a reload, the
+    /// frontmost window's title.
+    static let stateDidChange = Notification.Name("dev.ballast.stateDidChange")
+
+    private func refreshSurfaces() {
+        statusBar?.refresh()
+        NotificationCenter.default.post(name: Self.stateDidChange, object: self)
+    }
+
     /// The live, validated config (menu bar and Preferences read from this).
     var config: Config { engine.config }
 
@@ -1035,6 +1107,7 @@ final class WindowManager: AppObserverDelegate {
         let key: SpaceKey
         let space: SpaceID
         let displayName: String
+        let builtin: Bool
         let isActive: Bool
     }
 
@@ -1049,8 +1122,8 @@ final class WindowManager: AppObserverDelegate {
             for info in entry.spaces where info.kind == .user {
                 ordinal += 1
                 result.append(DesktopInfo(
-                    key: SpaceKey(display: entry.displayUUID, ordinal: ordinal),
-                    space: info.id, displayName: display.name, isActive: entry.activeSpace == info.id))
+                    key: SpaceKey(display: entry.displayUUID, ordinal: ordinal), space: info.id,
+                    displayName: display.name, builtin: entry.builtin, isActive: entry.activeSpace == info.id))
             }
         }
         return result

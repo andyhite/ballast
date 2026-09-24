@@ -104,7 +104,7 @@ struct WeightResolverTests {
         #expect(order == [2, 3, 1])
 
         let rect = CGRect(x: 0, y: 0, width: 1200, height: 800)
-        let frames = MasterStackLayout.frames(order: order, in: rect, masterCount: 2, ratio: 0.5, side: .right, gap: 0)
+        let frames = MasterLayout.plan(order: order, in: rect, masterCount: 2, ratio: 0.5, side: .right, gap: 0).frames
         guard let masterFrame2 = frames[2], let masterFrame3 = frames[3], let stackFrame1 = frames[1] else {
             Issue.record("expected frames for windows 1, 2, 3")
             return

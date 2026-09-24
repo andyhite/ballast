@@ -74,7 +74,7 @@ first_display=$(jq -r '.[0].display' <<<"$before")
 first_name=$(jq -r --arg d "$first_display" '[.displays[] | select((.uuid | ascii_upcase) == ($d | ascii_upcase)) | .name][0] // $d' "$STATE")
 pause "Focus a window on display '$first_name' (its active Space needs 2+ tiled windows)"
 default_mode=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].mode' <<<"$before")
-override_mode="bsp"; [ "$default_mode" = "bsp" ] && override_mode="master_stack"
+override_mode="bsp"; [ "$default_mode" = "bsp" ] && override_mode="master_grid"
 "$BALLAST" send layout "$override_mode"; sleep 0.3
 "$BALLAST" send promote; sleep 0.3
 pre=$(active_spaces)
@@ -119,11 +119,11 @@ fi
 
 # ---------------------------------------------------------------------------
 step "2. Weight-based master reassignment when a heavier app launches"
-pause "Focus a window on a master_stack Space, quit $HEAVY if it is running, then press enter"
+pause "Focus a window on a master_grid Space, quit $HEAVY if it is running, then press enter"
 "$BALLAST" send reset
 open -b "$LIGHT"; sleep 1.5
-space=$(dump | jq -c --arg b "$LIGHT" '[.spaces[] | select(.active and .mode == "master_stack" and any(.live_order[]; .bundle == $b))][0]')
-if [ "$space" = "null" ]; then bad "$LIGHT did not land on an active master_stack Space"; else
+space=$(dump | jq -c --arg b "$LIGHT" '[.spaces[] | select(.active and .mode == "master_grid" and any(.live_order[]; .bundle == $b))][0]')
+if [ "$space" = "null" ]; then bad "$LIGHT did not land on an active master_grid Space"; else
   sid=$(jq '.space_id' <<<"$space")
   ok "$LIGHT tiled on Space $sid (master: $(jq -r '.live_order[0].app' <<<"$space"))"
   open -b "$HEAVY"; sleep 2

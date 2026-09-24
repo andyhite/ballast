@@ -17,7 +17,7 @@ move.
    `docs/config.example.toml` and replace the `[[space]]` UUIDs with yours.
    It must contain all of the following:
    - A `[[space]]` override that makes the **active** desktop of display A
-     `bsp`, while the active desktop of display B stays `master_stack`. That
+     `bsp`, while the active desktop of display B stays `master_grid`. That
      gives two Spaces on two displays with different modes.
    - A second desktop on one display with a mode different from its
      neighbor's. This is the drag target in step 3.
@@ -58,8 +58,8 @@ backup in place and prints where it is instead of deleting it.
 
 | # | What the script does | What you do / expect |
 |---|---|---|
-| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_stack` isn't already that Space's mode) plus a `promote` on the first display. Only if that Space is actually manual with the override set does it back up and touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without ever touching your config. Restores `layout default` + `reset` afterwards either way. | Focus a window (2+ tiled windows on its Space) on the named FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangement on Space … is preserved by reload`. This is the Rift regression. |
-| 2 | Resets the Space, launches the light app, then launches the heavy app. | Focus a `master_stack` Space and quit the heavy app first. **Expect:** the heavy app slides into the master slot on its own, and the light app moves to the stack. The Space is still not manual. |
+| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_grid` isn't already that Space's mode) plus a `promote` on the first display. Only if that Space is actually manual with the override set does it back up and touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without ever touching your config. Restores `layout default` + `reset` afterwards either way. | Focus a window (2+ tiled windows on its Space) on the named FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangeme…
+| 2 | Resets the Space, launches the light app, then launches the heavy app. | Focus a `master_grid` Space and quit the heavy app first. **Expect:** the heavy app slides into the master slot on its own, and the light app moves to the stack. The Space is still not manual. |
 | 3 | Diffs Space membership before and after your Mission Control drag. | In Mission Control, drag a tiled window onto another desktop thumbnail whose mode differs, then exit. **Expect:** the window is reported on its new Space, laid out in that Space's mode (for example it joins the BSP tree), and the source Space closes the gap. |
 | 4 | Toggles monocle on and off. Checks that every frame is identical while monocle is on and that the arrangement is restored exactly afterwards. Swaps with Reduce Motion on, then off. | **Expect:** a `Z` suffix in the menu bar while monocle is on. With Reduce Motion **on**, swaps snap instantly. With it **off**, the focused window glides (~180 ms) and the others snap. |
 
@@ -74,7 +74,7 @@ The script ends with `N passed, 0 failed`.
 - **Reset:** promote a window to master (`ballast send promote`), open a
   heavier app (it must *not* take the master slot, because the Space is
   manual), then run `ballast send reset`. The heavy app becomes master.
-- **Weighted stack:** on a `master_stack` Space that isn't manual (run
+- **Weighted stack:** on a `master_grid` Space that isn't manual (run
   `ballast send reset`), with a heavier master such as Ghostty at weight 10
   and three weight-1 stack windows, focus a stack window and pick
   **Focused App: …** → **Weight** → **2** in the menu. It moves to the top
@@ -82,6 +82,27 @@ The script ends with `N passed, 0 failed`.
   **5** instead and it stops at three times their height, the default
   Weight Share Limit (Max 75%). Set it back to **1 (default)** and the
   stack evens out.
+- **Scrolling stack:** set a Space to `master_stack` with one master and 3+
+  other windows, then focus a stack window in the middle of the stack.
+  **Expect:** only that window fills the stack region; the previous window
+  in stack order shows a `stack_peek`-wide strip of its title bar above it
+  (or to its side, per `stack_side`), and the next one shows a strip of its
+  bottom edge below. `focus down` (or `focus right` for `stack_side = top`/`bottom`)
+  scrolls the deck to bring the next window into view; `focus up`/`left`
+  scrolls back. At the first stack window nothing peeks above it and it
+  reaches the top of the stack region; at the last, it reaches the bottom.
+- **Deck order:** on a `master_grid` Space with `grid_max = 2` and 3+ stack
+  windows, focus the bottom tile, then click the title strip peeking above
+  the top tile. **Expect:** the clicked window scrolls into view, both
+  tiles in view show in full, and the window that lost focus shows only its
+  peek strip below them. Focus the master afterwards: nothing changes.
+- **Mode by display:** with no `mode` in `[layout]` and the laptop lid
+  open, `ballast spaces` shows `mode=master_stack` for the built-in
+  display's desktops that don't set their own mode, and `mode=master_grid`
+  for an external display's.
+- **Dialogs float:** open an app's Settings window and an "About" window.
+  **Expect:** both float over the tiled windows, and **Window Inspector…**
+  shows the reason, e.g. `Floating — default: no full-screen button`.
 - **Close fallback:** focus A, then B, then C on one Space and close C.
   Focus returns to B, not to whatever AppKit picks.
 - **Display move:** `ballast send send-to-display next` moves the focused
