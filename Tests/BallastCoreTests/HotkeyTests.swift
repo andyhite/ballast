@@ -6,8 +6,8 @@ struct HotkeyTests {
 
     @Test("modifier aliases resolve to the same modifier")
     func modifierAliases() {
-        let specs = ["cmd+a", "command+a", "\u{2318}+a"]
-        for spec in specs {
+        let commandSpecs = ["cmd+a", "command+a", "\u{2318}+a"]
+        for spec in commandSpecs {
             guard case .success(let hotkey) = Hotkey.parse(spec) else {
                 Issue.record("expected success for \(spec)")
                 continue
@@ -15,23 +15,32 @@ struct HotkeyTests {
             #expect(hotkey.modifiers == .command)
         }
 
-        guard case .success(let opt) = Hotkey.parse("opt+a") else {
-            Issue.record("expected success")
-            return
+        let optionSpecs = ["alt+a", "opt+a", "option+a", "\u{2325}+a"]
+        for spec in optionSpecs {
+            guard case .success(let hotkey) = Hotkey.parse(spec) else {
+                Issue.record("expected success for \(spec)")
+                continue
+            }
+            #expect(hotkey.modifiers == .option)
         }
-        #expect(opt.modifiers == .option)
 
-        guard case .success(let ctrl) = Hotkey.parse("ctrl+a") else {
-            Issue.record("expected success")
-            return
+        let controlSpecs = ["ctrl+a", "control+a", "\u{2303}+a"]
+        for spec in controlSpecs {
+            guard case .success(let hotkey) = Hotkey.parse(spec) else {
+                Issue.record("expected success for \(spec)")
+                continue
+            }
+            #expect(hotkey.modifiers == .control)
         }
-        #expect(ctrl.modifiers == .control)
 
-        guard case .success(let shift) = Hotkey.parse("shift+a") else {
-            Issue.record("expected success")
-            return
+        let shiftSpecs = ["cmd+shift+a", "cmd+\u{21E7}+a"]
+        for spec in shiftSpecs {
+            guard case .success(let hotkey) = Hotkey.parse(spec) else {
+                Issue.record("expected success for \(spec)")
+                continue
+            }
+            #expect(hotkey.modifiers == [.command, .shift])
         }
-        #expect(shift.modifiers == .shift)
     }
 
     @Test("hyper and meh compound modifiers")
@@ -86,10 +95,20 @@ struct HotkeyTests {
         #expect(hotkey.description == "ctrl+alt+shift+cmd+h")
     }
 
-    @Test("description round-trips through parse")
-    func descriptionRoundTrips() {
-        guard case .success(let hotkey) = Hotkey.parse("ctrl+alt+shift+cmd+h") else {
-            Issue.record("expected success")
+    @Test("description round-trips through parse", arguments: [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r",
+        "s", "t", "u", "v", "w", "x", "y", "z",
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10",
+        "f11", "f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20",
+        "left", "right", "up", "down", "return", "tab", "space", "escape",
+        "delete", "forwarddelete", "home", "end", "pageup", "pagedown",
+        "minus", "equal", "leftbracket", "rightbracket", "semicolon", "quote",
+        "comma", "period", "slash", "backslash", "grave",
+    ])
+    func descriptionRoundTrips(keyName: String) {
+        guard case .success(let hotkey) = Hotkey.parse("ctrl+alt+shift+cmd+\(keyName)") else {
+            Issue.record("expected success for \(keyName)")
             return
         }
         guard case .success(let reparsed) = Hotkey.parse(hotkey.description) else {
@@ -97,6 +116,25 @@ struct HotkeyTests {
             return
         }
         #expect(reparsed == hotkey)
+        #expect(hotkey.keyName == keyName)
+    }
+
+    @Test("key alias canonicalizes to the same hotkey", arguments: [
+        ("cmd+enter", "cmd+return"),
+        ("cmd+esc", "cmd+escape"),
+        ("cmd+backspace", "cmd+delete"),
+        ("cmd+-", "cmd+minus"),
+    ])
+    func aliasCanonicalization(alias: String, canonical: String) {
+        guard case .success(let aliasHotkey) = Hotkey.parse(alias) else {
+            Issue.record("expected success for \(alias)")
+            return
+        }
+        guard case .success(let canonicalHotkey) = Hotkey.parse(canonical) else {
+            Issue.record("expected success for \(canonical)")
+            return
+        }
+        #expect(aliasHotkey == canonicalHotkey)
     }
 
     @Test("empty spec is an error")
@@ -131,6 +169,50 @@ struct HotkeyTests {
         }
         #expect(error.description.contains("more than one key"))
     }
+    @Test("empty token in spec is an error", arguments: ["cmd+", "+a", "cmd++"])
+    func emptyToken(spec: String) {
+        guard case .failure(let error) = Hotkey.parse(spec) else {
+            Issue.record("expected failure for \(spec)")
+            return
+        }
+        #expect(error.description.contains("empty token"))
+    }
+
+    @Test("two aliases of the same key is an error")
+    func twoKeyAliases() {
+        guard case .failure(let error) = Hotkey.parse("return+enter") else {
+            Issue.record("expected failure")
+            return
+        }
+        #expect(error.description.contains("more than one key"))
+    }
+
+    @Test("bare typing keys without a modifier are rejected", arguments: ["a", "return", "space"])
+    func bareKeyRejected(spec: String) {
+        guard case .failure(let error) = Hotkey.parse(spec) else {
+            Issue.record("expected failure for \(spec)")
+            return
+        }
+        #expect(error.description.contains("modifier"))
+    }
+
+    @Test("shift-only typing keys are rejected", arguments: ["shift+a"])
+    func shiftOnlyKeyRejected(spec: String) {
+        guard case .failure(let error) = Hotkey.parse(spec) else {
+            Issue.record("expected failure for \(spec)")
+            return
+        }
+        #expect(error.description.contains("modifier"))
+    }
+
+    @Test("bare and shift-only function keys are accepted", arguments: ["f5", "shift+f5"])
+    func bareFunctionKeyAccepted(spec: String) {
+        guard case .success = Hotkey.parse(spec) else {
+            Issue.record("expected success for \(spec)")
+            return
+        }
+    }
+
 
     @Test("unknown token is named in the error message")
     func unknownToken() {
@@ -159,5 +241,22 @@ struct HotkeyTests {
         }
         #expect(hotkey.modifiers == [.command, .shift])
         #expect(hotkey.keyName == "h")
+    }
+}
+
+@Suite("Rule matching")
+struct RuleMatchingTests {
+    @Test("app_id matches case-insensitively")
+    func appIDCaseInsensitive() {
+        let rule = RuleMatch(appID: "com.apple.safari")
+        let facts = WindowFacts(bundleID: "com.apple.Safari")
+        #expect(rule.matches(facts))
+    }
+
+    @Test("app_id does not match a different bundle id")
+    func appIDMismatch() {
+        let rule = RuleMatch(appID: "com.apple.safari")
+        let facts = WindowFacts(bundleID: "com.apple.finder")
+        #expect(!rule.matches(facts))
     }
 }

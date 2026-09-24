@@ -139,6 +139,8 @@ private final class TOMLParser {
     let scanner: TOMLScanner
     let root: TOMLBuildTable
     var current: TOMLBuildTable
+    var depth = 0
+    static let maxNestingDepth = 128
 
     init(_ text: String) {
         self.scanner = TOMLScanner(text)
@@ -157,7 +159,7 @@ private final class TOMLParser {
 
     func parseDocument() throws -> TOMLTable {
         while true {
-            skipWhitespaceAndComments(acrossNewlines: true)
+            try skipWhitespaceAndComments(acrossNewlines: true)
             guard let c = scanner.peek() else { break }
             if c == "[" {
                 try parseHeader()
@@ -192,7 +194,7 @@ private final class TOMLParser {
         skipSpacesTabsOnly()
         if let c = scanner.peek() {
             if c == "#" {
-                while let cc = scanner.peek(), cc != "\n" { scanner.advance() }
+                while let cc = scanner.peek(), cc != "\n" { try checkCommentChar(cc); scanner.advance() }
             } else if c == "\n" || c == "\r" {
                 // fine, consumed by outer loop
             } else {
@@ -263,8 +265,14 @@ private final class TOMLParser {
             switch entry {
             case .table(let t):
                 if t.isInline { throw err("cannot extend inline table '\(part)'", at: pos) }
+                if creatingClosed, t.headerDefined {
+                    throw err("dotted key cannot extend table '\(part)' defined by a [header]", at: pos)
+                }
                 return t
             case .arrayOfTables(let arr):
+                if creatingClosed {
+                    throw err("dotted key cannot extend array of tables '\(part)'", at: pos)
+                }
                 guard let last = arr.last else {
                     throw err("cannot extend empty array of tables '\(part)'", at: pos)
                 }
@@ -298,7 +306,7 @@ private final class TOMLParser {
         skipSpacesTabsOnly()
         if let c = scanner.peek() {
             if c == "#" {
-                while let cc = scanner.peek(), cc != "\n" { scanner.advance() }
+                while let cc = scanner.peek(), cc != "\n" { try checkCommentChar(cc); scanner.advance() }
             } else if c == "\n" || c == "\r" {
                 // fine
             } else {
@@ -332,6 +340,9 @@ private final class TOMLParser {
                 scanner.advance()
                 skipSpacesTabsOnly()
                 parts.append(try parseSimpleKey())
+                guard parts.count <= Self.maxNestingDepth else {
+                    throw err("key is nested too deeply")
+                }
             } else {
                 break
             }
@@ -364,12 +375,12 @@ private final class TOMLParser {
         while let c = scanner.peek(), c == " " || c == "\t" { scanner.advance() }
     }
 
-    private func skipWhitespaceAndComments(acrossNewlines: Bool) {
+    private func skipWhitespaceAndComments(acrossNewlines: Bool) throws {
         while true {
             skipSpacesTabsOnly()
             guard let c = scanner.peek() else { break }
             if c == "#" {
-                while let cc = scanner.peek(), cc != "\n" { scanner.advance() }
+                while let cc = scanner.peek(), cc != "\n" { try checkCommentChar(cc); scanner.advance() }
                 continue
             }
             if acrossNewlines, c == "\n" || c == "\r" {
@@ -377,6 +388,27 @@ private final class TOMLParser {
                 continue
             }
             break
+        }
+    }
+
+    private func checkCommentChar(_ c: Unicode.Scalar) throws {
+        if c == "\r" {
+            guard scanner.peek(1) == "\n" else { throw err("bare carriage return not allowed") }
+            return
+        }
+        let v = c.value
+        if v <= 0x08 || (v >= 0x0B && v <= 0x1F) || v == 0x7F {
+            throw err("control character not allowed in comment")
+        }
+    }
+
+    private func checkNotControl(_ c: Unicode.Scalar) throws {
+        if c == "\r" {
+            throw err("bare carriage return not allowed")
+        }
+        let v = c.value
+        if v <= 0x08 || (v >= 0x0B && v <= 0x1F) || v == 0x7F {
+            throw err("control character not allowed in string")
         }
     }
 
@@ -406,8 +438,11 @@ private final class TOMLParser {
 
     private func parseArray() throws -> TOMLValue {
         scanner.advance() // '['
+        depth += 1
+        defer { depth -= 1 }
+        guard depth <= Self.maxNestingDepth else { throw err("nesting too deep") }
         var items: [TOMLValue] = []
-        skipWhitespaceAndComments(acrossNewlines: true)
+        try skipWhitespaceAndComments(acrossNewlines: true)
         if scanner.peek() == "]" {
             scanner.advance()
             return .array(items)
@@ -415,11 +450,11 @@ private final class TOMLParser {
         while true {
             let v = try parseValue()
             items.append(v)
-            skipWhitespaceAndComments(acrossNewlines: true)
+            try skipWhitespaceAndComments(acrossNewlines: true)
             guard let c = scanner.peek() else { throw err("unterminated array") }
             if c == "," {
                 scanner.advance()
-                skipWhitespaceAndComments(acrossNewlines: true)
+                try skipWhitespaceAndComments(acrossNewlines: true)
                 if scanner.peek() == "]" {
                     scanner.advance()
                     return .array(items)
@@ -436,6 +471,9 @@ private final class TOMLParser {
 
     private func parseInlineTable() throws -> TOMLValue {
         scanner.advance() // '{'
+        depth += 1
+        defer { depth -= 1 }
+        guard depth <= Self.maxNestingDepth else { throw err("nesting too deep") }
         let node = TOMLBuildTable()
         node.isInline = true
         node.headerDefined = true
@@ -500,6 +538,7 @@ private final class TOMLParser {
                 try appendEscape(to: &result, startPos: startPos)
                 continue
             }
+            try checkNotControl(c)
             result.unicodeScalars.append(c)
             scanner.advance()
         }
@@ -518,6 +557,7 @@ private final class TOMLParser {
             if c == "\n" || c == "\r" {
                 throw err("unterminated string (newline in single-line string)", at: startPos)
             }
+            try checkNotControl(c)
             result.unicodeScalars.append(c)
             scanner.advance()
         }
@@ -532,11 +572,16 @@ private final class TOMLParser {
             guard let c = scanner.peek() else { throw err("unterminated multi-line string", at: startPos) }
             if c == "\\" {
                 scanner.advance()
-                if let e = scanner.peek(), e == " " || e == "\t" || e == "\n" || e == "\r" {
-                    while let ws = scanner.peek(), ws == " " || ws == "\t" || ws == "\n" || ws == "\r" {
-                        scanner.advance()
+                if scanner.peek() == " " || scanner.peek() == "\t" || scanner.peek() == "\n" || scanner.peek() == "\r" {
+                    var k = 0
+                    while let ws = scanner.peek(k), ws == " " || ws == "\t" { k += 1 }
+                    let next = scanner.peek(k)
+                    if next == "\n" || (next == "\r" && scanner.peek(k + 1) == "\n") {
+                        while let ws = scanner.peek(), ws == " " || ws == "\t" || ws == "\n" || ws == "\r" {
+                            scanner.advance()
+                        }
+                        continue
                     }
-                    continue
                 }
                 try appendEscape(to: &result, startPos: startPos)
                 continue
@@ -565,6 +610,7 @@ private final class TOMLParser {
                 scanner.advance(); scanner.advance()
                 continue
             }
+            try checkNotControl(c)
             result.unicodeScalars.append(c)
             scanner.advance()
         }
@@ -601,6 +647,7 @@ private final class TOMLParser {
                 scanner.advance(); scanner.advance()
                 continue
             }
+            try checkNotControl(c)
             result.unicodeScalars.append(c)
             scanner.advance()
         }

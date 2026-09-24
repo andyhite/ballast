@@ -83,10 +83,18 @@ public enum Doctor {
     /// Major macOS versions Ballast has been tested against.
     public static let testedMacOSRange: ClosedRange<Int> = 14...26
 
-    public static func run() -> DoctorReport {
+    /// Where the doctor check is being run from — affects only the
+    /// Accessibility check's wording, since `AXIsProcessTrusted()` reports
+    /// the calling process's own grant, not Ballast.app's.
+    public enum Context: Sendable {
+        case app
+        case cli
+    }
+
+    public static func run(context: Context = .app) -> DoctorReport {
         var checks: [DoctorCheck] = []
 
-        checks.append(accessibilityCheck())
+        checks.append(accessibilityCheck(context: context))
         checks.append(separateSpacesCheck())
         checks.append(autoRearrangeCheck())
         checks.append(stageManagerCheck())
@@ -99,15 +107,18 @@ public enum Doctor {
 
     // MARK: - Individual checks
 
-    private static func accessibilityCheck() -> DoctorCheck {
+    private static func accessibilityCheck(context: Context) -> DoctorCheck {
         if AXIsProcessTrusted() {
-            return DoctorCheck(name: accessibilityCheckName, status: .pass, detail: "granted")
+            let detail = context == .cli
+                ? "granted to this terminal — see the menu-bar Doctor for Ballast.app's own status"
+                : "granted"
+            return DoctorCheck(name: accessibilityCheckName, status: .pass, detail: detail)
         }
-        return DoctorCheck(
-            name: accessibilityCheckName,
-            status: .fail,
-            detail: "not granted — enable in System Settings → Privacy & Security → Accessibility"
-        )
+        let detail = context == .cli
+            ? "not granted to this terminal — enable in System Settings → Privacy & Security → " +
+                "Accessibility (add the terminal app); see the menu-bar Doctor for Ballast.app's own status"
+            : "not granted — enable in System Settings → Privacy & Security → Accessibility (add Ballast.app)"
+        return DoctorCheck(name: accessibilityCheckName, status: .fail, detail: detail)
     }
 
     private static func separateSpacesCheck() -> DoctorCheck {
@@ -196,13 +207,12 @@ public enum Doctor {
             for display in snapshot.displays {
                 let hasUUID = display.displayUUID.count == 36 && display.displayUUID.contains("-")
                 if !hasUUID {
-                    return DoctorCheck(
-                        name: skyLightDataCheckName,
-                        status: .fail,
-                        detail:
-                            "display identifier \"\(display.displayUUID)\" is not a UUID " +
+                    let detail = SystemSettings.displaysHaveSeparateSpaces
+                        ? "display identifier \"\(display.displayUUID)\" is not a UUID " +
+                            "(\"Displays have separate Spaces\" is on but not yet in effect — log out and back in)"
+                        : "display identifier \"\(display.displayUUID)\" is not a UUID " +
                             "(enable \"Displays have separate Spaces\")"
-                    )
+                    return DoctorCheck(name: skyLightDataCheckName, status: .fail, detail: detail)
                 }
                 let userSpaceCount = display.spaces.filter { $0.kind == .user }.count
                 if userSpaceCount == 0 {

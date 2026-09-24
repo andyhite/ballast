@@ -117,10 +117,12 @@ extension Array where Element == DisplayInfo {
 
     /// Display holding most of `rect`.
     func best(for rect: CGRect) -> DisplayInfo? {
-        self.max { a, b in
+        guard let result = self.max(by: { a, b in
             let ia = a.frame.intersection(rect), ib = b.frame.intersection(rect)
             return (ia.isNull ? 0 : ia.width * ia.height) < (ib.isNull ? 0 : ib.width * ib.height)
-        }
+        }) else { return nil }
+        let area = result.frame.intersection(rect)
+        return (area.isNull || area.width * area.height == 0) ? nil : result
     }
 
     func with(uuid: String) -> DisplayInfo? { first { $0.uuid == uuid.uppercased() } }

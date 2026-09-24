@@ -11,8 +11,8 @@ patterns=(
   'fatalError\('
   'precondition(Failure)?\('
   '\bassert(ionFailure)?\('
-  '[][:alnum:]_)]![.,)[:space:]]'   # postfix force unwrap (not !=), e.g. x!.foo, xs.first!.count, f(x!), arr[i]!
-  '[][:alnum:]_)]!$'                # postfix force unwrap at end of line, e.g. let v = value!
+  '[][:alnum:]_)}>]![][),.:;}[:space:]]'   # postfix force unwrap (not !=), e.g. x!.foo, f(x!), a[i!], opt![0], [k: v!], {$0!}
+  '[][:alnum:]_)}>]!$'                      # postfix force unwrap / IUO at end of line, e.g. let v = value!, var s: Set<Int>!
 )
 
 status=0
@@ -23,7 +23,10 @@ for pattern in "${patterns[@]}"; do
   # or `["a": try!f("x")]`) and silently swallowed real trapping
   # constructs. Flagging occurrences inside string literals is an
   # acceptable, conservative false positive; missing real ones is not.
-  if matches=$(grep -HnE "$pattern" Sources/BallastCore/*.swift | grep -vE '^\S+:[0-9]+:\s*//'); then
+  rc=0
+  raw=$(grep -rHnE --include='*.swift' "$pattern" Sources/BallastCore) || rc=$?
+  [ "$rc" -le 1 ] || { echo "lint-core: grep failed ($rc) for pattern: $pattern" >&2; exit 2; }
+  if [ -n "$raw" ] && matches=$(grep -vE '^\S+:[0-9]+:\s*//' <<<"$raw"); then
     echo "trap-prone construct ($pattern):"
     echo "$matches"
     status=1

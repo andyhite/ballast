@@ -154,14 +154,29 @@ extension BSPNode {
         }
     }
 
-    /// Pins every split to an even 50/50 share.
+    /// Sets every split's axis (`nil` = automatic), keeping shape and ratios.
+    public func withAxis(_ axis: Axis?) -> BSPNode {
+        switch self {
+        case .leaf: return self
+        case .split(var s):
+            s.axis = axis
+            s.first = s.first.withAxis(axis)
+            s.second = s.second.withAxis(axis)
+            return .split(s)
+        }
+    }
+
+    /// Pins every split's ratio to each side's leaf-count share, so the
+    /// resulting tiles have equal area regardless of window weights.
     public func balanced() -> BSPNode {
         switch self {
         case .leaf: return self
         case .split(var s):
-            s.ratio = 0.5
             s.first = s.first.balanced()
             s.second = s.second.balanced()
+            let firstCount = s.first.leaves.count
+            let secondCount = s.second.leaves.count
+            s.ratio = Double(firstCount) / Double(firstCount + secondCount)
             return .split(s)
         }
     }

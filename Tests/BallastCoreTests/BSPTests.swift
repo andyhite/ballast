@@ -234,25 +234,36 @@ struct BSPTests {
 
     // MARK: - Balance
 
-    @Test("balanced pins every split to 50/50")
+    @Test("balanced pins splits to leaf-count share, equalizing leaf areas")
     func balancedPinsRatios() {
         let tree = BSPNode.split(BSPSplit(axis: .horizontal, first: .leaf(1), second: .leaf(2)))
         let balanced = tree.balanced()
         let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
-        // Despite drastically unequal weights, balanced() forces an even split.
+        // Despite drastically unequal weights, balanced() forces an even split
+        // for a two-leaf tree (1 leaf vs 1 leaf).
         let ctx = Self.context(weights: [1: 100, 2: 1], minRatio: 0, maxRatio: 1)
         let frames = balanced.layout(in: rect, context: ctx)
         #expect(abs(frames[1]!.width - frames[2]!.width) < 0.001)
 
-        // Recursively: every split in a deeper tree is pinned to ratio 0.5.
+        // Recursively: a 3-leaf dwindle tree balances to equal leaf areas,
+        // not a fixed 0.5 at every level. `split` rounds the first length to
+        // whole points, so allow one point of rounding along the longer side.
+        let slack = max(rect.width, rect.height)
         let deeper = BSPNode.ideal([1, 2, 3], axis: .horizontal)!.balanced()
-        func allRatiosAreHalf(_ node: BSPNode) -> Bool {
-            switch node {
-            case .leaf: return true
-            case .split(let s): return s.ratio == 0.5 && allRatiosAreHalf(s.first) && allRatiosAreHalf(s.second)
-            }
+        let deeperFrames = deeper.layout(in: rect, context: Self.context(minRatio: 0, maxRatio: 1))
+        let area1 = deeperFrames[1]!.width * deeperFrames[1]!.height
+        let area2 = deeperFrames[2]!.width * deeperFrames[2]!.height
+        let area3 = deeperFrames[3]!.width * deeperFrames[3]!.height
+        #expect(abs(area1 - area2) <= slack)
+        #expect(abs(area2 - area3) <= slack)
+
+        // 4-leaf dwindle: still equal areas across all leaves.
+        let quad = BSPNode.ideal([1, 2, 3, 4], axis: .horizontal)!.balanced()
+        let quadFrames = quad.layout(in: rect, context: Self.context(minRatio: 0, maxRatio: 1))
+        let quadAreas = [1, 2, 3, 4].map { quadFrames[$0]!.width * quadFrames[$0]!.height }
+        for area in quadAreas.dropFirst() {
+            #expect(abs(area - quadAreas[0]) <= slack)
         }
-        #expect(allRatiosAreHalf(deeper))
     }
 
     // MARK: - Resizing
@@ -318,5 +329,87 @@ struct BSPTests {
         let tree = BSPNode.split(BSPSplit(axis: .horizontal, first: .leaf(1), second: .leaf(2)))
         let ctx = Self.context()
         #expect(tree.resizing(99, by: 0.1, context: ctx) == .failure(.notFound(99)))
+    }
+
+    @Test("resizing the second child shrinks its share, not the first's")
+    func resizingSecondChildDirection() {
+        let tree = BSPNode.split(BSPSplit(axis: .horizontal, first: .leaf(1), second: .leaf(2)))
+        let ctx = Self.context(minRatio: 0, maxRatio: 1)
+        let result = tree.resizing(2, by: 0.1, context: ctx)
+        guard case .success(let next) = result, case .split(let s) = next else {
+            Issue.record("expected split")
+            return
+        }
+        // Growing leaf 2 (the second child) by 0.1 shrinks the first's share
+        // by 0.1: from 0.5 to 0.4.
+        #expect(abs((s.ratio ?? 0) - 0.4) < 0.0001)
+    }
+
+    @Test("resizing a nested leaf pins only its own parent split, not the root")
+    func resizingNestedLeafPinsOwnParentOnly() {
+        // ideal([1,2,3], axis: .horizontal) dwindles into
+        // split(leaf(1), split(leaf(2), leaf(3))).
+        let tree = BSPNode.ideal([1, 2, 3], axis: .horizontal)!
+        let ctx = Self.context(minRatio: 0, maxRatio: 1)
+        let result = tree.resizing(3, by: 0.1, context: ctx)
+        guard case .success(let next) = result, case .split(let root) = next,
+              case .split(let inner) = root.second else {
+            Issue.record("expected nested split")
+            return
+        }
+        #expect(root.ratio == nil)
+        #expect(abs((inner.ratio ?? 0) - 0.4) < 0.0001)
+    }
+
+    @Test("infeasible minimums degrade to proportional sizing")
+    func infeasibleMinimumsDegradeProportionally() {
+        let tree = BSPNode.split(BSPSplit(axis: .horizontal, first: .leaf(1), second: .leaf(2)))
+        let ctx = Self.context(
+            minRatio: 0, maxRatio: 1, gap: 0,
+            minSizes: [1: CGSize(width: 300, height: 0), 2: CGSize(width: 300, height: 0)])
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let frames = tree.layout(in: rect, context: ctx)
+        #expect(abs(frames[1]!.width - 200) < 0.001)
+        #expect(abs(frames[2]!.width - 200) < 0.001)
+    }
+
+    @Test("manual ratio outside bounds clamps to maxRatio")
+    func manualRatioClampsToMaxRatio() {
+        let tree = BSPNode.split(BSPSplit(axis: .horizontal, ratio: 0.99, first: .leaf(1), second: .leaf(2)))
+        let ctx = Self.context(minRatio: 0.25, maxRatio: 0.75)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let frames = tree.layout(in: rect, context: ctx)
+        #expect(abs(frames[1]!.width - 300) < 0.001)
+        #expect(abs(frames[2]!.width - 100) < 0.001)
+    }
+
+    @Test("NaN manual ratio falls back to weight-derived split")
+    func nanManualRatioFallsBackToWeights() {
+        let tree = BSPNode.split(BSPSplit(axis: .horizontal, ratio: .nan, first: .leaf(1), second: .leaf(2)))
+        let ctx = Self.context(weights: [1: 3, 2: 1], minRatio: 0, maxRatio: 1)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
+        let frames = tree.layout(in: rect, context: ctx)
+        #expect(abs(frames[1]!.width - 300) < 0.001)
+        #expect(abs(frames[2]!.width - 100) < 0.001)
+    }
+
+    @Test("automatic axis on a portrait rect resolves to vertical and stacks full-width frames")
+    func automaticAxisResolvesVerticalOnPortraitRect() {
+        let tree = BSPNode.ideal([1, 2, 3], axis: nil)!
+        let ctx = Self.context(gap: 8)
+        let rect = CGRect(x: 0, y: 0, width: 400, height: 800)
+        let frames = tree.layout(in: rect, context: ctx)
+        for id in [1, 2, 3] as [WindowID] {
+            #expect(abs(frames[id]!.width - 400) < 0.001)
+        }
+        #expect(abs(frames[2]!.minY - (frames[1]!.maxY + 8)) < 0.001)
+    }
+
+    @Test("removing a leaf whose sibling is a split promotes the sibling with its axis and ratio intact")
+    func removingPromotesSplitSiblingIntact() {
+        let inner = BSPSplit(axis: .vertical, ratio: 0.7, first: .leaf(2), second: .leaf(3))
+        let tree = BSPNode.split(BSPSplit(axis: .horizontal, first: .leaf(1), second: .split(inner)))
+        let result = tree.removing(1)
+        #expect(result == .success(.split(inner)))
     }
 }

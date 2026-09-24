@@ -143,21 +143,34 @@ extension Config {
         }
 
         for (index, space) in top.tables("space").enumerated() {
-            guard let display = space.string("display"), let ordinal = space.int("ordinal") else {
-                space.error("", "every [[space]] needs `display` (UUID) and `ordinal`")
-                continue
+            let display = space.string("display")
+            let ordinal = space.int("ordinal")
+            if space.table["display"] == nil {
+                space.error("display", "every [[space]] needs `display` (UUID) and `ordinal`")
             }
-            if UUID(uuidString: display) == nil {
-                space.error("display", "must be a display UUID (see `ballast spaces`), got '\(display)'")
+            if space.table["ordinal"] == nil {
+                space.error("ordinal", "every [[space]] needs `display` (UUID) and `ordinal`")
             }
-            if ordinal < 1 { space.error("ordinal", "must be ≥ 1") }
-            let key = SpaceKey(display: display.uppercased(), ordinal: ordinal)
-            if config.spaces[key] != nil {
-                space.error("", "duplicate [[space]] for display \(display) ordinal \(ordinal) (entry \(index + 1))")
+            if let display {
+                if UUID(uuidString: display) == nil {
+                    space.error("display", "must be a display UUID (see `ballast spaces`), got '\(display)'")
+                }
             }
-            let overrides = readLayout(space, allowPlacement: true)
-            validateClamp(overrides.applied(to: config.layout), reader: space)
-            config.spaces[key] = overrides
+            if let ordinal, ordinal < 1 { space.error("ordinal", "must be ≥ 1") }
+            if let display, let ordinal {
+                let key = SpaceKey(display: display.uppercased(), ordinal: ordinal)
+                if config.spaces[key] != nil {
+                    space.error("", "duplicate [[space]] for display \(display) ordinal \(ordinal) (entry \(index + 1))")
+                }
+                let overrides = readLayout(space, allowPlacement: true)
+                if overrides.bspMinRatio != nil || overrides.bspMaxRatio != nil {
+                    let clampKey = overrides.bspMinRatio != nil ? "bsp_min_ratio" : "bsp_max_ratio"
+                    validateClamp(overrides.applied(to: config.layout), reader: space, key: clampKey)
+                }
+                config.spaces[key] = overrides
+            } else {
+                _ = readLayout(space, allowPlacement: true)
+            }
         }
 
         for rule in top.tables("rule") {
@@ -204,7 +217,8 @@ extension Config {
         var o = LayoutOverrides()
         o.mode = r.enumeration("mode")
         if let v = r.number("master_ratio") {
-            if v > 0.05 && v < 0.95 { o.masterRatio = v } else { r.error("master_ratio", "must be within 0.05…0.95") }
+            if v > 0.05 && v < 0.95 { o.masterRatio = v }
+            else { r.error("master_ratio", "must be strictly between 0.05 and 0.95") }
         }
         if let v = r.int("master_count") {
             if (1...16).contains(v) { o.masterCount = v } else { r.error("master_count", "must be within 1…16") }
@@ -236,9 +250,9 @@ extension Config {
         return o
     }
 
-    private static func validateClamp(_ s: LayoutSettings, reader: Reader) {
+    private static func validateClamp(_ s: LayoutSettings, reader: Reader, key: String = "bsp_min_ratio") {
         if s.bspMinRatio > s.bspMaxRatio {
-            reader.error("bsp_min_ratio", "must not exceed bsp_max_ratio")
+            reader.error(key, "must not exceed bsp_max_ratio")
         }
     }
 
@@ -277,10 +291,20 @@ extension Config {
             case .table(let t):
                 let pr = Reader(t, path: r.childPath("placement"), diag: r.diag)
                 pr.allowOnly(["x", "y", "w", "h"])
-                if let x = pr.fraction("x"), let y = pr.fraction("y"), let w = pr.fraction("w"), let h = pr.fraction("h") {
-                    if w > 0 && h > 0 { actions.placement = .rect(x: x, y: y, w: w, h: h) }
-                    else { pr.error("", "w and h must be > 0") }
-                } else {
+                let beforeRect = pr.diag.errors.count
+                let x = pr.fraction("x")
+                let y = pr.fraction("y")
+                let w = pr.fraction("w")
+                let h = pr.fraction("h")
+                if let x, let y, let w, let h {
+                    if w > 0 && h > 0 && x + w <= 1 && y + h <= 1 {
+                        actions.placement = .rect(x: x, y: y, w: w, h: h)
+                    } else if w <= 0 || h <= 0 {
+                        pr.error("", "w and h must be > 0")
+                    } else {
+                        pr.error("", "x + w and y + h must be ≤ 1 (rect must fit within the display)")
+                    }
+                } else if pr.diag.errors.count == beforeRect {
                     pr.error("", "needs x, y, w, h as display fractions (0…1)")
                 }
             default:
@@ -295,11 +319,15 @@ extension Config {
                 size.error("", "needs w and h as display fractions in (0, 1]")
             }
         }
-        if actions.manage == false && (actions.float != nil || actions.placement != nil || actions.weight != nil) {
-            r.error("manage", "a `manage = false` rule cannot also set weight/float/placement")
+        let manageConflict = actions.manage == false
+            && (actions.float != nil || actions.placement != nil || actions.weight != nil
+                || actions.size != nil || actions.sticky != nil || actions.onSelfMove != nil)
+        if manageConflict {
+            r.error("manage", "a `manage = false` rule cannot also set weight/float/placement/size/sticky/on_self_move")
         }
-        if (actions.placement != nil || actions.size != nil) && actions.float != true {
-            r.error("placement", "placement/size only apply to floating windows; add `float = true`")
+        if !manageConflict && (actions.placement != nil || actions.size != nil) && actions.float != true {
+            let key = actions.placement != nil ? "placement" : "size"
+            r.error(key, "placement/size only apply to floating windows; add `float = true`")
         }
         return r.diag.errors.count == before ? AppRule(match: match, actions: actions) : nil
     }

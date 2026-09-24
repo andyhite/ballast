@@ -7,10 +7,14 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 BALLAST=${BALLAST:-.build/debug/ballast}
-CONFIG=${BALLAST_CONFIG:-$HOME/.config/ballast/config.toml}
+CONFIG=""
 STATE="$HOME/Library/Caches/dev.ballast/state.json"
-HEAVY=${SMOKE_HEAVY_APP:-com.mitchellh.ghostty}   # needs a weight > 1 rule
+HEAVY=${SMOKE_HEAVY_APP:-com.apple.Safari}   # non-terminal app; needs a weight > 1 rule in your config
 LIGHT=${SMOKE_LIGHT_APP:-com.apple.TextEdit}
+if [ "$HEAVY" = "${__CFBundleIdentifier:-}" ]; then
+  echo "SMOKE_HEAVY_APP ($HEAVY) is the terminal running this script; quitting it would kill the test. Set SMOKE_HEAVY_APP to a different app."
+  exit 2
+fi
 pass=0; fail=0
 
 ok()   { echo "  ✓ $*"; pass=$((pass + 1)); }
@@ -52,8 +56,9 @@ trap 'on_signal 143' TERM
 rm -f "$STATE"; "$BALLAST" send dump-state; sleep 0.5
 [ -s "$STATE" ] || { echo "no state dump at $STATE — start Ballast first: $BALLAST run"; exit 2; }
 command -v jq >/dev/null || { echo "jq is required"; exit 2; }
-[ -f "$CONFIG" ] || { echo "no config at $CONFIG"; exit 2; }
 dump | jq -e '.status == "running"' >/dev/null || { echo "Ballast is not in the running state:"; jq .status "$STATE"; exit 2; }
+CONFIG=$(jq -r '.config' "$STATE")
+[ -f "$CONFIG" ] || { echo "no config at $CONFIG"; exit 2; }
 
 # ---------------------------------------------------------------------------
 step "1. Two Spaces on two displays keep independent modes across a config reload"
@@ -65,12 +70,13 @@ modes=$(jq -r '[.[].mode] | unique | length' <<<"$before")
 [ "$modes" -ge 2 ] && ok "active Spaces use different modes: $(jq -r '[.[] | "\(.ordinal)@\(.display[0:8])=\(.mode)"] | join(", ")' <<<"$before")" \
                   || bad "active Spaces share one mode; add the [[space]] overrides from docs/SMOKE_TEST.md"
 
-pause "Focus a window on the FIRST display, then set a mode override and a manual swap there"
 first_display=$(jq -r '.[0].display' <<<"$before")
+first_name=$(jq -r --arg d "$first_display" '[.displays[] | select((.uuid | ascii_upcase) == ($d | ascii_upcase)) | .name][0] // $d' "$STATE")
+pause "Focus a window on display '$first_name' (its active Space needs 2+ tiled windows)"
 default_mode=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].mode' <<<"$before")
 override_mode="bsp"; [ "$default_mode" = "bsp" ] && override_mode="master_stack"
 "$BALLAST" send layout "$override_mode"; sleep 0.3
-"$BALLAST" send swap right; "$BALLAST" send swap down; sleep 0.3
+"$BALLAST" send promote; sleep 0.3
 pre=$(active_spaces)
 target_id=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].space_id' <<<"$pre")
 target_manual=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].manual' <<<"$pre")
@@ -79,12 +85,12 @@ if [ "$target_manual" = "true" ] && [ -n "$target_override" ] && [ "$target_over
   ok "Space $target_id is manual with an explicit $target_override override before touching config"
 
   backup_ok=0
-  if CONFIG_BACKUP=$(mktemp "${TMPDIR:-/tmp}/ballast-smoke-config.XXXXXX") && cat "$CONFIG" > "$CONFIG_BACKUP"; then
+  if tmp_backup=$(mktemp "${TMPDIR:-/tmp}/ballast-smoke-config.XXXXXX") && cat "$CONFIG" > "$tmp_backup"; then
+    CONFIG_BACKUP=$tmp_backup   # arm the restore only once the copy is complete
     backup_ok=1
   else
     bad "could not create a private backup of $CONFIG; skipping reload check without touching the config"
-    rm -f "$CONFIG_BACKUP" 2>/dev/null
-    CONFIG_BACKUP=""
+    rm -f "$tmp_backup" 2>/dev/null
   fi
 
   if [ "$backup_ok" -eq 1 ]; then
@@ -107,8 +113,9 @@ if [ "$target_manual" = "true" ] && [ -n "$target_override" ] && [ "$target_over
     dump | jq -e '.config_error == null' >/dev/null && ok "reload accepted (no config error)" || bad "config error: $(jq -r .config_error "$STATE")"
   fi
 else
-  bad "Space $target_id never entered manual mode with an explicit override (layout $override_mode + swaps); skipping reload check without touching the config"
+  bad "Space $target_id never entered manual mode with an explicit override (layout $override_mode + promote); skipping reload check without touching the config"
 fi
+"$BALLAST" send layout default; "$BALLAST" send reset; sleep 0.3   # leave the Space as step 1 found it
 
 # ---------------------------------------------------------------------------
 step "2. Weight-based master reassignment when a heavier app launches"
@@ -158,7 +165,8 @@ if [ "$mono" != "null" ]; then
   "$BALLAST" send monocle; sleep 0.5
   sid=$(jq '.space_id' <<<"$mono")
   restored=$(jq -n --argjson a "$before" --argjson b "$(dump | jq -c '[.spaces[] | select(.active)]')" --argjson s "$sid" \
-    '($a[] | select(.space_id == $s) | .frames | sort_by(.window.id)) == ($b[] | select(.space_id == $s) | .frames | sort_by(.window.id))')
+    'def geo: [.frames[] | {id: .window.id, x, y, w, h}] | sort_by(.id);
+     ($a[] | select(.space_id == $s) | geo) == ($b[] | select(.space_id == $s) | geo)')
   [ "$restored" = "true" ] && ok "untoggle restored the previous arrangement exactly" || bad "arrangement changed after monocle round-trip"
 else
   bad "monocle did not turn on (is a window focused on an active tiled Space?)"

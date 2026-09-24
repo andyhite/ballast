@@ -332,6 +332,69 @@ struct TOMLTests {
         }
     }
 
+    // MARK: - Malformed-input error positions
+
+    struct MalformedCase {
+        let name: String
+        let input: String
+        let line: Int
+        let column: Int
+    }
+
+    private static let malformedCases: [MalformedCase] = [
+        MalformedCase(name: "unterminated triple-quoted basic string", input: "s = \"\"\"abc", line: 1, column: 5),
+        MalformedCase(name: "unterminated triple-quoted literal string", input: "s = '''abc", line: 1, column: 5),
+        MalformedCase(name: "unterminated array", input: "a = [1, 2", line: 1, column: 10),
+        MalformedCase(name: "unterminated inline table", input: "a = { b = 1", line: 1, column: 12),
+        MalformedCase(name: "EOF inside \\u escape", input: #"s = "\u12"#, line: 1, column: 10),
+        MalformedCase(name: "EOF inside \\U escape", input: #"s = "\U0001F6"#, line: 1, column: 14),
+        MalformedCase(name: "surrogate escape value", input: #"s = "\uD800""#, line: 1, column: 12),
+        MalformedCase(name: "out-of-range escape value", input: #"s = "\UFFFFFFFF""#, line: 1, column: 16),
+        MalformedCase(name: "malformed header missing close", input: "[a", line: 1, column: 3),
+        MalformedCase(name: "malformed array-of-tables header missing close", input: "[[a]", line: 1, column: 5),
+        MalformedCase(name: "content after table header", input: "[a] x", line: 1, column: 5),
+        MalformedCase(name: "table then array-of-tables conflict", input: "[a]\n[[a]]", line: 2, column: 1),
+        MalformedCase(name: "array-of-tables then table conflict", input: "[[a]]\n[a]", line: 2, column: 1),
+        MalformedCase(
+            name: "dotted key extends a header-defined table",
+            input: "[settings.animation]\nenabled = true\n[settings]\nanimation.duration_ms = 180",
+            line: 4, column: 1
+        ),
+        MalformedCase(
+            name: "dotted key extends an array of tables",
+            input: "[[X.a]]\nn = 1\n[X]\na.y = 2", line: 4, column: 1
+        ),
+        MalformedCase(
+            name: "backslash-space in multiline string is an invalid escape",
+            input: "s = \"\"\"t\\ t\"\"\"", line: 1, column: 10
+        ),
+        MalformedCase(name: "raw control character in comment", input: "# a\u{01}b\n", line: 1, column: 4),
+        MalformedCase(name: "raw control character in string", input: "s = \"a\u{01}b\"", line: 1, column: 7),
+        MalformedCase(name: "bare carriage return in single-line string", input: "s = \"a\rb\"", line: 1, column: 5),
+    ]
+
+    @Test("malformed input throws at the expected line and column", arguments: malformedCases)
+    func malformedInput(_ testCase: MalformedCase) {
+        do {
+            _ = try TOML.parse(testCase.input)
+            Issue.record("expected throw for \(testCase.name)")
+        } catch let e as TOMLError {
+            #expect(e.line == testCase.line, "\(testCase.name): line")
+            #expect(e.column == testCase.column, "\(testCase.name): column")
+        } catch {
+            Issue.record("wrong error type for \(testCase.name)")
+        }
+    }
+
+    @Test("nesting deeper than the limit throws instead of overflowing the stack")
+    func excessiveNestingThrows() {
+        let opens = String(repeating: "[", count: 200)
+        #expect(throws: TOMLError.self) { try TOML.parse("x = \(opens)") }
+
+        let dotted = (0..<200).map { "k\($0)" }.joined(separator: ".")
+        #expect(throws: TOMLError.self) { try TOML.parse("\(dotted) = 1") }
+    }
+
     @Test("error description formats as line, column, message")
     func errorDescriptionFormat() {
         let e = TOMLError(line: 3, column: 5, message: "boom")
@@ -355,8 +418,6 @@ struct TOMLTests {
     func garbageInputNeverTraps() {
         let charset: [Character] = Array("abcdefABCDEF0123456789 \t\n\"'[]{}=,.#-_:+TZ\\\r")
         var rng = SplitMix64(state: 0xDEAD_BEEF_CAFE_BABE)
-        var threw = 0
-        var succeeded = 0
         for _ in 0..<2000 {
             let len = Int(rng.next() % 80)
             var s = ""
@@ -366,13 +427,10 @@ struct TOMLTests {
             }
             do {
                 _ = try TOML.parse(s)
-                succeeded += 1
             } catch is TOMLError {
-                threw += 1
             } catch {
                 Issue.record("unexpected error type: \(error)")
             }
         }
-        #expect(succeeded + threw == 2000)
     }
 }

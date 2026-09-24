@@ -24,6 +24,7 @@ struct MasterStackTests {
         #expect(frames[1]!.maxX == Self.rect.maxX) // master on the right
         #expect(frames[2]!.minX == Self.rect.minX) // stack on the left
         #expect(frames[1]!.minX >= frames[2]!.maxX)
+        #expect(abs(frames[1]!.width - 600) < 0.001) // master extent = ratio * width
     }
 
     @Test("side bottom: stack at the bottom, master at the top")
@@ -31,6 +32,10 @@ struct MasterStackTests {
         let frames = MasterStackLayout.frames(order: [1, 2], in: Self.rect, masterCount: 1, ratio: 0.6, side: .bottom, gap: 0)
         #expect(frames[1]!.minY == Self.rect.minY) // master on top
         #expect(frames[2]!.maxY == Self.rect.maxY) // stack on bottom
+        #expect(frames[2]!.minY >= frames[1]!.maxY)
+        #expect(abs(frames[1]!.width - Self.rect.width) < 0.001) // full-width tiles
+        #expect(abs(frames[2]!.width - Self.rect.width) < 0.001)
+        #expect(abs(frames[1]!.height - 300) < 0.001) // master extent = ratio * height
     }
 
     @Test("side top: stack at the top, master at the bottom")
@@ -38,6 +43,10 @@ struct MasterStackTests {
         let frames = MasterStackLayout.frames(order: [1, 2], in: Self.rect, masterCount: 1, ratio: 0.6, side: .top, gap: 0)
         #expect(frames[1]!.maxY == Self.rect.maxY) // master on bottom
         #expect(frames[2]!.minY == Self.rect.minY) // stack on top
+        #expect(frames[1]!.minY >= frames[2]!.maxY)
+        #expect(abs(frames[1]!.width - Self.rect.width) < 0.001) // full-width tiles
+        #expect(abs(frames[2]!.width - Self.rect.width) < 0.001)
+        #expect(abs(frames[1]!.height - 300) < 0.001) // master extent = ratio * height
     }
 
     @Test("ratio is respected for master region extent")
@@ -66,9 +75,9 @@ struct MasterStackTests {
             #expect(frame.maxY <= Self.rect.maxY + 0.001)
         }
         // Gap between master (1, left) and stack (2, right).
-        #expect(abs(frames[2]!.minX - frames[1]!.maxX) - gap < 0.5)
+        #expect(abs((frames[2]!.minX - frames[1]!.maxX) - gap) < 0.5)
         // Gap between the two stacked windows (2 above 3).
-        #expect(abs(frames[3]!.minY - frames[2]!.maxY) - gap < 0.5)
+        #expect(abs((frames[3]!.minY - frames[2]!.maxY) - gap) < 0.5)
     }
     @Test("empty stack lets masters fill the whole area")
     func emptyStackFillsArea() {
@@ -97,5 +106,53 @@ struct MasterStackTests {
     func emptyOrderYieldsNoFrames() {
         let frames = MasterStackLayout.frames(order: [], in: Self.rect, masterCount: 1, ratio: 0.6, side: .right, gap: 0)
         #expect(frames.isEmpty)
+    }
+
+    @Test("feasible minSize clamps master length up to the stack's minimum")
+    func minSizeFeasibleClamp() {
+        let rect = CGRect(x: 0, y: 0, width: 1000, height: 500)
+        let minSizes: [WindowID: CGSize] = [2: CGSize(width: 500, height: 0)]
+        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10) { minSizes[$0] ?? .zero }
+        #expect(abs(frames[1]!.width - 490) < 0.001)
+        #expect(abs(frames[2]!.width - 500) < 0.001)
+    }
+
+    @Test("infeasible minSize falls back to a proportional split")
+    func minSizeInfeasibleFallback() {
+        let rect = CGRect(x: 0, y: 0, width: 1000, height: 500)
+        let minSizes: [WindowID: CGSize] = [1: CGSize(width: 600, height: 0), 2: CGSize(width: 500, height: 0)]
+        let frames = MasterStackLayout.frames(order: [1, 2], in: rect, masterCount: 1, ratio: 0.6, side: .right, gap: 10) { minSizes[$0] ?? .zero }
+        #expect(abs(frames[1]!.width - 540) < 0.001)
+        #expect(abs(frames[2]!.width - 450) < 0.001)
+    }
+
+    @Test("multiple masters tile in the master column alongside a stack")
+    func multipleMastersTileInColumn() {
+        let frames = MasterStackLayout.frames(order: [1, 2, 3], in: Self.rect, masterCount: 2, ratio: 0.6, side: .right, gap: 10)
+        #expect(abs(frames[1]!.width - 594) < 0.001)
+        #expect(abs(frames[2]!.width - 594) < 0.001)
+        #expect(abs(frames[1]!.height - 245) < 0.001)
+        #expect(abs(frames[2]!.height - 245) < 0.001)
+    }
+
+    @Test("non-finite ratio falls back to 0.5")
+    func nonFiniteRatioFallsBack() {
+        let frames = MasterStackLayout.frames(order: [1, 2], in: Self.rect, masterCount: 1, ratio: .nan, side: .right, gap: 0)
+        #expect(abs(frames[1]!.width - 500) < 0.001)
+        #expect(abs(frames[2]!.width - 500) < 0.001)
+    }
+
+    @Test("ratio above 0.95 is clamped")
+    func ratioClampedAboveMax() {
+        let frames = MasterStackLayout.frames(order: [1, 2], in: Self.rect, masterCount: 1, ratio: 2, side: .right, gap: 0)
+        #expect(abs(frames[1]!.width - 950) < 0.001)
+        #expect(abs(frames[2]!.width - 50) < 0.001)
+    }
+
+    @Test("masterCount of zero is treated as one master")
+    func masterCountZeroBecomesOne() {
+        let frames = MasterStackLayout.frames(order: [1, 2], in: Self.rect, masterCount: 0, ratio: 0.6, side: .right, gap: 0)
+        #expect(abs(frames[1]!.width - 600) < 0.001)
+        #expect(abs(frames[2]!.width - 400) < 0.001)
     }
 }

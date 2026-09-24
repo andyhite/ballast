@@ -66,7 +66,7 @@ public struct RuleMatch: Equatable, Sendable {
     }
 
     public func matches(_ facts: WindowFacts) -> Bool {
-        if let appID, facts.bundleID != appID { return false }
+        if let appID, facts.bundleID?.caseInsensitiveCompare(appID) != .orderedSame { return false }
         if let appName {
             guard let name = facts.appName, name.range(of: appName, options: .caseInsensitive) != nil else { return false }
         }

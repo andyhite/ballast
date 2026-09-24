@@ -52,7 +52,7 @@ final class AppObserver {
             if result == .success || result == .notificationAlreadyRegistered { subscribed += 1 }
         }
         guard subscribed > 0 else { return false }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
         observer = created
         return true
     }
@@ -83,7 +83,7 @@ final class AppObserver {
 
     func stop() {
         guard let observer else { return }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
         self.observer = nil
     }
 

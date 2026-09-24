@@ -21,9 +21,12 @@ move.
      gives two Spaces on two displays with different modes.
    - A second desktop on one display with a mode different from its
      neighbor's. This is the drag target in step 3.
-   - A heavy rule and a light app. The example gives Ghostty `weight = 10`.
-     Override the apps with `SMOKE_HEAVY_APP` / `SMOKE_LIGHT_APP` (bundle ids).
-     The light app defaults to TextEdit.
+   - A heavy rule and a light app. The example gives Ghostty `weight = 10`;
+     add or reuse a weight > 1 rule for a non-terminal app if you use the
+     default `SMOKE_HEAVY_APP` (`com.apple.Safari`). Override the apps with
+     `SMOKE_HEAVY_APP` / `SMOKE_LIGHT_APP` (bundle ids). The heavy app must
+     not be the terminal you run the script from — the script refuses to
+     start if it is. The light app defaults to TextEdit.
    ```sh
    .build/debug/ballast check-config
    ```
@@ -55,7 +58,7 @@ backup in place and prints where it is instead of deleting it.
 
 | # | What the script does | What you do / expect |
 |---|---|---|
-| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_stack` isn't already that Space's mode) plus two swaps on the first display. Only if that Space is actually manual with the override set does it back up and touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without ever touching your config. | Focus a window on the FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangement on Space … is preserved by reload`. This is the Rift regression. |
+| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_stack` isn't already that Space's mode) plus a `promote` on the first display. Only if that Space is actually manual with the override set does it back up and touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without ever touching your config. Restores `layout default` + `reset` afterwards either way. | Focus a window (2+ tiled windows on its Space) on the named FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangement on Space … is preserved by reload`. This is the Rift regression. |
 | 2 | Resets the Space, launches the light app, then launches the heavy app. | Focus a `master_stack` Space and quit the heavy app first. **Expect:** the heavy app slides into the master slot on its own, and the light app moves to the stack. The Space is still not manual. |
 | 3 | Diffs Space membership before and after your Mission Control drag. | In Mission Control, drag a tiled window onto another desktop thumbnail whose mode differs, then exit. **Expect:** the window is reported on its new Space, laid out in that Space's mode (for example it joins the BSP tree), and the source Space closes the gap. |
 | 4 | Toggles monocle on and off. Checks that every frame is identical while monocle is on and that the arrangement is restored exactly afterwards. Swaps with Reduce Motion on, then off. | **Expect:** a `Z` suffix in the menu bar while monocle is on. With Reduce Motion **on**, swaps snap instantly. With it **off**, the focused window glides (~180 ms) and the others snap. |
@@ -68,9 +71,9 @@ The script ends with `N passed, 0 failed`.
   bar turns red (`! 2 · MS`), a notification names the path and error, and
   layouts keep working with the previous config. Fix the typo and the red
   clears.
-- **Reset:** swap two windows (`ballast send swap left`), open a heavier app
-  (it must *not* take the master slot, because the Space is manual), then run
-  `ballast send reset`. The heavy app becomes master.
+- **Reset:** promote a window to master (`ballast send promote`), open a
+  heavier app (it must *not* take the master slot, because the Space is
+  manual), then run `ballast send reset`. The heavy app becomes master.
 - **Close fallback:** focus A, then B, then C on one Space and close C.
   Focus returns to B, not to whatever AppKit picks.
 - **Display move:** `ballast send send-to-display next` moves the focused

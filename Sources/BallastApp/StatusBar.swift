@@ -1,5 +1,6 @@
 import AppKit
 import BallastCore
+import ServiceManagement
 
 /// Always-present menu bar item: `<ordinal> · <mode glyph>[ Z]` for the
 /// current display's active Space; red with a reason whenever something is
@@ -85,6 +86,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         menu.addItem(action("Reload Config") { [unowned self] in manager.reloadConfig() })
         menu.addItem(action("Open Config File") { [unowned self] in openConfig() })
         menu.addItem(action("Run Doctor…") { Self.showDoctor() })
+        if let login = loginItemMenuItem() { menu.addItem(login) }
         menu.addItem(.separator())
         menu.addItem(action("Quit Ballast") { NSApp.terminate(nil) })
     }
@@ -120,14 +122,70 @@ final class StatusBar: NSObject, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
 
+    /// Nil outside `Ballast.app` (e.g. `.build/debug/ballast run`), where
+    /// `SMAppService` can't find the bundled LaunchAgent.
+    private func loginItemMenuItem() -> NSMenuItem? {
+        guard LoginItem.unavailableReason == nil else { return nil }
+        let status = LoginItem.status
+        let title = status == .requiresApproval ? "Start at Login (needs approval…)" : "Start at Login"
+        let item = action(title) { Self.toggleLoginItem() }
+        item.state = status == .enabled ? .on : status == .requiresApproval ? .mixed : .off
+        return item
+    }
+
+    private static func toggleLoginItem() {
+        switch LoginItem.status {
+        case .requiresApproval:
+            SMAppService.openSystemSettingsLoginItems()
+        case .enabled:
+            // Unregistering boots the LaunchAgent out, and with it this
+            // process (the agent is what's running us while it is enabled).
+            let alert = NSAlert()
+            alert.messageText = "Turn off Start at Login?"
+            alert.informativeText = "Ballast quits now. Open it from Applications whenever you want it back."
+            alert.addButton(withTitle: "Turn Off and Quit")
+            alert.addButton(withTitle: "Cancel")
+            NSApp.activate()
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            setLoginItem(false)
+        default:
+            // launchd also starts a second copy right away; it loses the
+            // single-instance lock and exits cleanly, so this one keeps running.
+            setLoginItem(true)
+            if LoginItem.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        }
+    }
+
+    private static func setLoginItem(_ enabled: Bool) {
+        do { try LoginItem.setEnabled(enabled) } catch {
+            let alert = NSAlert()
+            alert.messageText = "Couldn't change Start at Login"
+            alert.informativeText = String(describing: error)
+            NSApp.activate()
+            alert.runModal()
+        }
+    }
+
+    private static var doctorWindowController: NSWindowController?
+
     static func showDoctor() {
         let report = Doctor.run()
         let alert = NSAlert()
         alert.messageText = report.canManage && report.accessibilityGranted ? "Ballast doctor: all good" : "Ballast doctor found problems"
         alert.informativeText = report.render()
         alert.alertStyle = report.canManage ? .informational : .warning
+        let okButton = alert.addButton(withTitle: "OK")
+
+        let window = alert.window
+        let controller = NSWindowController(window: window)
+        doctorWindowController = controller
+
+        okButton.target = controller
+        okButton.action = #selector(NSWindowController.close)
+
         NSApp.activate()
-        alert.runModal()
+        controller.showWindow(nil)
+        window.orderFrontRegardless()
     }
 
     static let starterConfig = """

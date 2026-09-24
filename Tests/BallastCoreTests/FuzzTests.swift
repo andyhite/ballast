@@ -169,14 +169,38 @@ struct EngineFuzzTests {
                 #expect(engine.isTiled(member), "seed \(seed) step \(step): member \(member) not tiled")
             }
 
-            // layout frames only contain members, all finite, non-negative sizes.
-            let area = CGRect(x: 0, y: 0, width: 1600, height: 1000)
-            let frames = engine.layout(space: spaceID, area: area).frames
-            for (id, frame) in frames {
-                #expect(state.members.contains(id), "seed \(seed) step \(step): layout frame for non-member \(id) on space \(spaceID)")
-                #expect(frame.width.isFinite && frame.height.isFinite && frame.minX.isFinite && frame.minY.isFinite,
-                        "seed \(seed) step \(step): non-finite frame for \(id)")
-                #expect(frame.width >= -0.0001 && frame.height >= -0.0001, "seed \(seed) step \(step): negative frame size for \(id)")
+            // layout frames: coverage (non-float modes tile every member),
+            // finiteness, non-negative sizes, and non-overlap (when no window
+            // has adopted its own frame), checked over several areas including
+            // degenerate ones.
+            let areas: [CGRect] = [
+                CGRect(x: 0, y: 0, width: 1600, height: 1000),
+                .zero,
+                CGRect(x: 0, y: 0, width: 10, height: 10),
+                CGRect(x: 0, y: 0, width: 2, height: 2),
+            ]
+            for area in areas {
+                let layout = engine.layout(space: spaceID, area: area)
+                let frames = layout.frames
+                if layout.mode != .float {
+                    #expect(Set(frames.keys) == Set(state.members),
+                            "seed \(seed) step \(step): layout \(layout.mode) frames \(Set(frames.keys)) != members \(Set(state.members)) on space \(spaceID) area \(area)")
+                }
+                for (id, frame) in frames {
+                    #expect(state.members.contains(id), "seed \(seed) step \(step): layout frame for non-member \(id) on space \(spaceID)")
+                    #expect(frame.width.isFinite && frame.height.isFinite && frame.minX.isFinite && frame.minY.isFinite,
+                            "seed \(seed) step \(step): non-finite frame for \(id)")
+                    #expect(frame.size.width >= 0 && frame.size.height >= 0, "seed \(seed) step \(step): negative frame size for \(id)")
+                }
+                if !layout.monocle && state.frameOverrides.isEmpty {
+                    let entries = Array(frames.filter { $0.value.width > 0 && $0.value.height > 0 })
+                    for i in 0..<entries.count {
+                        for j in (i + 1)..<entries.count {
+                            #expect(!entries[i].value.intersects(entries[j].value),
+                                    "seed \(seed) step \(step): frames for \(entries[i].key) and \(entries[j].key) intersect on space \(spaceID) area \(area)")
+                        }
+                    }
+                }
             }
         }
 
@@ -198,7 +222,7 @@ struct EngineFuzzTests {
         var knownIDs: [WindowID] = []
 
         for step in 0..<3000 {
-            switch rng.next() % 10 {
+            switch rng.next() % 11 {
             case 0, 1:
                 // addWindow: random id incl. duplicates.
                 let id: WindowID
@@ -238,15 +262,20 @@ struct EngineFuzzTests {
                                     width: Double(rng.next() % 800), height: Double(rng.next() % 800))
                 _ = engine.adoptFrame(id, frame)
             case 9:
-                switch rng.next() % 4 {
+                switch rng.next() % 3 {
                 case 0: _ = engine.applyConfig(Self.configA())
                 case 1: _ = engine.applyConfig(Self.configB())
-                case 2: _ = engine.updateSnapshot([Self.snapshotFull(), Self.snapshotSpaceDeleted(), Self.snapshotDisplayUnplugged()].randomElement(using: &rng)!)
-                default:
-                    let space = Self.randomSpace(&rng)
-                    let area = Self.randomArea(&rng)
-                    _ = engine.perform(Self.randomCommand(&rng), space: space, area: area)
+                default: _ = engine.updateSnapshot([Self.snapshotFull(), Self.snapshotSpaceDeleted(), Self.snapshotDisplayUnplugged()].randomElement(using: &rng)!)
                 }
+            case 10:
+                // Draw the command's Space from the focused window's Space
+                // most of the time, so focus-dependent commands (swap,
+                // promote, resize, toggleFloat, ...) actually land on a
+                // tiled member instead of missing on an unrelated Space.
+                let focusedSpace = engine.focused.flatMap { engine.windows[$0]?.space }
+                let space: SpaceID? = (focusedSpace != nil && rng.next() % 5 != 0) ? focusedSpace : Self.randomSpace(&rng)
+                let area = CGRect(x: 0, y: 0, width: 1600, height: 1000)
+                _ = engine.perform(Self.randomCommand(&rng), space: space, area: area)
             default: break
             }
             Self.assertInvariants(engine, seed: seed, step: step)
@@ -260,13 +289,29 @@ struct BSPFuzzTests {
     static func minSize(_ id: WindowID) -> CGSize { .zero }
     static func weight(_ id: WindowID) -> Double { 1 }
 
+    /// All manual (user-pinned) split ratios anywhere in the tree.
+    static func manualRatios(_ node: BSPNode) -> [Double] {
+        switch node {
+        case .leaf: return []
+        case .split(let s):
+            var ratios = s.ratio.map { [$0] } ?? []
+            ratios += manualRatios(s.first)
+            ratios += manualRatios(s.second)
+            return ratios
+        }
+    }
+
     @Test("random insert/remove/reparent/resize/swap sequences preserve tree invariants", arguments: [UInt64(11), 22, 33])
     func randomTreeOperations(seed: UInt64) {
         var rng = SplitMix64(seed: seed)
         var tree: BSPNode? = .leaf(0)
-        var shadow: Set<WindowID> = [0]
+        // Ordered, not a Set: `randomElement(using:)` on a Set walks
+        // hash-seeded storage order, which differs across process runs even
+        // for the same seed, defeating replay of a reported failure.
+        var shadow: [WindowID] = [0]
         var nextID: WindowID = 1
         let ctx = BSPLayoutContext(weight: Self.weight, minRatio: 0.1, maxRatio: 0.9, gap: 4, minSize: Self.minSize)
+        let layoutRect = CGRect(x: 0, y: 0, width: 1600, height: 1000)
 
         for step in 0..<3000 {
             let before = tree
@@ -282,13 +327,14 @@ struct BSPFuzzTests {
                     switch result {
                     case .success(let next):
                         tree = next
-                        shadow.insert(id)
-                    case .failure:
+                        shadow.append(id)
+                    case .failure(let error):
                         #expect(tree == before, "seed \(seed) step \(step): failed insert mutated tree")
+                        Issue.record("seed \(seed) step \(step): insert of fresh id \(id) unexpectedly failed: \(error)")
                     }
                 } else {
                     tree = .leaf(id)
-                    shadow.insert(id)
+                    shadow.append(id)
                 }
             case 1:
                 // Duplicate insert attempt (should fail, tree unchanged).
@@ -303,10 +349,11 @@ struct BSPFuzzTests {
                 switch t.removing(id) {
                 case .success(let next):
                     tree = next
-                    shadow.remove(id)
-                case .failure:
+                    shadow.removeAll { $0 == id }
+                case .failure(let error):
                     #expect(tree == before, "seed \(seed) step \(step): failed remove mutated tree")
                     #expect(!shadow.contains(id))
+                    #expect(error == .notFound(id), "seed \(seed) step \(step): unexpected remove error \(error)")
                 }
             case 3:
                 // Swap, valid or invalid ids.
@@ -316,8 +363,14 @@ struct BSPFuzzTests {
                 switch t.swapping(a, b) {
                 case .success(let next):
                     tree = next
-                case .failure:
+                    #expect(next.leaves.contains(a) && next.leaves.contains(b), "seed \(seed) step \(step): swap dropped a or b")
+                case .failure(let error):
                     #expect(tree == before, "seed \(seed) step \(step): failed swap mutated tree")
+                    if a == b {
+                        #expect(error == .sameWindow(a), "seed \(seed) step \(step): unexpected swap error \(error)")
+                    } else {
+                        #expect(error == .notFound(a) || error == .notFound(b), "seed \(seed) step \(step): unexpected swap error \(error)")
+                    }
                 }
             case 4:
                 // Resize a random (possibly unknown) id.
@@ -327,26 +380,31 @@ struct BSPFuzzTests {
                 switch t.resizing(id, by: delta, context: ctx) {
                 case .success(let next):
                     tree = next
-                case .failure:
+                case .failure(let error):
                     #expect(tree == before, "seed \(seed) step \(step): failed resize mutated tree")
+                    #expect(error == .notFound(id) || error == .isRoot(id), "seed \(seed) step \(step): unexpected resize error \(error)")
                 }
             default:
                 // Move (reparent): remove then insert elsewhere.
                 guard let t = tree, let id = shadow.randomElement(using: &rng) else { break }
-                guard case .success(let removed) = t.removing(id) else { break }
-                shadow.remove(id)
+                guard case .success(let removed) = t.removing(id) else {
+                    Issue.record("seed \(seed) step \(step): reparent remove of known id \(id) failed")
+                    break
+                }
+                shadow.removeAll { $0 == id }
                 let target = shadow.randomElement(using: &rng)
                 if let removed {
                     switch removed.inserting(id, nextTo: target, axis: nil) {
                     case .success(let next):
                         tree = next
-                        shadow.insert(id)
-                    case .failure:
+                        shadow.append(id)
+                    case .failure(let error):
+                        Issue.record("seed \(seed) step \(step): reparent reinsert of \(id) failed: \(error)")
                         tree = removed
                     }
                 } else {
                     tree = .leaf(id)
-                    shadow.insert(id)
+                    shadow.append(id)
                 }
             }
 
@@ -354,7 +412,27 @@ struct BSPFuzzTests {
             if let tree {
                 let leaves = tree.leaves
                 #expect(Set(leaves).count == leaves.count, "seed \(seed) step \(step): duplicate leaves")
-                #expect(Set(leaves) == shadow, "seed \(seed) step \(step): leaves \(Set(leaves)) != shadow \(shadow)")
+                #expect(Set(leaves) == Set(shadow), "seed \(seed) step \(step): leaves \(Set(leaves)) != shadow \(Set(shadow))")
+
+                // Layout: exactly one finite frame per leaf, no two non-empty
+                // frames intersect (minSize is zero here), manual ratios stay
+                // inside the configured bounds.
+                let frames = tree.layout(in: layoutRect, context: ctx)
+                #expect(Set(frames.keys) == Set(leaves), "seed \(seed) step \(step): layout frames \(Set(frames.keys)) != leaves \(Set(leaves))")
+                for (id, frame) in frames {
+                    #expect(frame.width.isFinite && frame.height.isFinite && frame.minX.isFinite && frame.minY.isFinite,
+                            "seed \(seed) step \(step): non-finite frame for \(id)")
+                }
+                let entries = Array(frames.filter { $0.value.width > 0 && $0.value.height > 0 })
+                for i in 0..<entries.count {
+                    for j in (i + 1)..<entries.count {
+                        #expect(!entries[i].value.intersects(entries[j].value),
+                                "seed \(seed) step \(step): frames for \(entries[i].key) and \(entries[j].key) intersect")
+                    }
+                }
+                for ratio in Self.manualRatios(tree) {
+                    #expect(ratio >= 0.1 && ratio <= 0.9, "seed \(seed) step \(step): manual ratio \(ratio) out of bounds")
+                }
             } else {
                 #expect(shadow.isEmpty, "seed \(seed) step \(step): nil tree but non-empty shadow")
             }

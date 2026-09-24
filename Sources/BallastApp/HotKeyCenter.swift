@@ -18,6 +18,8 @@ public final class HotKeyCenter {
 
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRefs: [EventHotKeyRef] = []
+    private var nextHotKeyID: UInt32 = 1
+    private var idToIndex: [UInt32: Int] = [:]
 
     public init(handler: @escaping (Int) -> Void) {
         self.handler = handler
@@ -40,19 +42,22 @@ public final class HotKeyCenter {
 
         var failures: [String] = []
         for (index, hotkey) in hotkeys.enumerated() {
-            let hotKeyID = EventHotKeyID(signature: Self.signature, id: UInt32(index))
+            let id = nextHotKeyID
+            nextHotKeyID += 1
+            let hotKeyID = EventHotKeyID(signature: Self.signature, id: id)
             var hotKeyRef: EventHotKeyRef?
             let status = RegisterEventHotKey(
                 hotkey.keyCode,
                 Self.carbonModifiers(for: hotkey.modifiers),
                 hotKeyID,
                 GetApplicationEventTarget(),
-                0,
+                OptionBits(kEventHotKeyExclusive),
                 &hotKeyRef
             )
 
             if status == noErr, let hotKeyRef {
                 hotKeyRefs.append(hotKeyRef)
+                idToIndex[id] = index
             } else {
                 let reason = status == eventHotKeyExistsErr
                     ? "already registered by another app"
@@ -70,6 +75,7 @@ public final class HotKeyCenter {
             UnregisterEventHotKey(ref)
         }
         hotKeyRefs.removeAll()
+        idToIndex.removeAll()
     }
 
     private func installEventHandler() {
@@ -108,11 +114,9 @@ public final class HotKeyCenter {
         )
 
         guard status == noErr, hotKeyID.signature == Self.signature else { return }
-        let index = Int(hotKeyID.id)
+        guard let index = idToIndex[hotKeyID.id] else { return }
 
-        DispatchQueue.main.async { [handler] in
-            handler(index)
-        }
+        handler(index)
     }
 
     private static func carbonModifiers(for modifiers: HotkeyModifiers) -> UInt32 {

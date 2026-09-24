@@ -30,7 +30,9 @@ public struct HotkeyParseError: Error, Equatable, CustomStringConvertible {
 /// Spec syntax: `+`-separated tokens, case-insensitive, whitespace trimmed
 /// around each token. Exactly one token must resolve to a key; all others
 /// must resolve to modifiers. Because `+` is the token separator, it cannot
-/// itself be used as (or embedded in) a key name.
+/// itself be used as (or embedded in) a key name. A spec with no modifier,
+/// or only `shift`, is rejected unless the key is `f1`-`f20` — bare typing
+/// keys would otherwise be captured system-wide.
 ///
 /// Modifier tokens: `cmd`/`command`/`⌘`, `alt`/`opt`/`option`/`⌥`,
 /// `ctrl`/`control`/`⌃`, `shift`/`⇧`. Compound modifier tokens:
@@ -102,6 +104,13 @@ public struct Hotkey: Hashable, Sendable, CustomStringConvertible {
 
         guard let key = resolvedKey else {
             return .failure(HotkeyParseError("hotkey spec \"\(trimmedSpec)\" has no key"))
+        }
+
+        let isFunctionKey = key.name.count >= 2 && key.name.count <= 3 && key.name.hasPrefix("f")
+            && key.name.dropFirst().allSatisfy(\.isNumber)
+        if modifiers.subtracting(.shift).isEmpty, !isFunctionKey {
+            return .failure(
+                HotkeyParseError("hotkey spec \"\(trimmedSpec)\" needs a modifier other than shift"))
         }
 
         return .success(Hotkey(keyCode: key.code, modifiers: modifiers, keyName: key.name))

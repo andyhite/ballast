@@ -24,7 +24,7 @@ final class WindowManager: AppObserverDelegate {
     private(set) var configNote: String?
     let configURL: URL
 
-    private let provider: SkyLightSpaceProvider?
+    private let provider: (any SpaceProvider)?
     private let providerError: String?
     private let applier = FrameApplier()
     private var observers: [pid_t: AppObserver] = [:]
@@ -66,6 +66,8 @@ final class WindowManager: AppObserverDelegate {
     private var laidOut: [SpaceID: Set<WindowID>] = [:]
     private let hitTestQueue = DispatchQueue(label: "dev.ballast.hit-test", qos: .userInteractive)
     private var hitTestPending = false
+    private var resyncPending = false
+    private var axTrustObserverTarget: AXTrustObserverTarget?
 
     init(configURL: URL) {
         self.configURL = configURL
@@ -82,12 +84,16 @@ final class WindowManager: AppObserverDelegate {
         watcher = ConfigWatcher(url: configURL) { [weak self] in self?.reloadConfig() }
         watcher?.start()
         hotkeys = HotKeyCenter { [weak self] index in self?.runBinding(index) }
-        DistributedNotificationCenter.default().addObserver(
-            forName: Notification.Name("com.apple.accessibility.api"), object: nil, queue: .main
-        ) { [weak self] _ in
+        let axTrustTarget = AXTrustObserverTarget { [weak self] in
             // Posted before the trust database settles; check shortly after.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.tryStart() }
         }
+        self.axTrustObserverTarget = axTrustTarget
+        DistributedNotificationCenter.default().addObserver(
+            axTrustTarget, selector: #selector(AXTrustObserverTarget.handle),
+            name: Notification.Name("com.apple.accessibility.api"), object: nil,
+            suspensionBehavior: .deliverImmediately
+        )
         DistributedNotificationCenter.default().addObserver(
             forName: BallastCLI.commandNotification, object: nil, queue: .main
         ) { [weak self] note in
@@ -114,8 +120,8 @@ final class WindowManager: AppObserverDelegate {
             let reason = !SystemSettings.displaysHaveSeparateSpaces
                 ? "Turn ON “Displays have separate Spaces” (Desktop & Dock), then log out and in."
                 : "Turn OFF “Automatically rearrange Spaces based on most recent use” (Desktop & Dock)."
+            if status != .blocked(reason) { Notifier.post(title: "Ballast is not managing windows", body: reason) }
             status = .blocked(reason)
-            Notifier.post(title: "Ballast is not managing windows", body: reason)
             return
         }
         guard AXIsProcessTrusted() else {
@@ -207,8 +213,8 @@ final class WindowManager: AppObserverDelegate {
             self?.forget(pid: app.processIdentifier)
         }
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
-            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  let observer = observers[app.processIdentifier] else { return }
+            guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            guard let observer = observers[app.processIdentifier] else { observe(app); return }
             discoverWindows(observer)
             if let window = observer.focusedWindow { focusChanged(to: window) }
         }
@@ -220,14 +226,14 @@ final class WindowManager: AppObserverDelegate {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self?.setHidden(pid: app.processIdentifier, false)
         }
-        on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in self?.fullResync() }
-        on(NSWorkspace.didWakeNotification) { [weak self] _ in self?.fullResync() }
+        on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in self?.requestResync() }
+        on(NSWorkspace.didWakeNotification) { [weak self] _ in self?.requestResync() }
         on(NSWorkspace.accessibilityDisplayOptionsDidChangeNotification) { [weak self] _ in
             self?.reduceMotion = SystemSettings.reduceMotion
         }
         workspaceTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.fullResync() })
+        ) { [weak self] _ in self?.requestResync() })
     }
 
     private func observeMouse() {
@@ -298,7 +304,7 @@ final class WindowManager: AppObserverDelegate {
         guard status == .running else { return }
         if observer === dockObserver {
             // Mission Control may have moved windows, added/removed/reordered desktops.
-            if notification == "AXExposeExit" { fullResync() }
+            if notification == "AXExposeExit" { requestResync() }
             return
         }
         switch notification {
@@ -358,7 +364,7 @@ final class WindowManager: AppObserverDelegate {
         markDirty(engine.addWindow(id, pid: observer.pid, facts: facts, space: space))
         if AX.bool(element, kAXMinimizedAttribute) == true { markDirty(engine.setMinimized(id, true)) }
         if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
-        placeFloating(id, element: element)
+        if space.map({ engine.mode(for: $0) }) != .float { placeFloating(id, element: element) }
         if engine.windows[id]?.rule.sticky == true {
             Log.wm.notice("sticky rule for \(facts.appName ?? "?", privacy: .public): pinning to all Spaces needs SIP changes; treated as floating")
         }
@@ -377,6 +383,7 @@ final class WindowManager: AppObserverDelegate {
         dragCandidates.remove(id)
         snapBackTimes[id] = nil
         applier.cancel(id)
+        applier.forget(window: id)
         let removal = engine.removeWindow(id, hadFocus: hadFocus)
         markDirty(removal.dirty)
         return removal
@@ -435,7 +442,7 @@ final class WindowManager: AppObserverDelegate {
         // A Space seen for the first time was filled in discovery order, not
         // rank order: start its BSP tree from the weight-computed ideal.
         for space in engine.spaces.keys where !seenSpaces.contains(space) { engine.adoptIdealTree(space) }
-        seenSpaces = Set(engine.spaces.keys)
+        seenSpaces = Set(engine.spaces.keys).union(engine.snapshot.displays.compactMap(\.activeSpace))
         if engine.focused == nil, let front = NSWorkspace.shared.frontmostApplication,
            let window = observers[front.processIdentifier]?.focusedWindow {
             focusChanged(to: window)
@@ -485,9 +492,20 @@ final class WindowManager: AppObserverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + frameInterval) { [weak self] in self?.runPass() }
     }
 
+    /// Coalesces `fullResync()` calls that can arrive several at once (e.g.
+    /// Mission Control exit plus the Space-change notification it triggers).
+    private func requestResync() {
+        resyncPending = true
+        scheduleLayout()
+    }
+
     private func runPass() {
         passScheduled = false
         guard status == .running else { return }
+        if resyncPending {
+            resyncPending = false
+            fullResync()
+        }
         classifyExternalMoves()
         let spaces = dirty
         dirty.removeAll()
@@ -563,7 +581,9 @@ final class WindowManager: AppObserverDelegate {
         if pendingChecks.contains(id) { scheduleLayout() }
     }
 
-    /// Classifies frame changes the WM did not make.
+    /// Classifies frame changes the WM did not make. The AX read that
+    /// verifies the frame runs on the app's own worker (never the main
+    /// thread), so a slow app only delays its own classification.
     private func classifyExternalMoves() {
         guard !pendingChecks.isEmpty else { return }
         let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
@@ -575,12 +595,18 @@ final class WindowManager: AppObserverDelegate {
                 continue
             }
             let dragged = dragCandidates.remove(id) != nil
-            guard let element = elements[id], let want = expected[id],
-                  let current = AX.frame(element), !current.approximatelyEquals(want) else { continue }
-            if dragged {
-                userDragged(id, to: current, from: want)
-            } else {
-                selfMoved(id, to: current)
+            guard let element = elements[id], let pid = engine.windows[id]?.pid else { continue }
+            applier.perform(pid: pid) { [weak self] in
+                let current = AX.frame(element)
+                DispatchQueue.main.async {
+                    guard let self, let want = self.expected[id], let current,
+                          !current.approximatelyEquals(want) else { return }
+                    if dragged {
+                        self.userDragged(id, to: current, from: want)
+                    } else {
+                        self.selfMoved(id, to: current)
+                    }
+                }
             }
         }
     }
@@ -651,7 +677,7 @@ final class WindowManager: AppObserverDelegate {
     /// WM-initiated focus. Warps the cursor when focus crosses displays.
     func focusWindow(_ id: WindowID, warp: Bool = true) {
         guard let element = elements[id], let w = engine.windows[id], !w.hidden else { return }
-        let previousDisplay = engine.focused.flatMap(display(of:))
+        let previousDisplay = engine.focused.flatMap(display(of:)) ?? displays.containing(currentMouseLocation())
         NSRunningApplication(processIdentifier: w.pid)?.activate()
         applier.perform(pid: w.pid) {
             AX.setBool(element, kAXMainAttribute, true)
@@ -753,7 +779,9 @@ final class WindowManager: AppObserverDelegate {
             guard let self else { return }
             applied(id, requested: requested, outcome: outcome)
             markDirty(engine.setSpace(id, resolveSpace(for: id, pid: w.pid, element: elements[id])))
-            CGWarpMouseCursorPosition(destination.center) // cursor follows the moved window
+            if engine.config.cursorFollowsFocus, let actual = outcome.actual, displays.best(for: actual)?.uuid == target.uuid {
+                CGWarpMouseCursorPosition(actual.center) // cursor follows the moved window
+            }
         }
     }
 
@@ -765,7 +793,7 @@ final class WindowManager: AppObserverDelegate {
             return w.space == space && !w.hidden && !w.minimized
         }) {
             focusWindow(id)
-        } else {
+        } else if engine.config.cursorFollowsFocus {
             CGWarpMouseCursorPosition(target.visibleFrame.center)
         }
     }
@@ -873,6 +901,23 @@ final class WindowManager: AppObserverDelegate {
     private func describe(_ id: WindowID) -> [String: Any] {
         let w = engine.windows[id]
         return ["id": id, "app": w?.facts.appName ?? "?", "bundle": w?.facts.bundleID ?? "?",
-                "title": w?.facts.title ?? "", "weight": w?.rule.weight ?? 1]
+                "weight": w?.rule.weight ?? 1]
+    }
+}
+
+/// Bridges `com.apple.accessibility.api` to `WindowManager` with
+/// `.deliverImmediately`, which only the selector-based distributed
+/// notification API can request. Ballast is an `.accessory` app that is
+/// almost never active, so the default coalescing suspension behaviour would
+/// otherwise hold this notification until Ballast is next activated.
+private final class AXTrustObserverTarget: NSObject {
+    private let handler: () -> Void
+
+    init(_ handler: @escaping () -> Void) {
+        self.handler = handler
+    }
+
+    @objc func handle(_ note: Notification) {
+        handler()
     }
 }

@@ -14,13 +14,9 @@ public enum SystemSettings {
     /// Forces a fresh read of `domain` before copying a value out of it.
     private static func freshBool(_ key: String, domain: CFString, default defaultValue: Bool) -> Bool {
         CFPreferencesAppSynchronize(domain)
-        guard let value = CFPreferencesCopyValue(key as CFString, domain, currentUser, anyHost) else {
-            return defaultValue
-        }
-        if let number = value as? NSNumber {
-            return number.boolValue
-        }
-        return defaultValue
+        var valid: DarwinBoolean = false
+        let result = CFPreferencesGetAppBooleanValue(key as CFString, domain, &valid)
+        return valid.boolValue ? result : defaultValue
     }
 
     /// "Displays have separate Spaces" — `com.apple.spaces` `spans-displays`

@@ -52,6 +52,10 @@ final class FrameApplier {
 
     func forget(pid: pid_t) { queues[pid] = nil }
 
+    /// Called on untrack: makes every outstanding generation for `window`
+    /// permanently stale, so no queued or in-flight request can complete for it.
+    func forget(window: WindowID) { generations.remove(window) }
+
     private func queue(for pid: pid_t) -> DispatchQueue {
         if let q = queues[pid] { return q }
         let q = DispatchQueue(label: "dev.ballast.ax.\(pid)", qos: .userInteractive)
@@ -116,10 +120,10 @@ final class FrameApplier {
                 return
             }
             let p = anim.easing.apply(t)
-            let step = CGRect(x: start.minX + (r.target.minX - start.minX) * p,
-                              y: start.minY + (r.target.minY - start.minY) * p,
-                              width: start.width + (r.target.width - start.width) * p,
-                              height: start.height + (r.target.height - start.height) * p).integral
+            let step = CGRect(x: (start.minX + (r.target.minX - start.minX) * p).rounded(),
+                              y: (start.minY + (r.target.minY - start.minY) * p).rounded(),
+                              width: (start.width + (r.target.width - start.width) * p).rounded(),
+                              height: (start.height + (r.target.height - start.height) * p).rounded())
             set(r.element, from: current, to: step)
             let nextFrameIndex = (elapsed / (anim.frameInterval * 1_000_000_000)).rounded(.down) + 1
             scheduleFrame(
@@ -145,33 +149,41 @@ final class FrameApplier {
         completion(Outcome(actual: actual, completed: true))
     }
 
-    /// Shrinking: size first, then position. Growing: position first, then
-    /// size. Either way the window never extends past its destination
-    /// mid-transition (so it can't clip off the display).
+    /// Shrinks each axis to min(old, new) first, moves, then grows to the
+    /// target size. Pure-shrink and pure-grow transitions collapse to their
+    /// original single-extra-write sequence. Either way the window never
+    /// extends past its old frame or its destination mid-transition (so it
+    /// can't clip off the display or spill onto a neighbouring one).
     private static func set(_ element: AXUIElement, from: CGRect, to: CGRect) {
-        let sizeChanged = !from.size.equalTo(to.size)
-        let moved = !from.origin.equalTo(to.origin)
-        let shrinking = to.width <= from.width && to.height <= from.height
-        if shrinking {
-            if sizeChanged { AX.setSize(element, to.size) }
-            if moved { AX.setPosition(element, to.origin) }
-        } else {
-            if moved { AX.setPosition(element, to.origin) }
-            if sizeChanged { AX.setSize(element, to.size) }
-        }
+        let interim = CGSize(width: min(from.width, to.width), height: min(from.height, to.height))
+        if !interim.equalTo(from.size) { AX.setSize(element, interim) }
+        if !from.origin.equalTo(to.origin) { AX.setPosition(element, to.origin) }
+        if !interim.equalTo(to.size) { AX.setSize(element, to.size) }
     }
 }
 
 /// Per-window request generation, shared between main and worker threads.
+/// Uses one global monotonic counter rather than per-window counters: if a
+/// window's entry were simply deleted on `remove`, a later window reusing
+/// the same id could restart its counter at 1, and a stale queued request
+/// carrying generation 1 would pass `isCurrent` again. With a global
+/// counter, removing an id makes every outstanding generation for it stale
+/// forever, and any later generation is strictly larger than every old one.
 private final class Generations: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [WindowID: UInt64] = [:]
+    private var counter: UInt64 = 0
 
     func next(_ id: WindowID) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        let v = (values[id] ?? 0) &+ 1
-        values[id] = v
-        return v
+        counter &+= 1
+        values[id] = counter
+        return counter
+    }
+
+    func remove(_ id: WindowID) {
+        lock.lock(); defer { lock.unlock() }
+        values[id] = nil
     }
 
     func isCurrent(_ id: WindowID, _ generation: UInt64) -> Bool {

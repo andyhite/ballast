@@ -23,10 +23,12 @@ easing = "ease_out_cubic"          # linear | ease_out_cubic | ease_in_out_cubic
 # Defaults for every (display, Space) pair.
 [layout]
 mode = "master_stack"              # master_stack | bsp | float (passthrough: WM never touches the Space)
-master_ratio = 0.6                 # share of the master region, 0.05…0.95
+master_ratio = 0.6                 # share of the master region, strictly between 0.05 and 0.95
 master_count = 1                   # 1…16
 stack_side = "right"               # right | left | bottom | top
-split = "auto"                     # BSP split for new windows: auto (longer side) | horizontal | vertical
+split = "auto"                     # BSP split direction: auto = across the longer side of each region, so
+                                   # windows next to a heavy one stack. horizontal | vertical pin EVERY
+                                   # split (all columns | all rows)
 bsp_min_ratio = 0.25               # BSP weight-ratio clamp: a weight-10 window never starves
 bsp_max_ratio = 0.75               #   a weight-1 sibling below 25% of their shared region
 gaps = { inner = 8, outer = 8 }
@@ -38,7 +40,6 @@ gaps = { inner = 8, outer = 8 }
 display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
 ordinal = 1
 mode = "bsp"
-split = "horizontal"
 gaps = { inner = 12 }
 
 [[space]]
@@ -53,11 +54,12 @@ display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
 ordinal = 3
 mode = "float"                     # hands off this Space entirely
 
-# App rules. Match fields: app_id (bundle id, exact), app_name (substring,
-# case-insensitive), title_regex, title_substring (case-insensitive),
-# ax_role, ax_subrole. The matching rule with the most match fields wins;
-# ties go to the earlier rule. Unmatched windows: weight 1, tiled when they
-# are standard windows (AXStandardWindow), floating otherwise.
+# App rules. Match fields: app_id (bundle id, exact match, case-insensitive),
+# app_name (substring, case-insensitive), title_regex, title_substring
+# (case-insensitive), ax_role, ax_subrole. The matching rule with the most
+# match fields wins; ties go to the earlier rule. Unmatched windows: weight
+# 1, tiled when they are standard windows (AXStandardWindow), floating
+# otherwise.
 #
 # Actions: weight (default 1), manage = false, float = true (+ placement,
 # size), sticky = true (best effort, see docs), on_self_move = snap_back|adopt.
@@ -97,6 +99,7 @@ float = true
 sticky = true
 placement = { x = 0.74, y = 0.72, w = 0.25, h = 0.25 }
 
+# Every binding needs a non-"shift" modifier, unless the key is F1–F20.
 # Global hotkeys → commands (`ballast help` lists them all).
 [bindings]
 "alt+h" = "focus left"

@@ -1,3 +1,4 @@
+import CoreGraphics
 import Testing
 @testable import BallastCore
 
@@ -50,22 +51,49 @@ struct WeightResolverTests {
         #expect(WeightResolver.rank(candidates) == [3, 9])
     }
 
-    @Test("ranking is deterministic regardless of input order")
+    @Test("ranking is deterministic and applies tiebreaks correctly across every permutation")
     func orderIndependent() {
+        // Includes an equal-weight focused/unfocused pair (1 vs 2) and two
+        // candidates identical except for id (3 vs 9), so every comparator
+        // branch (focused-vs-unfocused, creation, id) is actually exercised.
         let base = [
-            WeightResolver.Candidate(id: 1, weight: 5, focusRank: 1, creation: 0),
-            WeightResolver.Candidate(id: 2, weight: 5, focusRank: 0, creation: 1),
-            WeightResolver.Candidate(id: 3, weight: 10, focusRank: nil, creation: 2),
-            WeightResolver.Candidate(id: 4, weight: 1, focusRank: nil, creation: 3),
-            WeightResolver.Candidate(id: 5, weight: 1, focusRank: nil, creation: 1),
+            WeightResolver.Candidate(id: 1, weight: 5, focusRank: 0, creation: 0),
+            WeightResolver.Candidate(id: 2, weight: 5, focusRank: nil, creation: 1),
+            WeightResolver.Candidate(id: 9, weight: 1, focusRank: nil, creation: 2),
+            WeightResolver.Candidate(id: 3, weight: 1, focusRank: nil, creation: 2),
         ]
-        let expected = WeightResolver.rank(base)
-        for _ in 0..<20 {
-            #expect(WeightResolver.rank(base.shuffled()) == expected)
+        let expected: [WindowID] = [1, 2, 3, 9]
+        #expect(WeightResolver.rank(base) == expected)
+
+        for perm in Self.permutations(of: base) {
+            #expect(WeightResolver.rank(perm) == expected, "permutation \(perm.map(\.id)) produced order \(WeightResolver.rank(perm)), expected \(expected)")
         }
     }
 
-    @Test("master/stack assignment: first masterCount ranked windows are masters")
+    /// Deterministic (non-random) enumeration of every permutation, via
+    /// Heap's algorithm, so a failure is reproducible.
+    static func permutations<T>(of array: [T]) -> [[T]] {
+        var result: [[T]] = []
+        var a = array
+        func heap(_ k: Int) {
+            if k == 1 {
+                result.append(a)
+                return
+            }
+            for i in 0..<k {
+                heap(k - 1)
+                if k % 2 == 0 {
+                    a.swapAt(i, k - 1)
+                } else {
+                    a.swapAt(0, k - 1)
+                }
+            }
+        }
+        heap(a.count)
+        return result
+    }
+
+    @Test("master/stack assignment: first masterCount ranked windows land in the master region")
     func masterAssignment() {
         let candidates = [
             WeightResolver.Candidate(id: 1, weight: 1, focusRank: nil, creation: 0),
@@ -73,11 +101,16 @@ struct WeightResolverTests {
             WeightResolver.Candidate(id: 3, weight: 5, focusRank: nil, creation: 2),
         ]
         let order = WeightResolver.rank(candidates)
-        let masterCount = 2
-        let masters = Array(order.prefix(masterCount))
-        #expect(masters == [2, 3])
-        let stack = Array(order.dropFirst(masterCount))
-        #expect(stack == [1])
+        #expect(order == [2, 3, 1])
+
+        let rect = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let frames = MasterStackLayout.frames(order: order, in: rect, masterCount: 2, ratio: 0.5, side: .right, gap: 0)
+        guard let masterFrame2 = frames[2], let masterFrame3 = frames[3], let stackFrame1 = frames[1] else {
+            Issue.record("expected frames for windows 1, 2, 3")
+            return
+        }
+        #expect(masterFrame2.maxX <= stackFrame1.minX, "window 2 (master) should be left of the stack region")
+        #expect(masterFrame3.maxX <= stackFrame1.minX, "window 3 (master) should be left of the stack region")
     }
 
     // MARK: - FocusHistory

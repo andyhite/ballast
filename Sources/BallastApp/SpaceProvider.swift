@@ -2,9 +2,10 @@ import ApplicationServices
 import BallastCore
 
 /// The *only* seam through which the window manager learns about native
-/// Spaces. The sole production implementation (`SkyLightSpaceProvider`,
-/// in `PrivateAPI/SkyLight.swift`) wraps private, read-only SkyLight calls.
-/// Nothing outside that file may reference a private symbol.
+/// Spaces. `WindowManager` consumes this protocol as `any SpaceProvider`;
+/// the sole production implementation (`SkyLightSpaceProvider`, in
+/// `PrivateAPI/SkyLight.swift`) is wired in by its caller. Nothing outside
+/// that file may reference a private symbol.
 public protocol SpaceProvider: AnyObject {
     /// Every display's Spaces plus the active Space per display.
     /// `nil` when SkyLight returned malformed data.

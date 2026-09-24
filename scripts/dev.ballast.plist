@@ -1,13 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Starts Ballast at login; restarts it only if it exits abnormally (crash).
+<!-- Bundled at Ballast.app/Contents/Library/LaunchAgents/dev.ballast.plist by
+     scripts/build-app.sh and registered with SMAppService ("Start at Login" in
+     the menu, or `ballast login-item on`). Never copied to ~/Library.
+     Starts Ballast at login; restarts it only if it exits abnormally (crash).
      "Quit Ballast" from the menu exits cleanly and is respected. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.ballast</string>
+  <key>BundleProgram</key><string>Contents/MacOS/ballast</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Applications/Ballast.app/Contents/MacOS/ballast</string>
+    <string>ballast</string>
     <string>run</string>
   </array>
   <key>RunAtLoad</key><true/>

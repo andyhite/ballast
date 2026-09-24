@@ -82,7 +82,10 @@ public enum Command: Equatable, Sendable {
                 if let value { return .success(value) }
                 return .failure(.init("'\(verb)' expects a number"))
             }
-            guard args.count == 1, let v = Double(arg), v.isFinite else {
+            guard args.count == 1 else {
+                return .failure(.init("'\(verb)' takes one number"))
+            }
+            guard let v = Double(arg), v.isFinite else {
                 return .failure(.init("'\(verb)': invalid number '\(arg)'"))
             }
             return .success(v)
@@ -115,7 +118,7 @@ public enum Command: Equatable, Sendable {
         case "master-ratio": return number(default: nil).map(Command.masterRatio)
         case "master-count":
             return number(default: nil).flatMap { v in
-                guard v == v.rounded(), abs(v) <= 16 else { return .failure(.init("'master-count' expects an integer delta")) }
+                guard v == v.rounded(), abs(v) <= 16 else { return .failure(.init("'master-count' expects an integer delta within -16…16")) }
                 return .success(.masterCount(Int(v)))
             }
         case "balance": return noArgs(.balance)

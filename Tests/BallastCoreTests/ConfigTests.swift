@@ -14,7 +14,7 @@ struct ConfigTests {
     // MARK: - Full example
 
     @Test("parses a full example config successfully")
-    func fullExampleParses() throws {
+    func fullExampleParses() {
         let text = """
         [settings]
         focus_follows_mouse = true
@@ -61,8 +61,6 @@ struct ConfigTests {
         title_substring = "Info"
         float = true
 
-        [placement.dummy]
-
         [[rule]]
         ax_subrole = "AXDialog"
         float = false
@@ -71,9 +69,7 @@ struct ConfigTests {
         "cmd+j" = "focus down"
         "cmd+k" = "focus up"
         """
-        // Fix: the stray [placement.dummy] table above is invalid top-level key; remove it.
-        let fixed = text.replacingOccurrences(of: "\n[placement.dummy]\n", with: "\n")
-        let result = Config.parse(fixed)
+        let result = Config.parse(text)
         switch result {
         case .success(let config):
             #expect(config.rules.count == 4)
@@ -101,7 +97,8 @@ struct ConfigTests {
         display = "not-a-uuid"
         ordinal = 1
         """)
-        #expect(msgs.contains { $0.contains("display") && $0.contains("UUID") })
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("space[1].display:"))
     }
 
     @Test("duplicate space entry is reported")
@@ -124,7 +121,8 @@ struct ConfigTests {
         [[rule]]
         weight = 2
         """)
-        #expect(msgs.contains { $0.contains("no match fields") })
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("rule[1]:"))
     }
 
     @Test("bad title regex is reported")
@@ -133,7 +131,8 @@ struct ConfigTests {
         [[rule]]
         title_regex = "(unclosed"
         """)
-        #expect(msgs.contains { $0.contains("title_regex") && $0.contains("invalid regular expression") })
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("rule[1].title_regex:"))
     }
 
     @Test("weight <= 0 is reported")
@@ -162,7 +161,8 @@ struct ConfigTests {
         [bindings]
         "not-a-real-hotkey!!" = "focus left"
         """)
-        #expect(msgs.contains { $0.contains("invalid hotkey") })
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("bindings.not-a-real-hotkey!!:"))
     }
 
     @Test("invalid command is reported")
@@ -171,7 +171,8 @@ struct ConfigTests {
         [bindings]
         "cmd+j" = "not-a-real-command"
         """)
-        #expect(!msgs.isEmpty)
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("bindings.cmd+j:"))
     }
 
     @Test("duplicate hotkey is reported")
@@ -206,6 +207,135 @@ struct ConfigTests {
         let msgs = Self.messages("this is not = = valid toml [[[")
         #expect(msgs.contains { $0.contains("syntax") })
     }
+
+    // MARK: - Per-space overrides
+
+    @Test("partial gaps override resolves through layoutSettings with an uppercased key")
+    func partialGapsOverrideResolves() {
+        let lower = "33333333-3333-3333-3333-333333333333"
+        let text = """
+        [[space]]
+        display = "\(lower)"
+        ordinal = 1
+
+        [space.gaps]
+        inner = 12
+        """
+        guard case .success(let config) = Config.parse(text) else {
+            Issue.record("expected parse success")
+            return
+        }
+        let key = SpaceKey(display: lower.uppercased(), ordinal: 1)
+        let resolved = config.layoutSettings(for: key)
+        #expect(resolved.gaps.inner == 12)
+        #expect(resolved.gaps.outer == 8)
+    }
+
+    // MARK: - Boundary accept/reject pairs
+
+    @Test("master_ratio accepts values strictly inside (0.05, 0.95)")
+    func masterRatioBoundaries() {
+        #expect(!Self.messages("[layout]\nmaster_ratio = 0.05").isEmpty)
+        #expect(Self.messages("[layout]\nmaster_ratio = 0.06").isEmpty)
+        #expect(Self.messages("[layout]\nmaster_ratio = 0.94").isEmpty)
+        #expect(!Self.messages("[layout]\nmaster_ratio = 0.95").isEmpty)
+    }
+
+    @Test("rule weight accepts values within (0, 1000]")
+    func weightBoundaries() {
+        let ok = Self.messages("[[rule]]\napp_id = \"a\"\nweight = 1000")
+        #expect(ok.isEmpty)
+        let bad = Self.messages("[[rule]]\napp_id = \"a\"\nweight = 1000.5")
+        #expect(bad.contains { $0.contains("weight") })
+    }
+
+    @Test("animation duration_ms accepts values within 0...2000")
+    func durationBoundaries() {
+        let ok = Self.messages("[settings.animation]\nduration_ms = 2000")
+        #expect(ok.isEmpty)
+        let bad = Self.messages("[settings.animation]\nduration_ms = 2001")
+        #expect(bad.contains { $0.contains("duration_ms") })
+    }
+
+    @Test("gaps accept values within 0...200")
+    func gapsBoundaries() {
+        let ok = Self.messages("[layout.gaps]\ninner = 200")
+        #expect(ok.isEmpty)
+        let bad = Self.messages("[layout.gaps]\ninner = 201")
+        #expect(bad.contains { $0.contains("inner") })
+    }
+
+    @Test("placement/size fractions accept values within 0...1")
+    func fractionBoundaries() {
+        let ok = Self.messages("""
+        [[rule]]
+        app_id = "a"
+        float = true
+        [rule.size]
+        w = 1
+        h = 1
+        """)
+        #expect(ok.isEmpty)
+        let bad = Self.messages("""
+        [[rule]]
+        app_id = "a"
+        float = true
+        [rule.size]
+        w = 1.01
+        h = 1
+        """)
+        #expect(bad.contains { $0.contains("size") })
+    }
+
+    @Test("placement rect extending past the display is rejected")
+    func placementRectOutOfBounds() {
+        let msgs = Self.messages("""
+        [[rule]]
+        app_id = "a"
+        float = true
+        [rule.placement]
+        x = 0.8
+        y = 0
+        w = 0.5
+        h = 0.3
+        """)
+        #expect(msgs.contains { $0.hasPrefix("rule[1].placement:") })
+    }
+
+    // MARK: - manage = false conflicts
+
+    @Test("manage = false with size is reported at manage, not placement")
+    func manageFalseWithSize() {
+        let msgs = Self.messages("""
+        [[rule]]
+        app_id = "a"
+        manage = false
+        [rule.size]
+        w = 0.5
+        h = 0.5
+        """)
+        #expect(msgs.count == 1)
+        #expect(msgs[0].hasPrefix("rule[1].manage:"))
+    }
+
+    // MARK: - Multiple errors in one pass
+
+    @Test("multiple independent errors are all reported in one pass")
+    func multipleErrorsInOnePass() {
+        let msgs = Self.messages("""
+        [[space]]
+        ordinal = 1
+        mode = "bogus"
+
+        [[rule]]
+        weight = -1
+        """)
+        #expect(msgs.contains { $0.hasPrefix("space[1].display:") })
+        #expect(msgs.contains { $0.hasPrefix("space[1].mode:") })
+        #expect(msgs.contains { $0.hasPrefix("rule[1].weight:") })
+        #expect(msgs.contains { $0.hasPrefix("rule[1]:") })
+    }
+
 
     // MARK: - Rule specificity
 

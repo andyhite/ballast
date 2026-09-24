@@ -46,7 +46,6 @@ public final class SkyLightSpaceProvider: SpaceProvider {
     // MARK: - C function signatures
 
     private typealias SLSMainConnectionIDFn = @convention(c) () -> Int32
-    private typealias SLSGetActiveSpaceFn = @convention(c) (Int32) -> UInt64
     private typealias SLSCopyManagedDisplaySpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?
     private typealias SLSCopySpacesForWindowsFn = @convention(c) (Int32, Int32, CFArray) -> Unmanaged<CFArray>?
     private typealias SLSCopyWindowsWithOptionsAndTagsFn = @convention(c) (
@@ -57,7 +56,6 @@ public final class SkyLightSpaceProvider: SpaceProvider {
     // MARK: - Resolved symbols
 
     private let slsMainConnectionID: SLSMainConnectionIDFn
-    private let slsGetActiveSpace: SLSGetActiveSpaceFn
     private let slsCopyManagedDisplaySpaces: SLSCopyManagedDisplaySpacesFn
     private let slsCopySpacesForWindows: SLSCopySpacesForWindowsFn
     private let slsCopyWindowsWithOptionsAndTags: SLSCopyWindowsWithOptionsAndTagsFn
@@ -68,14 +66,12 @@ public final class SkyLightSpaceProvider: SpaceProvider {
 
     private init(
         slsMainConnectionID: @escaping SLSMainConnectionIDFn,
-        slsGetActiveSpace: @escaping SLSGetActiveSpaceFn,
         slsCopyManagedDisplaySpaces: @escaping SLSCopyManagedDisplaySpacesFn,
         slsCopySpacesForWindows: @escaping SLSCopySpacesForWindowsFn,
         slsCopyWindowsWithOptionsAndTags: @escaping SLSCopyWindowsWithOptionsAndTagsFn,
         axUIElementGetWindow: @escaping AXUIElementGetWindowFn
     ) {
         self.slsMainConnectionID = slsMainConnectionID
-        self.slsGetActiveSpace = slsGetActiveSpace
         self.slsCopyManagedDisplaySpaces = slsCopyManagedDisplaySpaces
         self.slsCopySpacesForWindows = slsCopySpacesForWindows
         self.slsCopyWindowsWithOptionsAndTags = slsCopyWindowsWithOptionsAndTags
@@ -89,7 +85,6 @@ public final class SkyLightSpaceProvider: SpaceProvider {
 
     private static let requiredSymbolNames = [
         "SLSMainConnectionID",
-        "SLSGetActiveSpace",
         "SLSCopyManagedDisplaySpaces",
         "SLSCopySpacesForWindows",
         "SLSCopyWindowsWithOptionsAndTags",
@@ -126,11 +121,15 @@ public final class SkyLightSpaceProvider: SpaceProvider {
     /// the list of symbols that failed to resolve. Never traps.
     public static func make() -> Result<SkyLightSpaceProvider, MissingPrivateSymbols> {
         guard let skyLightHandle = dlopen(skyLightPath, RTLD_LAZY) else {
-            return .failure(MissingPrivateSymbols(names: requiredSymbolNames))
+            // `_AXUIElementGetWindow` comes from HIServices, not SkyLight; it
+            // never fails to resolve merely because SkyLight failed to open.
+            return .failure(MissingPrivateSymbols(names: requiredSymbolNames.filter { !$0.hasPrefix("_AX") }))
         }
-        // Intentionally not closed: symbol addresses resolved from this
-        // handle must remain valid for the lifetime of the provider, and
-        // there is exactly one provider per process.
+        // Kept open for the provider's lifetime: symbol addresses resolved
+        // from this handle must remain valid for as long as the provider is
+        // used. `Doctor` may call `make()` again in-process (for example when
+        // rerunning diagnostics); each call opens, and on failure closes,
+        // its own handle.
         guard let defaultHandle = dlopen(nil, RTLD_LAZY) else {
             dlclose(skyLightHandle)
             return .failure(MissingPrivateSymbols(names: requiredSymbolNames))
@@ -147,7 +146,6 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         }
 
         let mainConnectionID = resolve("SLSMainConnectionID", in: skyLightHandle, as: SLSMainConnectionIDFn.self)
-        let getActiveSpace = resolve("SLSGetActiveSpace", in: skyLightHandle, as: SLSGetActiveSpaceFn.self)
         let copyManagedDisplaySpaces = resolve(
             "SLSCopyManagedDisplaySpaces", in: skyLightHandle, as: SLSCopyManagedDisplaySpacesFn.self)
         let copySpacesForWindows = resolve(
@@ -157,16 +155,16 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         let axGetWindow = resolve("_AXUIElementGetWindow", in: defaultHandle, as: AXUIElementGetWindowFn.self)
 
         guard !missing.isEmpty else {
-            guard let mainConnectionID, let getActiveSpace, let copyManagedDisplaySpaces,
+            guard let mainConnectionID, let copyManagedDisplaySpaces,
                 let copySpacesForWindows, let copyWindowsWithOptionsAndTags, let axGetWindow
             else {
                 // Defensive: should be unreachable given `missing.isEmpty`, but
                 // never force-unwrap.
+                dlclose(skyLightHandle)
                 return .failure(MissingPrivateSymbols(names: requiredSymbolNames))
             }
             let provider = SkyLightSpaceProvider(
                 slsMainConnectionID: mainConnectionID,
-                slsGetActiveSpace: getActiveSpace,
                 slsCopyManagedDisplaySpaces: copyManagedDisplaySpaces,
                 slsCopySpacesForWindows: copySpacesForWindows,
                 slsCopyWindowsWithOptionsAndTags: copyWindowsWithOptionsAndTags,
@@ -175,6 +173,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
             return .success(provider)
         }
 
+        dlclose(skyLightHandle)
         return .failure(MissingPrivateSymbols(names: missing))
     }
 

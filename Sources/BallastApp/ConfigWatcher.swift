@@ -103,8 +103,8 @@ public final class ConfigWatcher {
 
         resolvedTargetPath = originalURL.resolvingSymlinksInPath().path
 
-        originalChainWatcher?.rearm(leafParent: originalURL.deletingLastPathComponent().path)
-        targetChainWatcher?.rearm(leafParent: (resolvedTargetPath as NSString).deletingLastPathComponent)
+        originalChainWatcher?.rearm(leafParent: originalURL.deletingLastPathComponent().path, followSymlinks: false)
+        targetChainWatcher?.rearm(leafParent: (resolvedTargetPath as NSString).deletingLastPathComponent, followSymlinks: true)
         reopenFileSourceIfNeeded()
         scheduleCheck()
     }
@@ -216,9 +216,19 @@ private final class DirectoryChainWatcher {
     /// Re-arms the watch on the nearest existing ancestor of `leafParent`
     /// (the directory that should eventually contain the file we care
     /// about). No-ops if already watching that exact directory.
-    func rearm(leafParent: String) {
-        let desired = Self.nearestExistingDirectory(at: leafParent)
-        guard desired != watchedPath else { return }
+    func rearm(leafParent: String, followSymlinks: Bool) {
+        let desired = Self.nearestExistingDirectory(at: leafParent, followSymlinks: followSymlinks)
+        if desired == watchedPath, descriptor >= 0 {
+            var openStat = stat()
+            var currentStat = stat()
+            let openIsValid = fstat(descriptor, &openStat) == 0
+            let currentIsValid = stat(desired, &currentStat) == 0
+            if openIsValid, currentIsValid,
+                openStat.st_dev == currentStat.st_dev, openStat.st_ino == currentStat.st_ino
+            {
+                return
+            }
+        }
 
         cancel()
 
@@ -250,11 +260,17 @@ private final class DirectoryChainWatcher {
         watchedPath = nil
     }
 
-    private static func nearestExistingDirectory(at path: String) -> String {
+    /// Walks upward from `path` looking for the nearest existing directory.
+    /// When `followSymlinks` is false, a symlink component is treated as
+    /// not-a-directory, so the search continues to its parent — landing the
+    /// watch on the directory that contains the link rather than the
+    /// directory it points to.
+    private static func nearestExistingDirectory(at path: String, followSymlinks: Bool) -> String {
         var candidate = (path as NSString).standardizingPath
         while true {
             var st = stat()
-            if stat(candidate, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
+            let statResult = followSymlinks ? stat(candidate, &st) : lstat(candidate, &st)
+            if statResult == 0, (st.st_mode & S_IFMT) == S_IFDIR {
                 return candidate
             }
             let parent = (candidate as NSString).deletingLastPathComponent

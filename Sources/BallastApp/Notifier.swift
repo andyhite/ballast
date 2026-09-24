@@ -12,7 +12,15 @@ import os
 public enum Notifier {
     private static let logger = Logger(subsystem: "dev.ballast", category: "notifier")
     private static let authorizationLock = NSLock()
-    private static var hasRequestedAuthorization = false
+    private static var authorizationState: AuthorizationState = .notRequested
+    private static var pendingRequests: [UNNotificationRequest] = []
+
+    private enum AuthorizationState {
+        case notRequested
+        case pending
+        case authorized
+        case denied
+    }
 
     /// Posts a best-effort notification. Safe to call from any thread.
     public static func post(title: String, body: String) {
@@ -24,32 +32,52 @@ public enum Notifier {
     }
 
     private static func postViaUserNotifications(title: String, body: String) {
-        requestAuthorizationIfNeeded()
-
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
 
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error {
-                logger.error("failed to post notification: \(error.localizedDescription, privacy: .public)")
+
+        authorizationLock.lock()
+        switch authorizationState {
+        case .authorized:
+            authorizationLock.unlock()
+            addRequest(request)
+        case .denied:
+            authorizationLock.unlock()
+        case .pending:
+            pendingRequests.append(request)
+            authorizationLock.unlock()
+        case .notRequested:
+            authorizationState = .pending
+            pendingRequests.append(request)
+            authorizationLock.unlock()
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+                if let error {
+                    logger.error("notification authorization request failed: \(error.localizedDescription, privacy: .public)")
+                } else if !granted {
+                    logger.notice("notification authorization was denied")
+                }
+
+                authorizationLock.lock()
+                authorizationState = granted ? .authorized : .denied
+                let queued = pendingRequests
+                pendingRequests.removeAll()
+                authorizationLock.unlock()
+
+                if granted {
+                    for queued in queued {
+                        addRequest(queued)
+                    }
+                }
             }
         }
     }
 
-    private static func requestAuthorizationIfNeeded() {
-        authorizationLock.lock()
-        defer { authorizationLock.unlock() }
-
-        guard !hasRequestedAuthorization else { return }
-        hasRequestedAuthorization = true
-
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+    private static func addRequest(_ request: UNNotificationRequest) {
+        UNUserNotificationCenter.current().add(request) { error in
             if let error {
-                logger.error("notification authorization request failed: \(error.localizedDescription, privacy: .public)")
-            } else if !granted {
-                logger.notice("notification authorization was denied")
+                logger.error("failed to post notification: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

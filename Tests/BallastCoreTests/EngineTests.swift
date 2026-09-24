@@ -76,7 +76,7 @@ struct EngineTests {
     @Test("manual arrangement survives applyConfig with changed weights/mode")
     func manualSurvivesConfigReload() {
         var engine = Self.makeEngine()
-        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "x"), space: 1)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
         let swapped2 = engine.swap(1, 2, on: 1)
         #expect(swapped2)
@@ -88,6 +88,9 @@ struct EngineTests {
         _ = engine.applyConfig(newConfig)
 
         #expect(engine.spacesForTesting[1]!.manual)
+        // Weights changed: the ideal order now puts the heavy window 1 first...
+        #expect(engine.spacesForTesting[1]!.idealOrder.first == 1)
+        // ...but manual arrangement still wins for the live order.
         #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
     }
 
@@ -103,18 +106,19 @@ struct EngineTests {
         #expect(engine.spacesForTesting[1]!.liveOrder.first == 1)
 
         _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = engine.focus(1)
+        _ = engine.perform(.resize(0.1), space: 1, area: Self.area) // pin a manual split ratio
+        #expect(engine.spacesForTesting[1]!.tree != BSPNode.ideal(engine.spacesForTesting[1]!.idealOrder, axis: nil))
         let outcome = engine.perform(.reset, space: 1, area: Self.area)
         #expect(outcome.dirty.contains(1))
 
         let state = engine.spacesForTesting[1]!
         #expect(!state.manual)
         #expect(state.liveOrder.first == 2) // heavy weight wins again
-        #expect(state.tree?.leaves.contains(1) == true)
-        #expect(state.tree?.leaves.contains(2) == true)
+        #expect(state.tree == BSPNode.ideal(state.idealOrder, axis: nil))
         // modeOverride (bsp) must survive reset.
         #expect(engine.mode(for: 1) == .bsp)
     }
-
     // MARK: - Config reload does not reset manual/monocle/mode (Rift bug)
 
     @Test("config reload preserves modeOverride, monocle and manual arrangement, but updates config defaults elsewhere")
@@ -138,6 +142,42 @@ struct EngineTests {
         // A space without an override picks up the new config default.
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 4)
         #expect(engine.mode(for: 4) == .float)
+    }
+
+    @Test("a changed `split` applies on reload to weight-default Spaces, not manually arranged ones")
+    func splitChangeAppliesOnReload() {
+        func config(split: Axis?) -> Config {
+            var config = Config()
+            config.rules = [AppRule(match: RuleMatch(appID: "heavy"), actions: RuleActions(weight: 10))]
+            var bsp = LayoutOverrides()
+            bsp.mode = .bsp
+            bsp.split = .some(split)
+            config.spaces[SpaceKey(display: Self.displayA, ordinal: 1)] = bsp
+            return config
+        }
+        /// Frames of the two light windows sitting next to the heavy one.
+        func lights(_ engine: Engine) -> (CGRect, CGRect) {
+            let frames = engine.layout(space: 1, area: Self.area).frames
+            return (frames[2]!, frames[3]!)
+        }
+        for manual in [false, true] {
+            var engine = Self.makeEngine(config: config(split: .horizontal))
+            _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "heavy"), space: 1)
+            _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+            _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 1)
+            if manual { _ = engine.swap(2, 3, on: 1) }
+            let (a, b) = lights(engine)
+            #expect(a.minY == b.minY && a.height == b.height, "pinned horizontal: light windows are columns")
+
+            _ = engine.applyConfig(config(split: nil))
+            let (c, d) = lights(engine)
+            if manual {
+                #expect(c.minY == d.minY, "manual arrangement keeps its columns until reset")
+            } else {
+                #expect(c.minX == d.minX && c.width == d.width && c.minY != d.minY,
+                        "auto: light windows stack in the heavy window's leftover region")
+            }
+        }
     }
 
     // MARK: - Per-(display,space) config
@@ -168,6 +208,8 @@ struct EngineTests {
         // Space 2 is ordinal 2 (bsp by config). Add a window and manually promote.
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 2)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 2)
+        // A window on the doomed Space 1, to prove its state and window ties are dropped.
+        _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 1)
         let swapped5 = engine.swap(1, 2, on: 2)
         #expect(swapped5)
         #expect(engine.mode(for: 2) == .bsp)
@@ -191,8 +233,9 @@ struct EngineTests {
         #expect(engine.spacesForTesting[2]!.manual)
         #expect(engine.spacesForTesting[2]!.liveOrder.first == 2)
 
-        // The deleted Space's (id 1) state is dropped.
+        // The deleted Space's (id 1) state is dropped, and its window no longer points at it.
         #expect(engine.spacesForTesting[1] == nil)
+        #expect(engine.windowsForTesting[3]?.space == nil)
     }
 
     // MARK: - Focus-history fallback
@@ -383,6 +426,36 @@ struct EngineTests {
         #expect(engine.layout(space: 1, area: Self.area).raise == nil)
     }
 
+    @Test("adoptFrame is refused while the Space is in monocle")
+    func adoptFrameRefusedInMonocle() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.perform(.monocle, space: 1, area: Self.area)
+
+        let dirty = engine.adoptFrame(1, CGRect(x: 10, y: 10, width: 20, height: 20))
+        #expect(dirty.isEmpty)
+        #expect(engine.spacesForTesting[1]?.frameOverrides[1] == nil)
+    }
+
+    @Test("monocle never raises a tiled member over a focused unmanaged window on the same Space")
+    func monocleDoesNotRaiseOverFocusedUnmanaged() {
+        var config = Config()
+        config.rules = [AppRule(match: RuleMatch(appID: "unmanaged"), actions: RuleActions(manage: false))]
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(3, pid: 3, facts: WindowFacts(bundleID: "unmanaged"), space: 1)
+        _ = engine.focus(1)
+        _ = engine.focus(2)
+        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        #expect(engine.layout(space: 1, area: Self.area).raise == 2)
+
+        // An unmanaged window on the same Space takes keyboard focus.
+        _ = engine.focus(3)
+        #expect(engine.layout(space: 1, area: Self.area).raise == nil)
+    }
+
     // MARK: - Stage Manager passthrough
 
     @Test("passthrough forces float mode with no frames")
@@ -449,6 +522,20 @@ struct EngineTests {
         #expect(!engine.isTiled(1)) // still minimized
         _ = engine.setMinimized(1, false)
         #expect(engine.isTiled(1))
+    }
+
+    // MARK: - Master count clamp
+
+    @Test(".masterCount(Int.max) does not trap and clamps to 16")
+    func masterCountClampsUnboundedDelta() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        _ = engine.perform(.masterCount(Int.max), space: 1, area: Self.area)
+        #expect(engine.spacesForTesting[1]?.masterCountOverride == 16)
+
+        _ = engine.perform(.masterCount(Int.min), space: 1, area: Self.area)
+        #expect(engine.spacesForTesting[1]?.masterCountOverride == 1)
     }
 }
 

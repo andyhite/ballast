@@ -25,7 +25,7 @@ animation requirements are limited by AX IPC latency, not by the language,
 so Rust's speed buys nothing measurable here.
 
 Rust's real advantage is panic isolation. Swift has no equivalent, so Ballast
-uses these mitigations instead (§3.1):
+uses these mitigations instead (§2.2, §2.3):
 
 1. The layout core is total by construction: it never traps on bad input.
 2. Tree mutations are value-semantic: no half-built tree can ever be seen
@@ -111,9 +111,10 @@ construction:
   no-op or a message, never a trap. Tree and member drift is repaired, not
   asserted (`recomputeIdeal` rebuilds the tree if its leaves diverge from the
   members).
-- The core contains no `!`, `try!`, `fatalError`, or `precondition`, and has
-  no unchecked indexing on untrusted positions. `scripts/lint-core.sh`
-  enforces this.
+- The core contains no `!`, `try!`, `fatalError`, or `precondition`.
+  `scripts/lint-core.sh` greps for these constructs; unchecked indexing on
+  untrusted positions is covered by code review and the fuzz tests below,
+  not by the lint script.
 - `Tests/BallastCoreTests/FuzzTests.swift` replays thousands of seeded random
   interleavings of add, remove, re-parent (setSpace), snapshot changes that
   delete Spaces or unplug displays, config reloads, and every command. After
@@ -136,7 +137,7 @@ has no injected code in Dock or WindowServer to take down with it.
 
 | Purpose | Key | Why |
 |---|---|---|
-| Config addressing | `SpaceKey(display UUID, ordinal)` | Stable across reboots, **if** "Displays have separate Spaces" is ON and "Automatically rearrange Spaces" is OFF. The doctor refuses to run otherwise. The ordinal counts only *user* desktops, so full-screening an app never shifts it. |
+| Config addressing | `SpaceKey(display UUID, ordinal)` | Stable across reboots, **if** "Displays have separate Spaces" is ON and "Automatically rearrange Spaces" is OFF. Otherwise Ballast refuses to manage windows (`! SET` in the menu bar) and `ballast doctor` flags the setting. The ordinal counts only *user* desktops, so full-screening an app never shifts it. |
 | Live state | `SpaceID` (SkyLight managed id) | Stable for the session and follows the *physical* Space. If you delete Desktop 2, Desktop 3 becomes ordinal 2 but keeps its live state (manual arrangement, mode override), and config lookups use its new ordinal. The dead Space's state is dropped (`Engine.updateSnapshot`). |
 | Displays | `CGDisplayCreateUUIDFromDisplayID` | Persistent across reconnects. It matches SkyLight's "Display Identifier". Ordinals of displays are never used. |
 | Windows | `CGWindowID` (via `_AXUIElementGetWindow`) | Stable for the window's lifetime. |
@@ -150,9 +151,10 @@ Each `SpaceState` holds:
   reload). Pure focus changes do not recompute it; otherwise two equal-weight
   windows would swap every time you clicked one.
 - `manual` + `manualOrder`: the live master-stack order after a user
-  swap/promote/drag/adopt. While `manual` is set, the ideal keeps updating in
-  the background but is **not applied**. Newcomers join the stack at their
-  weight rank and never displace a manually placed master.
+  swap/promote/drag/adopt, or a BSP resize/balance. While `manual` is set,
+  the ideal keeps updating in the background but is **not applied**.
+  Newcomers join the stack at their weight rank and never displace a
+  manually placed master.
 - `tree`: the live BSP tree. It always exists, so switching modes never
   loses structure. New windows split the focused leaf. Split ratios come
   from weights unless a split carries a manual ratio (from resize or balance).
@@ -168,7 +170,10 @@ arrangement (`layout default` drops the mode override).
 
 `applyConfig` re-resolves rules and recomputes ideals. It never touches the
 overrides listed above. This is the direct fix for Rift's
-reload-resets-layout bug, and it is covered by tests.
+reload-resets-layout bug, and it is covered by tests. A changed `split` is
+applied to the existing BSP tree of every Space that is *not* manual (shape
+and ratios kept, split directions rewritten), so config edits show up without
+a `reset`; manually arranged Spaces keep their split directions until `reset`.
 
 ### 3.3 Weights
 
@@ -255,7 +260,7 @@ next frame (per-window generation counter).
 - **One protocol**: `SpaceProvider` (`snapshot()`, `windowIDs(onSpace:)`,
   `spaces(forWindow:)`, `windowID(for:)`). The engine only ever sees the plain
   `SpaceSnapshot` value.
-- **Read-only symbols**: `SLSMainConnectionID`, `SLSGetActiveSpace`,
+- **Read-only symbols**: `SLSMainConnectionID`,
   `SLSCopyManagedDisplaySpaces`, `SLSCopySpacesForWindows`,
   `SLSCopyWindowsWithOptionsAndTags`, and HIServices' `_AXUIElementGetWindow`.
   Nothing moves windows between Spaces, and nothing is injected into Dock.
@@ -366,3 +371,45 @@ uses it.
 - invariant fuzzing (engine and BSP)
 
 The platform glue is covered by the manual smoke test in `docs/SMOKE_TEST.md`.
+
+## 12. Build and install
+
+```sh
+scripts/build-app.sh      # release build → build/Ballast.app: icon, bundled LaunchAgent, signed
+scripts/install.sh        # /Applications, Start at Login on, `ballast` CLI symlink
+scripts/install.sh --uninstall
+```
+
+- **Bundle.** `Contents/MacOS/ballast` (the same binary serves the app and
+  the CLI), `Contents/Resources/AppIcon.icns` generated from
+  `assets/AppIcon.png` (1024 px, Apple icon grid), and
+  `Contents/Library/LaunchAgents/dev.ballast.plist` from
+  `scripts/dev.ballast.plist`. `LSUIElement` keeps it out of the Dock and the
+  app switcher; the icon shows in Finder, Login Items, Accessibility settings,
+  alerts and notifications.
+- **Signing.** Accessibility permission is keyed to the app's designated
+  requirement. `build-app.sh` signs with the `Ballast Dev` self-signed
+  code-signing certificate by default (`SIGN_ID` overrides), so the
+  requirement is "bundle id `dev.ballast.Ballast` + that certificate" and the
+  grant survives rebuilds. The certificate does not need to be trusted.
+  `SIGN_ID=-` signs ad-hoc: the requirement becomes a per-build hash and every
+  rebuild loses the grant.
+- **Start at Login and crash restart.** The bundled LaunchAgent is registered
+  with `SMAppService` (`LoginItem.swift`), from the menu's "Start at Login"
+  toggle or `ballast login-item on|off|status`. launchd starts Ballast at
+  login and restarts it after a crash (`KeepAlive` on non-zero exit), but not
+  after Quit. Unregistering stops the agent, so turning the toggle off quits
+  Ballast; the menu asks first. Nothing is copied into `~/Library`.
+- **Updates.** launchd can't relaunch an agent whose bundle was replaced
+  underneath it (exit 78, `EX_CONFIG`), so `install.sh` unregisters the agent,
+  replaces the bundle and registers it again. A user who turned Start at Login
+  off keeps it off.
+- **One instance.** `ballast run` holds a lock on
+  `~/Library/Caches/dev.ballast/run.lock`. `install.sh` uses that lock to
+  find a running Ballast and refuses to continue when it isn't the login
+  agent (a dev `ballast run`, or a copy opened from Finder).
+- **Distribution** (not set up). The Mac App Store is ruled out: its sandbox
+  forbids controlling other apps' windows and private SkyLight calls. Shipping
+  to other Macs needs a Developer ID certificate, hardened runtime
+  (`codesign --options runtime --timestamp`), `xcrun notarytool submit` and
+  `xcrun stapler staple`. No entitlements are needed.

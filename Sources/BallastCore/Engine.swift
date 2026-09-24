@@ -99,6 +99,10 @@ public struct Engine: Sendable {
     public private(set) var windows: [WindowID: WindowRecord] = [:]
     public private(set) var spaces: [SpaceID: SpaceState] = [:]
     public private(set) var focused: WindowID?
+    /// Last focused *tracked* window regardless of `manage`; used to keep
+    /// monocle from raising a tiled member over an unmanaged or all-Spaces
+    /// window that currently holds keyboard focus.
+    public private(set) var frontmost: WindowID?
     /// Stage Manager on: every Space is floating passthrough.
     public var passthrough = false
     private var nextCreation: UInt64 = 0
@@ -136,10 +140,11 @@ public struct Engine: Sendable {
         var raise: WindowID?
         if state.monocle {
             frames = Dictionary(state.members.map { ($0, inner) }, uniquingKeysWith: { a, _ in a })
-            // A floating window holds focus above the monocle stack; no
-            // tiled member may be raised over it, even when the layout is
-            // recomputed for an unrelated structural change.
-            if let focused, let fw = windows[focused], fw.space == space, fw.isFloating {
+            // No tiled member may be raised over a focused window that isn't
+            // itself a member of this Space (floating, unmanaged, or shared
+            // across every Space), even when the layout is recomputed for an
+            // unrelated structural change.
+            if let frontmost, let fw = windows[frontmost], !state.members.contains(frontmost), fw.space == space || fw.space == nil {
                 raise = nil
             } else {
                 raise = state.focus.entries.first { state.members.contains($0) } ?? state.liveOrder.first
@@ -208,7 +213,15 @@ public struct Engine: Sendable {
     }
 
     public mutating func applyConfig(_ new: Config) -> Set<SpaceID> {
+        let oldSplit = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0).split) })
         config = new
+        // A changed `split` takes effect on Spaces still in their weight-default
+        // arrangement; manually arranged Spaces keep theirs until `reset`.
+        for (id, old) in oldSplit where settings(for: id).split != old {
+            guard var s = spaces[id], !s.manual else { continue }
+            s.tree = s.tree?.withAxis(settings(for: id).split)
+            spaces[id] = s
+        }
         for id in windows.keys.sorted() {
             guard var w = windows[id] else { continue }
             w.rule = RuleResolver.resolve(w.facts, rules: new.rules)
@@ -294,7 +307,13 @@ public struct Engine: Sendable {
     /// Records focus. Only dirties a Space whose rendering depends on focus (monocle).
     @discardableResult
     public mutating func focus(_ id: WindowID?) -> Set<SpaceID> {
-        guard let id, let w = windows[id], w.isManaged else {
+        guard let id, let w = windows[id] else {
+            focused = nil
+            frontmost = nil
+            return []
+        }
+        frontmost = id
+        guard w.isManaged else {
             focused = nil
             return []
         }
@@ -316,7 +335,7 @@ public struct Engine: Sendable {
 
     /// `on_self_move = adopt`: pin the window's own frame as a manual override.
     public mutating func adoptFrame(_ id: WindowID, _ frame: CGRect) -> Set<SpaceID> {
-        guard let space = windows[id]?.space, spaces[space]?.members.contains(id) == true,
+        guard let space = windows[id]?.space, let state = spaces[space], state.members.contains(id), !state.monocle,
               frame.width.isFinite, frame.height.isFinite, frame.minX.isFinite, frame.minY.isFinite else { return [] }
         beginManual(space)
         spaces[space]?.frameOverrides[id] = frame
@@ -390,7 +409,7 @@ public struct Engine: Sendable {
                 beginManual(space)
                 spaces[space]?.tree = tree
             } else {
-                let masters = state.masterCountOverride ?? settings(for: space).masterCount
+                let masters = max(state.masterCountOverride ?? settings(for: space).masterCount, 1)
                 let isMaster = state.liveOrder.prefix(masters).contains(f)
                 adjustMasterRatio(space, by: isMaster ? delta : -delta)
             }
@@ -399,8 +418,9 @@ public struct Engine: Sendable {
             adjustMasterRatio(space, by: delta)
             out.dirty = [space]
         case .masterCount(let delta):
-            let current = spaces[space]?.masterCountOverride ?? settings(for: space).masterCount
-            spaces[space, default: SpaceState(id: space)].masterCountOverride = min(max(current + delta, 1), 16)
+            let current = min(max(spaces[space]?.masterCountOverride ?? settings(for: space).masterCount, 1), 16)
+            let clampedDelta = min(max(delta, -16), 16)
+            spaces[space, default: SpaceState(id: space)].masterCountOverride = min(max(current + clampedDelta, 1), 16)
             out.dirty = [space]
         case .balance:
             if mode(for: space) == .bsp {
@@ -473,6 +493,7 @@ public struct Engine: Sendable {
     }
 
     private mutating func adjustMasterRatio(_ space: SpaceID, by delta: Double) {
+        guard delta.isFinite else { return }
         let current = spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio
         // Bounds must match Config's master_ratio validation (0.05…0.95,
         // exclusive); narrower bounds here would clamp an already-valid
@@ -521,7 +542,7 @@ public struct Engine: Sendable {
         // Manual Space: the newcomer joins the stack at its weight rank but
         // never displaces a manually placed master.
         m.manualOrder.removeAll { $0 == id }
-        let masters = m.masterCountOverride ?? settings(for: space).masterCount
+        let masters = max(m.masterCountOverride ?? settings(for: space).masterCount, 1)
         let ideal = m.idealOrder
         let rank = ideal.firstIndex(of: id) ?? ideal.count
         let predecessors = Set(ideal.prefix(rank))
