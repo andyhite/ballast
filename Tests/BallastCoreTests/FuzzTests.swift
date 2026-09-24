@@ -22,6 +22,10 @@ struct EngineFuzzTests {
 
     static let displayA = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
     static let displayB = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
+    static let displayAreas = [
+        displayA: CGRect(x: 0, y: 0, width: 1600, height: 1000),
+        displayB: CGRect(x: 1600, y: 0, width: 1600, height: 1000),
+    ]
 
     static func snapshotFull() -> SpaceSnapshot {
         let a = DisplaySpaces(displayUUID: displayA, spaces: [
@@ -143,7 +147,7 @@ struct EngineFuzzTests {
     static func randomCommand(_ rng: inout SplitMix64) -> Command {
         let direction = [Direction.left, .right, .up, .down].randomElement(using: &rng)!
         let cycle: Cycle = Bool.random(using: &rng) ? .next : .prev
-        switch rng.next() % 15 {
+        switch rng.next() % 16 {
         case 0: return .focus(direction)
         case 1: return .swap(direction)
         case 2: return .focusLast
@@ -158,6 +162,7 @@ struct EngineFuzzTests {
         case 11: return .balance
         case 12: return .sendToDisplay(cycle)
         case 13: return .focusMaster
+        case 14: return .relayout
         default: return .focusDisplay(cycle)
         }
     }
@@ -352,8 +357,7 @@ struct EngineFuzzTests {
                 // tiled member instead of missing on an unrelated Space.
                 let focusedSpace = engine.focused.flatMap { engine.windows[$0]?.space }
                 let space: SpaceID? = (focusedSpace != nil && rng.next() % 5 != 0) ? focusedSpace : Self.randomSpace(&rng)
-                let area = CGRect(x: 0, y: 0, width: 1600, height: 1000)
-                _ = engine.perform(Self.randomCommand(&rng), space: space, area: area)
+                _ = engine.perform(Self.randomCommand(&rng), space: space, areas: Self.displayAreas)
             default: break
             }
             Self.assertInvariants(engine, seed: seed, step: step)

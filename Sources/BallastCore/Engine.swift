@@ -103,6 +103,9 @@ public enum PlatformAction: Equatable, Sendable {
     case sendToDisplay(WindowID, Cycle)
     case focusDisplay(Cycle)
     case reload
+    /// Re-discover windows and re-send every tile's frame on this Space,
+    /// even frames the platform already requested.
+    case relayout(SpaceID)
     case dumpState
 }
 
@@ -435,9 +438,12 @@ public struct Engine: Sendable {
 
     // MARK: Commands
 
-    /// Runs a command against `space` (the Space the user is looking at) and
-    /// its tiling `area`. Commands that need a window use the focused one.
-    public mutating func perform(_ command: Command, space: SpaceID?, area: CGRect?) -> CommandOutcome {
+    /// Runs a command against `space` (the Space the user is looking at).
+    /// `areas` holds every display's tiling area (visible frame) by display
+    /// UUID: commands lay `space` out in its own display's, and directional
+    /// focus with no tile further that way on `space` continues onto the
+    /// displays beyond. Commands that need a window use the focused one.
+    public mutating func perform(_ command: Command, space: SpaceID?, areas: [String: CGRect]) -> CommandOutcome {
         var out = CommandOutcome()
         let focusedHere = focused.flatMap { windows[$0]?.space == space ? $0 : nil }
 
@@ -453,13 +459,15 @@ public struct Engine: Sendable {
         }
 
         guard let space else { out.message = "no active Space"; return out }
+        let area = snapshot.key(for: space).flatMap { areas[$0.display] }
 
         switch command {
         case .focus(let direction):
-            guard let target = neighbor(of: focusedHere, direction, space: space, area: area) else { return out }
-            out.focus = target
+            let step = neighbor(of: focusedHere, direction, space: space, area: area)
+            // No tile further that way on this Space: carry on past its display's edge.
+            out.focus = step.target ?? area.flatMap { neighborBeyond(from: step.origin ?? $0, direction, area: $0, areas: areas) }
         case .swap(let direction):
-            guard let f = focusedHere, let target = neighbor(of: f, direction, space: space, area: area) else { return out }
+            guard let f = focusedHere, let target = neighbor(of: f, direction, space: space, area: area).target else { return out }
             if swap(f, target, on: space) { out.dirty = [space] }
         case .focusLast:
             guard let current = focusedHere ?? spaces[space]?.focus.mostRecent else { return out }
@@ -483,6 +491,10 @@ public struct Engine: Sendable {
         case .reset:
             reset(space)
             out.dirty = [space]
+        case .relayout:
+            forgetMinSizes(on: space)
+            out.dirty = [space]
+            out.action = .relayout(space)
         case .layout(let change):
             let current = mode(for: space)
             let all = LayoutMode.allCases
@@ -589,6 +601,15 @@ public struct Engine: Sendable {
         s.masterCountOverride = nil
         s.tree = idealTree(s.idealOrder, on: space)
         spaces[space] = s
+    }
+
+    /// Forgets the minimum sizes learned on `space`. A refusal can come from
+    /// a transient state (an app mid-resize, a frame read before it settled),
+    /// and a learned minimum only ever grows, so a stale one squeezes its
+    /// siblings until cleared. Windows that really refuse relearn on the next
+    /// frame they reject.
+    private mutating func forgetMinSizes(on space: SpaceID) {
+        for (id, w) in windows where w.space == space && w.minSize != .zero { windows[id]?.minSize = .zero }
     }
 
     /// Clears the requested runtime overrides once the platform has
@@ -777,43 +798,76 @@ public struct Engine: Sendable {
 
     /// Nearest tiled window from `from` in `direction` on `space`, along the
     /// scrolling strip when the stack scrolls. Monocle Spaces cycle through
-    /// the live order instead.
-    private func neighbor(of from: WindowID?, _ direction: Direction, space: SpaceID, area: CGRect?) -> WindowID? {
-        guard let state = spaces[space] else { return nil }
+    /// the live order instead. `origin` is the tile the step starts at, when
+    /// `from` has one to step from.
+    private func neighbor(of from: WindowID?, _ direction: Direction, space: SpaceID,
+                          area: CGRect?) -> (target: WindowID?, origin: CGRect?) {
+        guard let state = spaces[space] else { return (nil, nil) }
         let order = tileOrder(state)
-        guard let from, state.members.contains(from) else { return order.first }
+        guard let from, state.members.contains(from) else { return (order.first, nil) }
         if state.monocle {
-            guard let i = order.firstIndex(of: from), !order.isEmpty else { return nil }
+            guard let i = order.firstIndex(of: from), !order.isEmpty else { return (nil, nil) }
             let step = direction.isForward ? 1 : order.count - 1
             let next = order[(i + step) % order.count]
-            return next == from ? nil : next
+            return (next == from ? nil : next, nil)
         }
-        guard let area else { return nil }
+        guard let area else { return (nil, nil) }
         let frames = layout(space: space, area: area).navigation
-        guard let origin = frames[from] else { return nil }
-        return Self.nearest(from: origin, direction, among: frames.filter { $0.key != from })
+        guard let origin = frames[from] else { return (nil, nil) }
+        return (Self.nearest(from: origin, direction, among: frames.filter { $0.key != from }), origin)
+    }
+
+    /// Directional focus past the edge of the display whose tiling area is
+    /// `area`, leaving from `origin` (the focused tile, else the whole area):
+    /// the tile nearest `origin` on the nearest display beyond that edge with
+    /// one showing. Displays with nothing to focus are skipped.
+    private func neighborBeyond(from origin: CGRect, _ direction: Direction, area: CGRect,
+                                areas: [String: CGRect]) -> WindowID? {
+        let onDisplay = origin.intersection(area)
+        let origin = onDisplay.isEmpty ? area : onDisplay
+        let center = CGPoint(x: origin.midX, y: origin.midY)
+        // Squared distance from `center` to the nearest point of `r`.
+        func reach(_ r: CGRect) -> CGFloat {
+            let dx = max(r.minX - center.x, 0, center.x - r.maxX)
+            let dy = max(r.minY - center.y, 0, center.y - r.maxY)
+            return dx * dx + dy * dy
+        }
+        let beyond = snapshot.displays.compactMap { display -> (reach: CGFloat, uuid: String, space: SpaceID, area: CGRect)? in
+            guard let space = display.activeSpace, let rect = areas[display.displayUUID],
+                  Self.gap(from: area, direction, to: rect) != nil else { return nil }
+            return (reach(rect), display.displayUUID, space, rect)
+        }
+        for display in beyond.sorted(by: { ($0.reach, $0.uuid) < ($1.reach, $1.uuid) }) {
+            if let id = Self.nearest(from: origin, direction, among: showing(on: display.space, area: display.area)) {
+                return id
+            }
+        }
+        return nil
+    }
+
+    /// Where focus arriving from another display can land on `space`: its
+    /// tiles in full view, or monocle's front window.
+    private func showing(on space: SpaceID, area: CGRect) -> [WindowID: CGRect] {
+        guard let state = spaces[space] else { return [:] }
+        let plan = layout(space: space, area: area)
+        guard state.monocle else { return plan.frames.filter { plan.covered[$0.key] == nil } }
+        // The window `layout` raises in monocle.
+        guard let front = state.focus.entries.first(where: { state.members.contains($0) }) ?? state.liveOrder.first,
+              let frame = plan.frames[front] else { return [:] }
+        return [front: frame]
     }
 
     /// Geometric neighbour: candidates entirely beyond `origin`'s edge in the
     /// direction, preferring perpendicular overlap, then edge distance, then
     /// center distance, then id (deterministic).
     static func nearest(from origin: CGRect, _ direction: Direction, among frames: [WindowID: CGRect]) -> WindowID? {
-        let tolerance = 4.0
-        func beyond(_ r: CGRect) -> Double? {
-            switch direction {
-            case .left: return r.maxX <= origin.minX + tolerance ? origin.minX - r.maxX : nil
-            case .right: return r.minX >= origin.maxX - tolerance ? r.minX - origin.maxX : nil
-            case .up: return r.maxY <= origin.minY + tolerance ? origin.minY - r.maxY : nil
-            case .down: return r.minY >= origin.maxY - tolerance ? r.minY - origin.maxY : nil
-            }
-        }
         func overlap(_ r: CGRect) -> Double {
             direction.axis == .horizontal
                 ? min(r.maxY, origin.maxY) - max(r.minY, origin.minY)
                 : min(r.maxX, origin.maxX) - max(r.minX, origin.minX)
         }
         let scored = frames.compactMap { id, r -> (WindowID, Bool, Double, Double)? in
-            guard let d = beyond(r) else { return nil }
+            guard let d = gap(from: origin, direction, to: r) else { return nil }
             let c = hypot(r.midX - origin.midX, r.midY - origin.midY)
             return (id, overlap(r) > 0, max(0, d), Double(c))
         }
@@ -823,5 +877,17 @@ public struct Engine: Sendable {
             if a.3 != b.3 { return a.3 < b.3 }
             return a.0 < b.0
         }?.0
+    }
+
+    /// How far `r` lies past `origin`'s edge in `direction`, allowing a few
+    /// points of overlap for touching edges; `nil` unless it lies beyond.
+    private static func gap(from origin: CGRect, _ direction: Direction, to r: CGRect) -> Double? {
+        let tolerance = 4.0
+        switch direction {
+        case .left: return r.maxX <= origin.minX + tolerance ? origin.minX - r.maxX : nil
+        case .right: return r.minX >= origin.maxX - tolerance ? r.minX - origin.maxX : nil
+        case .up: return r.maxY <= origin.minY + tolerance ? origin.minY - r.maxY : nil
+        case .down: return r.minY >= origin.maxY - tolerance ? r.minY - origin.maxY : nil
+        }
     }
 }

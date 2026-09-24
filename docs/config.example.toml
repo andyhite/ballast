@@ -2,7 +2,7 @@
 # (override with $BALLAST_CONFIG, $XDG_CONFIG_HOME, or `ballast --config PATH`)
 #
 # You rarely need to edit this by hand: the menu bar item and Settings window
-# (menu > Preferences…) change every option here, and so do setting commands
+# (menu > Settings…) change every option here, and so do setting commands
 # (`layout …`, `master-ratio`, `master-count`, master grow/shrink/balance).
 # Ballast rewrites only the values it changes; comments and layout stay put.
 #
@@ -159,6 +159,7 @@ placement = { x = 0.74, y = 0.72, w = 0.25, h = 0.25 }
 "alt+return" = "promote"
 "ctrl+return" = "focus-master"
 "alt+r" = "reset"
+"alt+shift+r" = "relayout"
 "alt+space" = "layout next"
 "alt+m" = "monocle"
 "alt+t" = "float"

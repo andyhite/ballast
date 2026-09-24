@@ -46,6 +46,9 @@ public enum Command: Equatable, Sendable {
     case focusMaster
     case promote
     case reset
+    /// Re-read the desktop's windows, forget the minimum sizes learned from
+    /// refused frames, and re-send every tile's frame. Keeps the arrangement.
+    case relayout
     case layout(LayoutChange)
     case monocle
     case toggleFloat
@@ -61,7 +64,7 @@ public enum Command: Equatable, Sendable {
 
     public static let reference: [String] = [
         "focus left|right|up|down", "focus-last", "focus-master", "swap left|right|up|down",
-        "promote", "reset", "layout master_grid|master_stack|bsp|float|next|prev|default", "monocle", "float",
+        "promote", "reset", "relayout", "layout master_grid|master_stack|bsp|float|next|prev|default", "monocle", "float",
         "grow [amount]", "shrink [amount]", "master-ratio <+/-delta>", "master-count <+/-delta>",
         "balance", "send-to-display next|prev", "focus-display next|prev", "reload", "dump-state",
     ]
@@ -111,6 +114,7 @@ public enum Command: Equatable, Sendable {
         case "swap", "move": return direction().map(Command.swap)
         case "promote": return noArgs(.promote)
         case "reset": return noArgs(.reset)
+        case "relayout", "re-layout": return noArgs(.relayout)
         case "layout":
             guard args.count == 1, let arg else { return .failure(.init("'layout' expects a mode, next, prev or default")) }
             switch arg {

@@ -1043,8 +1043,8 @@ final class WindowManager: AppObserverDelegate {
         }
         let space = currentSpace
         let focusedBefore = engine.focused
-        let area = space.flatMap { engine.snapshot.key(for: $0) }.flatMap { displays.with(uuid: $0.display) }?.visibleFrame
-        let outcome = engine.perform(command, space: space, area: area)
+        let areas = Dictionary(displays.map { ($0.uuid, $0.visibleFrame) }, uniquingKeysWith: { first, _ in first })
+        let outcome = engine.perform(command, space: space, areas: areas)
         markDirty(outcome.dirty)
         if let target = outcome.focus { focusWindow(target) }
         if let message = outcome.message { Log.wm.info("\(message, privacy: .public)") }
@@ -1053,11 +1053,22 @@ final class WindowManager: AppObserverDelegate {
         case .sendToDisplay(let id, let cycle)?: send(id, toDisplay: cycle)
         case .focusDisplay(let cycle)?: focusDisplay(cycle)
         case .reload?: reloadConfig()
+        case .relayout(let space)?: relayout(space)
         case .dumpState?: dumpState()
         case nil: break
         }
         if engine.focused != focusedBefore { flashFocus() }
         refreshSurfaces()
+    }
+
+    /// Forces every tile on `space` to be re-sent (identical requests are
+    /// normally skipped) and re-discovers windows before the next pass.
+    private func relayout(_ space: SpaceID) {
+        for id in laidOut[space] ?? [] {
+            lastRequested[id] = nil
+            expected[id] = nil
+        }
+        requestResync()
     }
 
     private func runBinding(_ index: Int) {

@@ -1,6 +1,13 @@
 import BallastCore
 import SwiftUI
 
+/// Which settings the Layout pane edits: the `[layout]` defaults or one
+/// desktop's `[[space]]` overrides.
+enum LayoutScope: Hashable {
+    case defaults
+    case desktop(SpaceKey)
+}
+
 /// Master-grid/master-stack/BSP layout defaults, plus per-desktop overrides.
 /// Every field carries its own "Inherit" toggle when a specific desktop is
 /// selected: on means the key is absent from that desktop's `[[space]]`
@@ -8,13 +15,9 @@ import SwiftUI
 /// effective value.
 struct LayoutPane: View {
     @ObservedObject var model: ConfigModel
-    @State private var scope: Scope = .defaults
     @State private var editError: String?
 
-    private enum Scope: Hashable {
-        case defaults
-        case desktop(SpaceKey)
-    }
+    private var scope: LayoutScope { model.layoutScope }
 
     private var manager: WindowManager { model.manager }
     private var config: Config { model.config }
@@ -40,15 +43,15 @@ struct LayoutPane: View {
             }
 
             Section {
-                Picker("Editing", selection: $scope) {
-                    Text("Defaults (all desktops)").tag(Scope.defaults)
+                Picker("Editing", selection: $model.layoutScope) {
+                    Text("Defaults (all desktops)").tag(LayoutScope.defaults)
                     ForEach(model.desktops, id: \.key) { desktop in
-                        Text(desktopLabel(desktop)).tag(Scope.desktop(desktop.key))
+                        Text(desktopLabel(desktop)).tag(LayoutScope.desktop(desktop.key))
                     }
                 }
                 .onChange(of: model.desktops) { _, desktops in
                     if case .desktop(let key) = scope, !desktops.contains(where: { $0.key == key }) {
-                        scope = .defaults
+                        model.layoutScope = .defaults
                     }
                 }
                 if case .desktop = scope {

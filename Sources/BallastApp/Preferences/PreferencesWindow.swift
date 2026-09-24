@@ -3,21 +3,33 @@ import BallastCore
 import ServiceManagement
 import SwiftUI
 
-/// Single reusable "Ballast Settings" window covering everything the menu
-/// bar's quick toggles don't: General, Layout, Rules, Keyboard. Ballast is an
+/// Single reusable "Ballast Settings" window: General, Layout, Rules,
+/// Keyboard. The menu bar only covers the current desktop and focused app;
+/// every global setting and the `[layout]` defaults live here. Ballast is an
 /// `.accessory` app (no Dock icon, no menu bar menu bar item beyond the
 /// status item), so this window has to activate itself explicitly.
 enum PreferencesWindow {
     private static var controller: NSWindowController?
+    private static var model: ConfigModel?
 
-    static func show(manager: WindowManager) {
+    /// `desktop`: open the Layout tab with that desktop's overrides selected.
+    static func show(manager: WindowManager, desktop: SpaceKey? = nil) {
+        let model = model ?? ConfigModel(manager: manager)
+        Self.model = model
+        if let desktop {
+            // Desktops only refresh on config changes; make sure the one we
+            // point the picker at is listed.
+            model.refresh()
+            model.tab = .layout
+            model.layoutScope = .desktop(desktop)
+        }
+
         if let controller {
             NSApp.activate(ignoringOtherApps: true)
             controller.window?.makeKeyAndOrderFront(nil)
             return
         }
 
-        let model = ConfigModel(manager: manager)
         let root = PreferencesRootView(model: model)
         let hosting = NSHostingController(rootView: root)
         let window = NSWindow(contentViewController: hosting)
@@ -37,19 +49,27 @@ enum PreferencesWindow {
     }
 }
 
+enum PreferencesTab: Hashable {
+    case general, layout, rules, keyboard
+}
+
 private struct PreferencesRootView: View {
     @ObservedObject var model: ConfigModel
 
     var body: some View {
-        TabView {
+        TabView(selection: $model.tab) {
             GeneralPane(model: model)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(PreferencesTab.general)
             LayoutPane(model: model)
                 .tabItem { Label("Layout", systemImage: "rectangle.split.3x1") }
+                .tag(PreferencesTab.layout)
             RulesPane(manager: model.manager)
                 .tabItem { Label("Rules", systemImage: "list.bullet.rectangle") }
+                .tag(PreferencesTab.rules)
             BindingsPane(manager: model.manager)
                 .tabItem { Label("Keyboard", systemImage: "keyboard") }
+                .tag(PreferencesTab.keyboard)
         }
         .padding()
         .frame(minWidth: 720, minHeight: 520)
@@ -63,6 +83,9 @@ struct GeneralPane: View {
     @State private var loginItemError: String?
     @State private var editError: String?
     @State private var loginItemStatus = LoginItem.status
+    /// Bumped when a toggle change is cancelled, so the switch redraws from
+    /// `loginItemStatus` instead of keeping the flipped state.
+    @State private var loginToggleID = 0
 
     private var manager: WindowManager { model.manager }
     private var config: Config { model.config }
@@ -144,11 +167,19 @@ struct GeneralPane: View {
                     get: { loginItemStatus == .enabled },
                     set: { setLoginItem($0) }
                 ))
+                .id(loginToggleID)
                 .disabled(LoginItem.unavailableReason != nil)
                 if let reason = LoginItem.unavailableReason {
                     Text(reason).font(.caption).foregroundStyle(.secondary)
                 } else if let loginItemError {
                     InlineErrorText(message: loginItemError)
+                } else if loginItemStatus == .requiresApproval {
+                    HStack {
+                        Text("Waiting for approval in System Settings → General → Login Items.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Open Login Items") { SMAppService.openSystemSettingsLoginItems() }
+                    }
                 }
             }
 
@@ -183,13 +214,29 @@ struct GeneralPane: View {
     }
 
     private func setLoginItem(_ enabled: Bool) {
+        if !enabled, loginItemStatus == .enabled {
+            // Unregistering boots the LaunchAgent out, and with it this
+            // process (the agent is what's running us while it is enabled).
+            let alert = NSAlert()
+            alert.messageText = "Turn off Start at Login?"
+            alert.informativeText = "Ballast quits now. Open it from Applications whenever you want it back."
+            alert.addButton(withTitle: "Turn Off and Quit")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else {
+                loginToggleID += 1
+                return
+            }
+        }
         do {
+            // Enabling makes launchd start a second copy right away; it loses
+            // the single-instance lock and exits, so this one keeps running.
             try LoginItem.setEnabled(enabled)
             loginItemError = nil
         } catch {
             loginItemError = error.localizedDescription
         }
         loginItemStatus = LoginItem.status
+        if enabled, loginItemStatus == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
     }
 }
 

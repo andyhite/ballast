@@ -214,11 +214,15 @@ stays the effective value until the next successful edit. The write informs
 `ConfigWatcher` of its own content so the file-watcher's hot reload doesn't
 fire a second, redundant reload.
 
-**Surfaces.** The menu bar covers the current desktop's layout settings
-(each submenu has a `Default (…)` entry that removes the desktop's override),
-the `[layout]` defaults, global settings, and the focused app's `app_id`
-rule. The Settings window (`Preferences/`, SwiftUI in an `NSWindow`) covers
-everything: General, Layout (defaults and every connected desktop, where a
+**Surfaces.** The menu bar covers only what's in front of you: the current
+desktop (an Adjust Desktop submenu with the layout mode and only the current
+mode's settings; each has a default entry that removes the desktop's
+override, and **More in Settings…** opens the Layout tab on that desktop),
+monocle, reset, and the `weight`/`manage`/`float` keys of the focused app's
+`app_id` rule (removing the rule is Settings-only).
+Global settings and the `[layout]` defaults live only in the Settings window
+(`Preferences/`, SwiftUI in an `NSWindow`), which covers everything:
+General, Layout (defaults and every connected desktop, where a
 checked setting is a per-desktop override), Rules (ordered list plus a full
 editor), and Keyboard (a hotkey recorder that captures key codes, so
 recording doesn't depend on the keyboard layout). Text fields commit on
@@ -382,7 +386,10 @@ geometry for the scrolling (outermost) column:
   window is not re-sent. If a window refuses a size, the actual frame is
   recorded. If it refused to *shrink*, the engine learns a minimum size and
   reflows the siblings around it (`learnMinSize`, honored by both layouts). It
-  is never retried every pass.
+  is never retried every pass. A learned minimum only grows, so a stale one
+  (read while an app was mid-resize) squeezes its siblings for good; the
+  `relayout` command forgets a Space's learned minimums, clears its
+  last-request cache so every frame is re-sent, and resyncs its windows.
 - **Idle cost is zero**: there are no timers, no polling, and no animation
   when nothing is changing.
 
@@ -462,6 +469,7 @@ next frame (per-window generation counter).
 | Native fullscreen | Windows with `AXFullScreen` are skipped. Windows on a fullscreen-type Space are never tiled. |
 | Stage Manager on | `engine.passthrough`: every Space renders as floating, and the menu says so. |
 | Window moved to another display (command or drag) | A plain AX move into the target display's visible frame. macOS reassigns the Space, Ballast reconciles, and the cursor follows. |
+| Directional focus at a display edge | If the active Space has no tile farther in that direction, focus enters the nearest display beyond that edge through its nearest visible tile. Displays without a focusable tile are skipped. |
 | Moving between Spaces on one display | Not a WM function (a non-goal). |
 
 **Discovery caveat.** For many apps, `kAXWindowsAttribute` returns only

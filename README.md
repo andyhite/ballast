@@ -103,14 +103,25 @@ The menu bar shows the current desktop and its mode, for example `2 · MS`,
 `1 · BSP`, or `3 · ⋯`. A `Z` suffix means monocle is on. Red `! …` text means
 something needs your attention; open the menu to see what.
 
+The menu, top to bottom:
+
+1. **Adjust Desktop ▸**: the layout mode (Master-Grid, Master-Stack, BSP,
+   Floating; the default one says so), this desktop's settings for that
+   mode, gaps, **Remove Desktop Overrides**, and **More in Settings…**.
+2. **Monocle**, **Reset Arrangement**, and **Re-layout Desktop**.
+3. **The focused app ▸**: Weight (1, 2, 3, 5, 8, 13), Manage (Always or
+   Never), Float (Automatic, Always, or Never), and **Inspect Window…**.
+   Picking a `(default)` entry removes that key from the app's rule.
+4. **Settings…** (`⌘,`): four tabs, General, Layout, Rules, and Keyboard.
+   Global settings and the defaults for all desktops live only here. The
+   Keyboard tab records hotkeys.
+5. **Tools ▸**: Reload Config, Open Config File, Window Inspector…, and Run
+   Doctor….
+
 **Window Inspector…** shows the focused window's bundle id, AX role and
 subrole, why it floats or tiles (or the rule that overrides that), its
 weight, its Space id/uuid/ordinal and display uuid/id — with one-click
 buttons to float or tile it by rule.
-
-From the menu you can change the current desktop's layout, edit the rule for
-the focused app, and open **Preferences…** (`⌘,`). Preferences has four tabs:
-General, Layout, Rules, and Keyboard. The Keyboard tab records hotkeys.
 
 Drag a window onto another tile to swap the two, or onto another display to
 move it there. While you drag, a highlight marks the window you'd swap with,
@@ -163,14 +174,15 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 
 | Command | Effect |
 |---|---|
-| `focus left\|right\|up\|down`, `focus-last`, `focus-master` | Move focus |
+| `focus left\|right\|up\|down`, `focus-last`, `focus-master` | Move focus; at a display edge, continue onto the nearest display in that direction |
 | `swap left\|right\|up\|down`, `promote` | Rearrange tiles (makes the desktop manual) |
 | `reset` | Drop the manual arrangement; re-rank by weight |
+| `relayout` | Fix a garbled desktop: re-read its windows, forget learned minimum sizes, re-send every frame. Keeps the arrangement |
 | `layout master_grid\|master_stack\|bsp\|float\|next\|prev\|default` | Change this desktop's mode |
 | `monocle`, `float` | Toggle full-tile monocle / float the focused window |
 | `grow [n]`, `shrink [n]`, `balance` | Resize the focused tile / even out splits |
 | `master-ratio <±d>`, `master-count <±d>` | Adjust the master region |
-| `send-to-display next\|prev`, `focus-display next\|prev` | Move across displays |
+| `send-to-display next\|prev`, `focus-display next\|prev` | Move a window or focus to the next/previous display |
 | `reload`, `dump-state` | Reload config / write state to `~/Library/Caches/dev.ballast/state.json` |
 
 ### CLI

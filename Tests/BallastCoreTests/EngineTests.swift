@@ -8,6 +8,8 @@ struct EngineTests {
     static let displayA = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
     static let displayB = "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"
     static let area = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    /// Every display's tiling area for `Engine.perform`: display A only.
+    static let areas = [displayA: area]
 
     /// Two displays, each with two user Spaces and one native-fullscreen Space.
     /// Space ids: A1=1, A2=2, AFull=3, B1=4, B2=5, BFull=6.
@@ -70,7 +72,7 @@ struct EngineTests {
         #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2])
 
         // Two masters: the newcomer lands right after both.
-        _ = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        _ = engine.perform(.masterCount(1), space: 1, areas: Self.areas)
         _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
         #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2, 5])
     }
@@ -150,11 +152,11 @@ struct EngineTests {
         #expect(swapped3)
         #expect(engine.spacesForTesting[1]!.liveOrder.first == 1)
 
-        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
         _ = engine.focus(1)
-        _ = engine.perform(.resize(0.1), space: 1, area: Self.area) // pin a manual split ratio
+        _ = engine.perform(.resize(0.1), space: 1, areas: Self.areas) // pin a manual split ratio
         #expect(engine.spacesForTesting[1]!.tree != BSPNode.ideal(engine.spacesForTesting[1]!.idealOrder, axis: nil))
-        let outcome = engine.perform(.reset, space: 1, area: Self.area)
+        let outcome = engine.perform(.reset, space: 1, areas: Self.areas)
         #expect(outcome.dirty.contains(1))
 
         let state = engine.spacesForTesting[1]!
@@ -164,6 +166,28 @@ struct EngineTests {
         // modeOverride (bsp) must survive reset.
         #expect(engine.mode(for: 1) == .bsp)
     }
+
+    @Test("perform(.relayout) forgets this Space's learned minimum sizes, keeps the arrangement and other Spaces")
+    func relayoutForgetsLearnedMinSizes() {
+        var engine = Self.makeEngine()
+        for id: WindowID in 1...3 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 2)
+        _ = engine.swap(1, 3, on: 1)
+        let clean = engine.layout(space: 1, area: Self.area)
+
+        // A stale refusal: one stack window "needs" nearly the whole height,
+        // squeezing its sibling.
+        _ = engine.learnMinSize(2, CGSize(width: 100, height: 700))
+        _ = engine.learnMinSize(4, CGSize(width: 300, height: 300))
+        #expect(engine.layout(space: 1, area: Self.area) != clean)
+
+        let outcome = engine.perform(.relayout, space: 1, areas: Self.areas)
+        #expect(outcome.dirty == [1])
+        #expect(outcome.action == .relayout(1))
+        #expect(engine.layout(space: 1, area: Self.area) == clean)
+        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.windows[4]?.minSize == CGSize(width: 300, height: 300))
+    }
     // MARK: - Config reload does not reset manual/monocle/mode (Rift bug)
 
     @Test("config reload preserves modeOverride, monocle and manual arrangement, but updates config defaults elsewhere")
@@ -171,8 +195,8 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
-        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
         let swapped4 = engine.swap(1, 2, on: 1)
         #expect(swapped4)
 
@@ -249,12 +273,12 @@ struct EngineTests {
         _ = engine.removeWindow(5)
         #expect(quarters(), "a window coming and going leaves the grid intact")
 
-        _ = engine.perform(.resize(0.1), space: 1, area: Self.area)
+        _ = engine.perform(.resize(0.1), space: 1, areas: Self.areas)
         #expect(!quarters(), "manual resize sticks")
         _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
         _ = engine.removeWindow(5)
         #expect(!quarters(), "a manual Space does not snap back to the grid")
-        _ = engine.perform(.reset, space: 1, area: Self.area)
+        _ = engine.perform(.reset, space: 1, areas: Self.areas)
         #expect(quarters())
     }
 
@@ -368,11 +392,11 @@ struct EngineTests {
         _ = engine.focus(1)
         _ = engine.focus(2)
 
-        let outcome1 = engine.perform(.focusLast, space: 1, area: Self.area)
+        let outcome1 = engine.perform(.focusLast, space: 1, areas: Self.areas)
         #expect(outcome1.focus == 1)
         _ = engine.focus(1)
 
-        let outcome2 = engine.perform(.focusLast, space: 1, area: Self.area)
+        let outcome2 = engine.perform(.focusLast, space: 1, areas: Self.areas)
         #expect(outcome2.focus == 2)
     }
 
@@ -387,11 +411,11 @@ struct EngineTests {
         _ = engine.focus(older)
         _ = engine.focus(previous)
 
-        #expect(engine.perform(.focusMaster, space: 1, area: Self.area).focus == master)
+        #expect(engine.perform(.focusMaster, space: 1, areas: Self.areas).focus == master)
         _ = engine.focus(master)
 
         // Back to the stack window that had focus, not merely any other tile.
-        #expect(engine.perform(.focusMaster, space: 1, area: Self.area).focus == previous)
+        #expect(engine.perform(.focusMaster, space: 1, areas: Self.areas).focus == previous)
     }
 
     @Test("hadFocus: fallback is computed even when focus already moved elsewhere, preferring the entry older than the closed window")
@@ -500,10 +524,10 @@ struct EngineTests {
         _ = engine.focus(1)
         #expect(engine.isTiled(1))
 
-        _ = engine.perform(.toggleFloat, space: 1, area: Self.area)
+        _ = engine.perform(.toggleFloat, space: 1, areas: Self.areas)
         #expect(!engine.isTiled(1))
 
-        _ = engine.perform(.toggleFloat, space: 1, area: Self.area)
+        _ = engine.perform(.toggleFloat, space: 1, areas: Self.areas)
         #expect(engine.isTiled(1))
     }
 
@@ -519,12 +543,12 @@ struct EngineTests {
         let before = engine.layout(space: 1, area: Self.area).frames
         #expect(before[1] != before[2])
 
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
         let monocleLayout = engine.layout(space: 1, area: Self.area)
         #expect(monocleLayout.frames[1] == monocleLayout.frames[2])
         #expect(monocleLayout.raise == 2)
 
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
         let after = engine.layout(space: 1, area: Self.area)
         #expect(after.frames == before)
     }
@@ -537,12 +561,12 @@ struct EngineTests {
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 1)
         _ = engine.focus(1)
         _ = engine.focus(2)
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
         #expect(engine.layout(space: 1, area: Self.area).raise == 2)
 
         // Window 3 floats above the tiled Space and takes focus.
         _ = engine.focus(3)
-        _ = engine.perform(.toggleFloat, space: 1, area: Self.area)
+        _ = engine.perform(.toggleFloat, space: 1, areas: Self.areas)
         #expect(engine.windowsForTesting[3]?.isFloating == true)
 
         #expect(engine.layout(space: 1, area: Self.area).raise == nil)
@@ -559,7 +583,7 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
 
         let dirty = engine.adoptFrame(1, CGRect(x: 10, y: 10, width: 20, height: 20))
         #expect(dirty.isEmpty)
@@ -576,7 +600,7 @@ struct EngineTests {
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(bundleID: "unmanaged"), space: 1)
         _ = engine.focus(1)
         _ = engine.focus(2)
-        _ = engine.perform(.monocle, space: 1, area: Self.area)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
         #expect(engine.layout(space: 1, area: Self.area).raise == 2)
 
         // An unmanaged window on the same Space takes keyboard focus.
@@ -604,7 +628,7 @@ struct EngineTests {
         #expect(automatic.mode(for: 1) == .masterStack)
         #expect(automatic.mode(for: 4) == .masterGrid)
         // A runtime override beats the display.
-        _ = automatic.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = automatic.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
         #expect(automatic.mode(for: 1) == .bsp)
 
         // A desktop's own mode beats the display.
@@ -673,22 +697,52 @@ struct EngineTests {
     func focusWalksTheStrip() {
         var engine = Self.stackEngine(count: 4)
         _ = engine.focus(2)
-        #expect(engine.perform(.focus(.down), space: 1, area: Self.area).focus == 3)
+        #expect(engine.perform(.focus(.down), space: 1, areas: Self.areas).focus == 3)
         _ = engine.focus(3)
         #expect(engine.layout(space: 1, area: Self.area).covered[3] == nil)
-        #expect(engine.perform(.focus(.down), space: 1, area: Self.area).focus == 4)
-        #expect(engine.perform(.focus(.up), space: 1, area: Self.area).focus == 2)
-        #expect(engine.perform(.focus(.left), space: 1, area: Self.area).focus == 1)
+        #expect(engine.perform(.focus(.down), space: 1, areas: Self.areas).focus == 4)
+        #expect(engine.perform(.focus(.up), space: 1, areas: Self.areas).focus == 2)
+        #expect(engine.perform(.focus(.left), space: 1, areas: Self.areas).focus == 1)
         // Back from the master lands on the window in view, not a tucked one.
         _ = engine.focus(1)
-        #expect(engine.perform(.focus(.right), space: 1, area: Self.area).focus == 3)
+        #expect(engine.perform(.focus(.right), space: 1, areas: Self.areas).focus == 3)
+    }
+
+    @Test("directional focus crosses between side-by-side displays at the edge")
+    func directionalFocusCrossesDisplays() {
+        var config = Config()
+        config.layout.mode = .bsp
+        config.layout.gaps = Gaps(inner: 0, outer: 0)
+        var engine = Self.makeEngine(config: config)
+        for id: WindowID in [1, 2] {
+            _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
+        }
+        for id: WindowID in [4, 5] {
+            _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 4)
+        }
+        let areas = [
+            Self.displayA: CGRect(x: 0, y: 0, width: 1000, height: 800),
+            Self.displayB: CGRect(x: 1000, y: 0, width: 1000, height: 800),
+        ]
+
+        _ = engine.focus(1)
+        #expect(engine.perform(.focus(.right), space: 1, areas: areas).focus == 2,
+                "a local tile wins before focus crosses the display edge")
+        _ = engine.focus(2)
+        #expect(engine.perform(.focus(.right), space: 1, areas: areas).focus == 4,
+                "focus enters the next display through its facing edge")
+        _ = engine.focus(4)
+        #expect(engine.perform(.focus(.left), space: 4, areas: areas).focus == 2)
+        _ = engine.focus(1)
+        #expect(engine.perform(.focus(.left), space: 1, areas: areas).focus == nil,
+                "focus stops when no display lies in that direction")
     }
 
     @Test("swap moves the focused window along the stack and the view follows it")
     func swapMovesAlongTheStack() {
         var engine = Self.stackEngine(count: 4)
         _ = engine.focus(2)
-        #expect(engine.perform(.swap(.down), space: 1, area: Self.area).dirty == [1])
+        #expect(engine.perform(.swap(.down), space: 1, areas: Self.areas).dirty == [1])
         #expect(engine.spacesForTesting[1]!.liveOrder == [1, 3, 2, 4])
         let layout = engine.layout(space: 1, area: Self.area)
         #expect(layout.covered[2] == nil)
@@ -787,7 +841,7 @@ struct EngineTests {
         var engine = Self.makeEngine(config: config)
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
-        _ = engine.perform(.masterRatio(0.05), space: 1, area: Self.area)
+        _ = engine.perform(.masterRatio(0.05), space: 1, areas: Self.areas)
         let ratio = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
         #expect(ratio >= 0.93)
     }
@@ -799,7 +853,7 @@ struct EngineTests {
         var engine = Self.makeEngine(config: config)
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
-        _ = engine.perform(.masterRatio(-0.05), space: 1, area: Self.area)
+        _ = engine.perform(.masterRatio(-0.05), space: 1, areas: Self.areas)
         let ratio = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
         #expect(ratio <= 0.07)
     }
@@ -841,10 +895,10 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
-        _ = engine.perform(.masterCount(Int.max), space: 1, area: Self.area)
+        _ = engine.perform(.masterCount(Int.max), space: 1, areas: Self.areas)
         #expect(engine.spacesForTesting[1]?.masterCountOverride == 16)
 
-        _ = engine.perform(.masterCount(Int.min), space: 1, area: Self.area)
+        _ = engine.perform(.masterCount(Int.min), space: 1, areas: Self.areas)
         #expect(engine.spacesForTesting[1]?.masterCountOverride == 1)
     }
 
@@ -855,18 +909,18 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
-        let setOutcome = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        let setOutcome = engine.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
         #expect(setOutcome.settings == SettingsChange(space: 1, mode: .some(.bsp)))
 
-        let nextOutcome = engine.perform(.layout(.next), space: 1, area: Self.area)
+        let nextOutcome = engine.perform(.layout(.next), space: 1, areas: Self.areas)
         #expect(nextOutcome.settings?.space == 1)
         #expect(nextOutcome.settings?.mode != nil)
 
-        let previousOutcome = engine.perform(.layout(.previous), space: 1, area: Self.area)
+        let previousOutcome = engine.perform(.layout(.previous), space: 1, areas: Self.areas)
         #expect(previousOutcome.settings?.space == 1)
         #expect(previousOutcome.settings?.mode != nil)
 
-        let defaultOutcome = engine.perform(.layout(.configDefault), space: 1, area: Self.area)
+        let defaultOutcome = engine.perform(.layout(.configDefault), space: 1, areas: Self.areas)
         #expect(defaultOutcome.settings == SettingsChange(space: 1, mode: .some(nil)))
     }
 
@@ -876,17 +930,17 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
         _ = engine.focus(1)
 
-        let ratioOutcome = engine.perform(.masterRatio(0.1), space: 1, area: Self.area)
+        let ratioOutcome = engine.perform(.masterRatio(0.1), space: 1, areas: Self.areas)
         #expect(ratioOutcome.settings?.space == 1)
         #expect(ratioOutcome.settings?.masterRatio == engine.spacesForTesting[1]?.masterRatioOverride)
         #expect(ratioOutcome.settings?.mode == nil)
         #expect(ratioOutcome.settings?.masterCount == nil)
 
-        let resizeOutcome = engine.perform(.resize(0.05), space: 1, area: Self.area)
+        let resizeOutcome = engine.perform(.resize(0.05), space: 1, areas: Self.areas)
         #expect(resizeOutcome.settings?.space == 1)
         #expect(resizeOutcome.settings?.masterRatio == engine.spacesForTesting[1]?.masterRatioOverride)
 
-        let balanceOutcome = engine.perform(.balance, space: 1, area: Self.area)
+        let balanceOutcome = engine.perform(.balance, space: 1, areas: Self.areas)
         #expect(balanceOutcome.settings == SettingsChange(space: 1, masterRatio: 0.5))
     }
 
@@ -895,7 +949,7 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
-        let outcome = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        let outcome = engine.perform(.masterCount(1), space: 1, areas: Self.areas)
         #expect(outcome.settings?.space == 1)
         #expect(outcome.settings?.masterCount == engine.spacesForTesting[1]?.masterCountOverride)
         #expect(outcome.settings?.mode == nil)
@@ -907,23 +961,23 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
-        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
         _ = engine.focus(1)
 
-        #expect(engine.perform(.resize(0.1), space: 1, area: Self.area).settings == nil)
-        #expect(engine.perform(.balance, space: 1, area: Self.area).settings == nil)
-        #expect(engine.perform(.swap(.right), space: 1, area: Self.area).settings == nil)
-        #expect(engine.perform(.monocle, space: 1, area: Self.area).settings == nil)
-        #expect(engine.perform(.reset, space: 1, area: Self.area).settings == nil)
+        #expect(engine.perform(.resize(0.1), space: 1, areas: Self.areas).settings == nil)
+        #expect(engine.perform(.balance, space: 1, areas: Self.areas).settings == nil)
+        #expect(engine.perform(.swap(.right), space: 1, areas: Self.areas).settings == nil)
+        #expect(engine.perform(.monocle, space: 1, areas: Self.areas).settings == nil)
+        #expect(engine.perform(.reset, space: 1, areas: Self.areas).settings == nil)
     }
 
     @Test("clearSettingOverrides clears only the requested fields")
     func clearSettingOverridesClearsOnlyRequestedFields() {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
-        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
-        _ = engine.perform(.masterRatio(0.1), space: 1, area: Self.area)
-        _ = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, areas: Self.areas)
+        _ = engine.perform(.masterRatio(0.1), space: 1, areas: Self.areas)
+        _ = engine.perform(.masterCount(1), space: 1, areas: Self.areas)
         #expect(engine.spacesForTesting[1]?.modeOverride == .bsp)
         #expect(engine.spacesForTesting[1]?.masterRatioOverride != nil)
         #expect(engine.spacesForTesting[1]?.masterCountOverride != nil)

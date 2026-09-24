@@ -77,7 +77,7 @@ The script ends with `N passed, 0 failed`.
 - **Weighted stack:** on a `master_grid` Space that isn't manual (run
   `ballast send reset`), with a heavier master such as Ghostty at weight 10
   and three weight-1 stack windows, focus a stack window and pick
-  **Focused App: …** → **Weight** → **2** in the menu. It moves to the top
+  the app's submenu (its name, with its icon) → **Weight** → **2** in the menu. It moves to the top
   of the stack and becomes twice as tall as each of the other two. Pick
   **5** instead and it stops at three times their height, the default
   Weight Share Limit (Max 75%). Set it back to **1 (default)** and the
@@ -127,6 +127,11 @@ The script ends with `N passed, 0 failed`.
 - **Display move:** `ballast send send-to-display next` moves the focused
   window to the other display, the cursor follows it, and the window is tiled
   there.
+- **Focus across displays:** with tiled windows on two side-by-side displays,
+  focus the rightmost window on the left display and run `ballast send focus
+  right`. The leftmost aligned window on the right display gains focus. Run
+  `ballast send focus left` to return. With `cursor_follows_focus = true`, the
+  cursor follows both jumps.
 - **Drag preview:** drag a tile by its title bar over another tile. A
   translucent accent-colored zone exactly covers the window you'd swap
   with, under the dragged window (which stays untinted), and follows the

@@ -5,11 +5,15 @@ import SwiftUI
 /// Live snapshot of `WindowManager.config`/`configError`/`desktops`, refreshed
 /// whenever `WindowManager.configDidChange` fires. Shared by every
 /// Preferences pane so edits made in one tab show up immediately in another.
+/// Also holds the selected tab and Layout scope, so the menu bar can open the
+/// window straight onto one desktop's settings.
 final class ConfigModel: ObservableObject {
     let manager: WindowManager
     @Published private(set) var config: Config
     @Published private(set) var configError: String?
     @Published private(set) var desktops: [WindowManager.DesktopInfo]
+    @Published var tab: PreferencesTab = .general
+    @Published var layoutScope: LayoutScope = .defaults
 
     private var token: NSObjectProtocol?
 
@@ -29,7 +33,7 @@ final class ConfigModel: ObservableObject {
         if let token { NotificationCenter.default.removeObserver(token) }
     }
 
-    private func refresh() {
+    func refresh() {
         config = manager.config
         configError = manager.configError
         desktops = manager.desktops
