@@ -68,6 +68,11 @@ final class WindowManager: AppObserverDelegate {
     private var hitTestPending = false
     private var resyncPending = false
     private var axTrustObserverTarget: AXTrustObserverTarget?
+    /// Settings changed by commands (hotkeys, `ballast send …`, menu),
+    /// merged per-Space and flushed to the config file after a short
+    /// debounce, so a held grow/shrink key does not write on every step.
+    private var pendingSettings: [SpaceID: SettingsChange] = [:]
+    private var settingsFlushWorkItem: DispatchWorkItem?
 
     init(configURL: URL) {
         self.configURL = configURL
@@ -739,6 +744,7 @@ final class WindowManager: AppObserverDelegate {
         markDirty(outcome.dirty)
         if let target = outcome.focus { focusWindow(target) }
         if let message = outcome.message { Log.wm.info("\(message, privacy: .public)") }
+        if let change = outcome.settings { schedulePersist(change) }
         switch outcome.action {
         case .sendToDisplay(let id, let cycle)?: send(id, toDisplay: cycle)
         case .focusDisplay(let cycle)?: focusDisplay(cycle)
@@ -753,6 +759,52 @@ final class WindowManager: AppObserverDelegate {
         let bindings = engine.config.bindings
         guard bindings.indices.contains(index) else { return }
         perform(bindings[index].command)
+    }
+
+    /// Merges a command's setting change into the pending queue for its
+    /// Space (later fields win) and (re)starts the debounce timer.
+    private func schedulePersist(_ change: SettingsChange) {
+        var pending = pendingSettings[change.space] ?? SettingsChange(space: change.space)
+        if let mode = change.mode { pending.mode = mode }
+        if let ratio = change.masterRatio { pending.masterRatio = ratio }
+        if let count = change.masterCount { pending.masterCount = count }
+        pendingSettings[change.space] = pending
+        settingsFlushWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in self?.flushPendingSettings() }
+        settingsFlushWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
+    }
+
+    /// Writes every pending Space's changes to the config in one edit per
+    /// Space, then drops the runtime overrides that are now persisted. A
+    /// Space without a stable config address (fullscreen, or since removed)
+    /// is skipped: its runtime override stays the effective, unsaved value.
+    private func flushPendingSettings() {
+        settingsFlushWorkItem = nil
+        let pending = pendingSettings
+        pendingSettings.removeAll()
+        let snapshot = engine.snapshot
+        for (space, change) in pending {
+            guard let key = snapshot.key(for: space) else { continue }
+            let error = editConfig { editor in
+                if let mode = change.mode {
+                    let value: ConfigValue? = mode.map { .string($0.rawValue) }
+                    if case .failure(let e) = editor.set("mode", value, in: .space(key)) { return .failure(e) }
+                }
+                if let ratio = change.masterRatio,
+                   case .failure(let e) = editor.set("master_ratio", .float(ratio), in: .space(key)) {
+                    return .failure(e)
+                }
+                if let count = change.masterCount,
+                   case .failure(let e) = editor.set("master_count", .integer(count), in: .space(key)) {
+                    return .failure(e)
+                }
+                return .success(())
+            }
+            guard error == nil else { continue } // notification already posted; runtime override stays effective
+            engine.clearSettingOverrides(
+                space, mode: change.mode != nil, masterRatio: change.masterRatio != nil, masterCount: change.masterCount != nil)
+        }
     }
 
     private func neighborDisplay(from current: DisplayInfo?, _ cycle: Cycle) -> DisplayInfo? {
@@ -821,6 +873,7 @@ final class WindowManager: AppObserverDelegate {
     /// Hot reload. Invalid config is rejected and the previous one stays live.
     /// Live per-Space state (mode overrides, manual arrangements) is kept.
     func reloadConfig() {
+        defer { NotificationCenter.default.post(name: Self.configDidChange, object: self) }
         if case .invalidConfig = status { tryStart(); return }
         defer { if status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
         guard FileManager.default.fileExists(atPath: configURL.path) else {
@@ -844,8 +897,124 @@ final class WindowManager: AppObserverDelegate {
     }
 
     private func applyBindings() {
+        guard !hotkeysSuspended else { return }
         let failures = hotkeys?.setBindings(engine.config.bindings.map(\.hotkey)) ?? []
         for failure in failures { Log.config.error("hotkey: \(failure, privacy: .public)") }
+    }
+
+    /// Ballast's global hotkeys are off while this is true, so recording a new
+    /// hotkey in Preferences doesn't also run the command already bound to it.
+    private var hotkeysSuspended = false
+
+    func setHotkeysSuspended(_ suspended: Bool) {
+        guard suspended != hotkeysSuspended else { return }
+        hotkeysSuspended = suspended
+        if suspended { hotkeys?.removeAll() } else if status == .running { applyBindings() }
+    }
+
+    /// Posted after every `reloadConfig()` attempt, success or rejection.
+    static let configDidChange = Notification.Name("dev.ballast.configDidChange")
+
+    /// The live, validated config (menu bar and Preferences read from this).
+    var config: Config { engine.config }
+
+    func spaceKey(for space: SpaceID) -> SpaceKey? {
+        engine.snapshot.key(for: space)
+    }
+
+    struct DesktopInfo: Equatable {
+        let key: SpaceKey
+        let space: SpaceID
+        let displayName: String
+        let isActive: Bool
+    }
+
+    /// Every user (non-fullscreen) Space of every connected display, in
+    /// display order (matching `displays`) then ordinal.
+    var desktops: [DesktopInfo] {
+        let snapshot = engine.snapshot
+        var result: [DesktopInfo] = []
+        for display in displays {
+            guard let entry = snapshot.displays.first(where: { $0.displayUUID == display.uuid }) else { continue }
+            var ordinal = 0
+            for info in entry.spaces where info.kind == .user {
+                ordinal += 1
+                result.append(DesktopInfo(
+                    key: SpaceKey(display: entry.displayUUID, ordinal: ordinal),
+                    space: info.id, displayName: display.name, isActive: entry.activeSpace == info.id))
+            }
+        }
+        return result
+    }
+
+    /// Reads the config file (the starter template if it does not exist
+    /// yet), applies `change`, validates the result, and — only if that
+    /// succeeds — writes it atomically to the symlink-resolved path and
+    /// reloads. On any failure nothing is written, a notification is
+    /// posted, and the error is returned; `reloadConfig()` still posts
+    /// `configDidChange` via the write path below.
+    @discardableResult
+    func editConfig(_ change: (inout ConfigEditor) -> Result<Void, ConfigEditError>) -> ConfigEditError? {
+        let resolvedURL = configURL.resolvingSymlinksInPath()
+        let missing = !FileManager.default.fileExists(atPath: resolvedURL.path)
+        let text: String
+        if missing {
+            text = StatusBar.starterConfig
+        } else {
+            do { text = try String(contentsOf: resolvedURL, encoding: .utf8) } catch {
+                let editError = ConfigEditError("cannot read \(resolvedURL.path): \(error.localizedDescription)")
+                Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
+                return editError
+            }
+        }
+        var editor = ConfigEditor(text: text)
+        if case .failure(let error) = change(&editor) {
+            Notifier.post(title: "Ballast couldn't save the change", body: error.description)
+            return error
+        }
+        if case .failure(let error) = editor.validated() {
+            let editError = ConfigEditError(error.description)
+            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
+            return editError
+        }
+        let data = Data(editor.text.utf8)
+        do {
+            if missing {
+                try FileManager.default.createDirectory(at: resolvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            }
+            try data.write(to: resolvedURL, options: .atomic)
+        } catch {
+            let editError = ConfigEditError("cannot write \(resolvedURL.path): \(error.localizedDescription)")
+            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
+            return editError
+        }
+        // Our own write would otherwise trigger a second, redundant reload
+        // once the watcher's debounced content check runs.
+        watcher?.acknowledge(content: data)
+        if missing {
+            configFileCreated()
+        } else {
+            reloadConfig()
+        }
+        return nil
+    }
+
+    /// Writes a per-desktop setting (`nil` removes it, so the desktop
+    /// inherits `[layout]`) into that desktop's `[[space]]` block, and, on
+    /// success, drops any runtime override of the same setting.
+    @discardableResult
+    func setSpaceSetting(_ key: String, _ value: ConfigValue?, space: SpaceID) -> ConfigEditError? {
+        guard let spaceKey = engine.snapshot.key(for: space) else {
+            return ConfigEditError("This desktop has no stable config address (fullscreen or unknown).")
+        }
+        if let error = editConfig({ $0.set(key, value, in: .space(spaceKey)) }) { return error }
+        switch key {
+        case "mode": engine.clearSettingOverrides(space, mode: true, masterRatio: false, masterCount: false)
+        case "master_ratio": engine.clearSettingOverrides(space, mode: false, masterRatio: true, masterCount: false)
+        case "master_count": engine.clearSettingOverrides(space, mode: false, masterRatio: false, masterCount: true)
+        default: break
+        }
+        return nil
     }
 
     // MARK: Diagnostics

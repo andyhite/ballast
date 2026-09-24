@@ -36,6 +36,8 @@ public struct LayoutSettings: Equatable, Sendable {
     public var stackSide = StackSide.right
     /// Axis for new BSP splits; `nil` = automatic (longer side).
     public var split: Axis?
+    /// Shape of the weight-default BSP tree.
+    public var bspShape = BSPShape.dwindle
     /// BSP weight-ratio clamp.
     public var bspMinRatio = 0.25
     public var bspMaxRatio = 0.75
@@ -51,6 +53,7 @@ public struct LayoutOverrides: Equatable, Sendable {
     public var masterCount: Int?
     public var stackSide: StackSide?
     public var split: Axis??
+    public var bspShape: BSPShape?
     public var bspMinRatio: Double?
     public var bspMaxRatio: Double?
     public var gapsInner: Double?
@@ -65,6 +68,7 @@ public struct LayoutOverrides: Equatable, Sendable {
         if let masterCount { s.masterCount = masterCount }
         if let stackSide { s.stackSide = stackSide }
         if let split { s.split = split }
+        if let bspShape { s.bspShape = bspShape }
         if let bspMinRatio { s.bspMinRatio = bspMinRatio }
         if let bspMaxRatio { s.bspMaxRatio = bspMaxRatio }
         if let gapsInner { s.gaps.inner = gapsInner }
@@ -78,6 +82,9 @@ public struct KeyBinding: Equatable, Sendable {
     public let command: Command
     /// Command text as written in the config (for menus/logs).
     public let commandText: String
+    /// The binding's key exactly as written in the file (e.g. `"hyper+r"`),
+    /// for tools that need to edit the literal TOML key.
+    public let hotkeyText: String
 }
 
 public struct Config: Equatable, Sendable {
@@ -198,7 +205,7 @@ extension Config {
                         continue
                     }
                     seen[hotkey] = key
-                    config.bindings.append(KeyBinding(hotkey: hotkey, command: command, commandText: text))
+                    config.bindings.append(KeyBinding(hotkey: hotkey, command: command, commandText: text, hotkeyText: key))
                 case .failure(let e):
                     bindings.error(key, e.message)
                 }
@@ -209,7 +216,8 @@ extension Config {
     }
 
     private static let layoutKeys: Set<String> = [
-        "mode", "master_ratio", "master_count", "stack_side", "split", "bsp_min_ratio", "bsp_max_ratio", "gaps",
+        "mode", "master_ratio", "master_count", "stack_side", "split", "bsp_shape", "bsp_min_ratio", "bsp_max_ratio",
+        "gaps",
     ]
 
     private static func readLayout(_ r: Reader, allowPlacement: Bool) -> LayoutOverrides {
@@ -232,6 +240,7 @@ extension Config {
             default: r.error("split", "expected auto|horizontal|vertical, got '\(v)'")
             }
         }
+        o.bspShape = r.enumeration("bsp_shape")
         for (key, apply) in [("bsp_min_ratio", { (v: Double) in o.bspMinRatio = v }),
                              ("bsp_max_ratio", { (v: Double) in o.bspMaxRatio = v })] {
             if let v = r.number(key) {

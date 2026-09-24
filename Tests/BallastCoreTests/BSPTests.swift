@@ -412,4 +412,34 @@ struct BSPTests {
         let result = tree.removing(1)
         #expect(result == .success(.split(inner)))
     }
+
+    @Test("balanced tree: four equal-weight windows on a wide rect are quarters in rank order")
+    func balancedFourEqualIsQuarters() {
+        let tree = BSPNode.balanced([1, 2, 3, 4], axis: nil) { _ in 1 }!
+        let frames = tree.layout(in: CGRect(x: 0, y: 0, width: 1600, height: 1000), context: Self.context())
+        let expected: [WindowID: CGRect] = [
+            1: CGRect(x: 0, y: 0, width: 800, height: 500), 2: CGRect(x: 0, y: 500, width: 800, height: 500),
+            3: CGRect(x: 800, y: 0, width: 800, height: 500), 4: CGRect(x: 800, y: 500, width: 800, height: 500),
+        ]
+        for (id, rect) in expected {
+            #expect(frames[id].map { $0.equalTo(rect) } == true, "window \(id): \(String(describing: frames[id]))")
+        }
+    }
+
+    @Test("balanced tree cuts at the weight midpoint; ties give the heaviest-ranked side fewer windows")
+    func balancedCutsAtWeightMidpoint() {
+        let leaves = { (tree: BSPNode?) -> [[WindowID]] in
+            guard case .split(let s)? = tree else { return [] }
+            return [s.first.leaves, s.second.leaves]
+        }
+        // Heavy window alone on one side; the two light ones share the other.
+        #expect(leaves(BSPNode.balanced([1, 2, 3], axis: nil) { $0 == 1 ? 10 : 1 }) == [[1], [2, 3]])
+        // Equal weights, odd count: 1.5 is equally far from 1 and 2 → smaller first side.
+        #expect(leaves(BSPNode.balanced([1, 2, 3], axis: nil) { _ in 1 }) == [[1], [2, 3]])
+        #expect(leaves(BSPNode.balanced([1, 2, 3, 4, 5], axis: nil) { _ in 1 }) == [[1, 2], [3, 4, 5]])
+        // Weights 3,1,1,1: running sums 3,4,5 vs half 3 → cut after the first.
+        #expect(leaves(BSPNode.balanced([1, 2, 3, 4], axis: nil) { $0 == 1 ? 3 : 1 }) == [[1], [2, 3, 4]])
+        #expect(BSPNode.balanced([], axis: nil) { _ in 1 } == nil)
+        #expect(BSPNode.balanced([7], axis: nil) { _ in 1 } == .leaf(7))
+    }
 }

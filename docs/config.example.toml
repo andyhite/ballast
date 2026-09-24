@@ -1,11 +1,15 @@
 # Ballast configuration — ~/.config/ballast/config.toml
 # (override with $BALLAST_CONFIG, $XDG_CONFIG_HOME, or `ballast --config PATH`)
 #
+# You rarely need to edit this by hand: the menu bar item and Settings window
+# (menu > Preferences…) change every option here, and so do setting commands
+# (`layout …`, `master-ratio`, `master-count`, master-stack grow/shrink/balance).
+# Ballast rewrites only the values it changes; comments and layout stay put.
+#
 # Hot-reloaded on save. An invalid file is rejected as a whole: the previous
 # config stays live and the error shows in the menu bar item + a notification.
 # Validate without applying: `ballast check-config PATH`.
-# Reloading never resets a Space's runtime layout mode, monocle flag, or
-# manual arrangement — only the defaults declared here change.
+# Reloading never resets a Space's monocle flag or manual arrangement.
 
 [settings]
 focus_follows_mouse = false
@@ -29,6 +33,9 @@ stack_side = "right"               # right | left | bottom | top
 split = "auto"                     # BSP split direction: auto = across the longer side of each region, so
                                    # windows next to a heavy one stack. horizontal | vertical pin EVERY
                                    # split (all columns | all rows)
+bsp_shape = "dwindle"              # BSP arrangement: dwindle = spiral, new windows split the focused tile |
+                                   # balanced = equal-area grid (4 equal windows = quarters), kept as
+                                   # windows open and close until you rearrange by hand (then `reset`)
 bsp_min_ratio = 0.25               # BSP weight-ratio clamp: a weight-10 window never starves
 bsp_max_ratio = 0.75               #   a weight-1 sibling below 25% of their shared region
 gaps = { inner = 8, outer = 8 }

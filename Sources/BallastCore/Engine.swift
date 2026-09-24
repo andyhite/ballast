@@ -31,10 +31,14 @@ public struct WindowRecord: Equatable, Sendable {
 /// `SpaceKey`.
 public struct SpaceState: Equatable, Sendable {
     public let id: SpaceID
-    /// Mode chosen at runtime; survives config reloads. `nil` = config default.
+    /// Mode chosen at runtime; transient until the platform persists it to
+    /// the config file and calls `clearSettingOverrides`. Survives config
+    /// reloads in the meantime. `nil` = config default.
     public var modeOverride: LayoutMode?
     public var monocle = false
+    /// Transient until persisted to the config file (see `modeOverride`).
     public var masterRatioOverride: Double?
+    /// Transient until persisted to the config file (see `modeOverride`).
     public var masterCountOverride: Int?
     /// Tiled windows on this Space, in join order.
     public internal(set) var members: [WindowID] = []
@@ -73,12 +77,34 @@ public enum PlatformAction: Equatable, Sendable {
     case dumpState
 }
 
+/// Per-Space settings a command changed instantly, pending persistence to
+/// the config file. The platform writes these to disk, then calls
+/// `Engine.clearSettingOverrides` so the config becomes the source of
+/// truth again instead of the transient runtime override.
+public struct SettingsChange: Equatable, Sendable {
+    public var space: SpaceID
+    /// `nil` = unchanged; `.some(nil)` = remove `mode` (inherit `[layout]`).
+    public var mode: LayoutMode??
+    public var masterRatio: Double?
+    public var masterCount: Int?
+
+    public init(space: SpaceID, mode: LayoutMode?? = nil, masterRatio: Double? = nil, masterCount: Int? = nil) {
+        self.space = space
+        self.mode = mode
+        self.masterRatio = masterRatio
+        self.masterCount = masterCount
+    }
+}
+
 public struct CommandOutcome: Equatable, Sendable {
     public var dirty: Set<SpaceID> = []
     public var focus: WindowID?
     public var action: PlatformAction?
     /// User-facing note when the command could not apply.
     public var message: String?
+    /// Set when the command changed a setting that should be written back
+    /// to the config file (layout mode, master ratio, master count).
+    public var settings: SettingsChange?
 
     public init() {}
 }
@@ -389,10 +415,20 @@ public struct Engine: Sendable {
             let all = LayoutMode.allCases
             let index = all.firstIndex(of: current) ?? 0
             switch change {
-            case .set(let m): spaces[space, default: SpaceState(id: space)].modeOverride = m
-            case .next: spaces[space, default: SpaceState(id: space)].modeOverride = all[(index + 1) % all.count]
-            case .previous: spaces[space, default: SpaceState(id: space)].modeOverride = all[(index + all.count - 1) % all.count]
-            case .configDefault: spaces[space]?.modeOverride = nil
+            case .set(let m):
+                spaces[space, default: SpaceState(id: space)].modeOverride = m
+                out.settings = SettingsChange(space: space, mode: .some(m))
+            case .next:
+                let next = all[(index + 1) % all.count]
+                spaces[space, default: SpaceState(id: space)].modeOverride = next
+                out.settings = SettingsChange(space: space, mode: .some(next))
+            case .previous:
+                let previous = all[(index + all.count - 1) % all.count]
+                spaces[space, default: SpaceState(id: space)].modeOverride = previous
+                out.settings = SettingsChange(space: space, mode: .some(previous))
+            case .configDefault:
+                spaces[space]?.modeOverride = nil
+                out.settings = SettingsChange(space: space, mode: .some(nil))
             }
             out.dirty = [space]
         case .monocle:
@@ -411,16 +447,20 @@ public struct Engine: Sendable {
             } else {
                 let masters = max(state.masterCountOverride ?? settings(for: space).masterCount, 1)
                 let isMaster = state.liveOrder.prefix(masters).contains(f)
-                adjustMasterRatio(space, by: isMaster ? delta : -delta)
+                let applied = adjustMasterRatio(space, by: isMaster ? delta : -delta)
+                out.settings = SettingsChange(space: space, masterRatio: applied)
             }
             out.dirty = [space]
         case .masterRatio(let delta):
-            adjustMasterRatio(space, by: delta)
+            let applied = adjustMasterRatio(space, by: delta)
+            out.settings = SettingsChange(space: space, masterRatio: applied)
             out.dirty = [space]
         case .masterCount(let delta):
             let current = min(max(spaces[space]?.masterCountOverride ?? settings(for: space).masterCount, 1), 16)
             let clampedDelta = min(max(delta, -16), 16)
-            spaces[space, default: SpaceState(id: space)].masterCountOverride = min(max(current + clampedDelta, 1), 16)
+            let applied = min(max(current + clampedDelta, 1), 16)
+            spaces[space, default: SpaceState(id: space)].masterCountOverride = applied
+            out.settings = SettingsChange(space: space, masterCount: applied)
             out.dirty = [space]
         case .balance:
             if mode(for: space) == .bsp {
@@ -429,6 +469,7 @@ public struct Engine: Sendable {
                 spaces[space]?.tree = balanced
             } else {
                 spaces[space, default: SpaceState(id: space)].masterRatioOverride = 0.5
+                out.settings = SettingsChange(space: space, masterRatio: 0.5)
             }
             out.dirty = [space]
         case .reload, .dumpState, .focusDisplay, .sendToDisplay:
@@ -460,7 +501,7 @@ public struct Engine: Sendable {
     /// Touches nothing else; manual Spaces are left alone.
     public mutating func adoptIdealTree(_ space: SpaceID) {
         guard var s = spaces[space], !s.manual else { return }
-        s.tree = BSPNode.ideal(s.idealOrder, axis: settings(for: space).split)
+        s.tree = idealTree(s.idealOrder, on: space)
         spaces[space] = s
     }
 
@@ -473,7 +514,19 @@ public struct Engine: Sendable {
         s.frameOverrides = [:]
         s.masterRatioOverride = nil
         s.masterCountOverride = nil
-        s.tree = BSPNode.ideal(s.idealOrder, axis: settings(for: space).split)
+        s.tree = idealTree(s.idealOrder, on: space)
+        spaces[space] = s
+    }
+
+    /// Clears the requested runtime overrides once the platform has
+    /// persisted them to the config file, so the config becomes the source
+    /// of truth again instead of the transient in-memory override. Safe to
+    /// call for an unknown or since-removed Space (no-op).
+    public mutating func clearSettingOverrides(_ space: SpaceID, mode: Bool, masterRatio: Bool, masterCount: Bool) {
+        guard var s = spaces[space] else { return }
+        if mode { s.modeOverride = nil }
+        if masterRatio { s.masterRatioOverride = nil }
+        if masterCount { s.masterCountOverride = nil }
         spaces[space] = s
     }
 
@@ -487,19 +540,33 @@ public struct Engine: Sendable {
             minSize: { windows[$0]?.minSize ?? .zero })
     }
 
+    /// The weight-default BSP tree for `order` in `space`'s configured shape.
+    private func idealTree(_ order: [WindowID], on space: SpaceID) -> BSPNode? {
+        let s = settings(for: space)
+        switch s.bspShape {
+        case .dwindle: return BSPNode.ideal(order, axis: s.split)
+        case .balanced:
+            let windows = self.windows
+            return BSPNode.balanced(order, axis: s.split) { windows[$0]?.rule.weight ?? 1 }
+        }
+    }
+
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
         guard let w = windows[id] else { return false }
         return w.space == space && w.isManaged && !w.minimized && !w.hidden
     }
 
-    private mutating func adjustMasterRatio(_ space: SpaceID, by delta: Double) {
-        guard delta.isFinite else { return }
+    @discardableResult
+    private mutating func adjustMasterRatio(_ space: SpaceID, by delta: Double) -> Double {
+        guard delta.isFinite else { return spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio }
         let current = spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio
         // Bounds must match Config's master_ratio validation (0.05…0.95,
         // exclusive); narrower bounds here would clamp an already-valid
         // ratio back into range and silently reverse the requested
         // grow/shrink direction.
-        spaces[space, default: SpaceState(id: space)].masterRatioOverride = min(max(current + delta, 0.05), 0.95)
+        let clamped = min(max(current + delta, 0.05), 0.95)
+        spaces[space, default: SpaceState(id: space)].masterRatioOverride = clamped
+        return clamped
     }
 
     private mutating func beginManual(_ space: SpaceID) {
@@ -563,7 +630,7 @@ public struct Engine: Sendable {
         if let tree = s.tree {
             switch tree.removing(id) {
             case .success(let next): s.tree = next
-            case .failure: s.tree = BSPNode.ideal(s.members, axis: settings(for: space).split)
+            case .failure: s.tree = idealTree(s.members, on: space)
             }
         }
         spaces[space] = s
@@ -577,13 +644,17 @@ public struct Engine: Sendable {
         let members = s.members.filter { windows[$0] != nil }
         if members != s.members { s.members = members }
         if Set(s.tree?.leaves ?? []) != Set(members) || (s.tree?.leaves.count ?? 0) != members.count {
-            s.tree = BSPNode.ideal(members, axis: settings(for: space).split)
+            s.tree = idealTree(members, on: space)
         }
         let candidates = members.map { id in
             WeightResolver.Candidate(id: id, weight: windows[id]?.rule.weight ?? 1,
                                      focusRank: s.focus.rank(of: id), creation: windows[id]?.creation ?? 0)
         }
         s.idealOrder = WeightResolver.rank(candidates)
+        // A balanced Space follows its ideal grid until arranged manually.
+        if !s.manual, settings(for: space).bspShape == .balanced {
+            s.tree = idealTree(s.idealOrder, on: space)
+        }
         if s.manual {
             let kept = s.manualOrder.filter { members.contains($0) }
             let missing = members.filter { !kept.contains($0) }

@@ -24,14 +24,37 @@ running_pid() { [ -e "$lock" ] && lsof -t "$lock" 2>/dev/null | head -1 || true;
 agent_pid() { launchctl print "gui/$(id -u)/dev.ballast" 2>/dev/null | awk '/^\tpid = /{print $3; exit}'; }
 login_item_on() { [ -x "$exe" ] && "$exe" login-item status 2>/dev/null | grep -q ': on$'; }
 
-# Unregistering stops the agent; wait until it has released the lock.
+# Unregistering stops the agent; wait until launchd has dropped the job and
+# the process has released the lock.
 stop_login_item() {
   "$exe" login-item off >/dev/null
   for _ in $(seq 50); do
-    [ -z "$(running_pid)" ] && return 0
+    if [ -z "$(running_pid)" ] && ! launchctl print "gui/$(id -u)/dev.ballast" >/dev/null 2>&1; then
+      return 0
+    fi
     sleep 0.1
   done
   echo "Ballast (pid $(running_pid)) did not stop" >&2
+  exit 1
+}
+
+# Registering right after the bundle was swapped can leave launchd unable to
+# spawn the new binary (EX_CONFIG, retried every 2 s forever). Confirm the
+# agent is running; if not, unregister, let launchd settle, and register again.
+start_login_item() {
+  "$exe" login-item on
+  for attempt in 1 2; do
+    for _ in $(seq 50); do
+      [ -n "$(agent_pid)" ] && return 0
+      sleep 0.1
+    done
+    [ "$attempt" = 2 ] && break
+    echo "launchd couldn't start Ballast; registering it again" >&2
+    stop_login_item
+    sleep 2
+    "$exe" login-item on
+  done
+  echo "Ballast didn't start. Details: launchctl print gui/$(id -u)/dev.ballast" >&2
   exit 1
 }
 
@@ -71,7 +94,7 @@ ditto build/Ballast.app "$app_dest"
 echo "installed $app_dest"
 
 if $start_at_login; then
-  "$exe" login-item on
+  start_login_item
 else
   echo "Start at Login is off (your choice): open $app_dest to run it"
 fi

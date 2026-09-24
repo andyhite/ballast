@@ -78,6 +78,14 @@ public final class ConfigWatcher {
         refreshWatchers()
     }
 
+    /// Records `content` as the last-seen content without invoking
+    /// `onChange`. Call after writing the file yourself so the debounced
+    /// content check (which will still run) sees no change and skips a
+    /// redundant reload.
+    public func acknowledge(content: Data) {
+        lastContent = content
+    }
+
     /// Stops watching and releases all file descriptors.
     public func stop() {
         isRunning = false

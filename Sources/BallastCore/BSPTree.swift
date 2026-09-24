@@ -36,6 +36,17 @@ public enum BSPError: Error, Equatable, Sendable {
     case isRoot(WindowID)
 }
 
+/// Shape of a Space's weight-default BSP tree.
+public enum BSPShape: String, CaseIterable, Equatable, Sendable {
+    /// Spiral: each window splits the previous one, and a new window splits
+    /// the focused tile.
+    case dwindle
+    /// Rank order halved recursively at its weight midpoint: an equal-area
+    /// grid (four equal-weight windows = quarters). Rebuilt whenever windows
+    /// come and go, until the Space is arranged manually.
+    case balanced
+}
+
 /// Inputs to BSP layout besides the tree itself.
 public struct BSPLayoutContext {
     public var weight: (WindowID) -> Double
@@ -108,6 +119,28 @@ extension BSPNode {
             }
         }
         return tree
+    }
+
+    /// Weight-balanced tree: `order` is cut where the running weight sum is
+    /// closest to half the total (ties keep the first side smaller, so the
+    /// heaviest window gets a half to itself), and each side is built the
+    /// same way. Rank order reads first-to-second.
+    public static func balanced(_ order: [WindowID], axis: Axis?, weight: (WindowID) -> Double) -> BSPNode? {
+        guard let head = order.first else { return nil }
+        guard order.count > 1 else { return .leaf(head) }
+        let weights = order.map { id -> Double in
+            let w = weight(id)
+            return w.isFinite ? max(w, 0) : 0
+        }
+        let half = weights.reduce(0, +) / 2
+        var cut = 1, bestGap = Double.infinity, running = 0.0
+        for k in 1..<order.count {
+            running += weights[k - 1]
+            if abs(running - half) < bestGap { cut = k; bestGap = abs(running - half) }
+        }
+        guard let first = balanced(Array(order[..<cut]), axis: axis, weight: weight),
+              let second = balanced(Array(order[cut...]), axis: axis, weight: weight) else { return .leaf(head) }
+        return .split(BSPSplit(axis: axis, first: first, second: second))
     }
 
     // MARK: Mutations (pure)

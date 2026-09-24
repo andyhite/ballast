@@ -158,15 +158,28 @@ Each `SpaceState` holds:
 - `tree`: the live BSP tree. It always exists, so switching modes never
   loses structure. New windows split the focused leaf. Split ratios come
   from weights unless a split carries a manual ratio (from resize or balance).
+  With `bsp_shape = "balanced"`, a Space that is not manual instead rebuilds
+  its tree as the balanced ideal on every structural change: the rank order
+  is cut where the running weight sum is closest to half the total, each
+  side recursively, giving an equal-area grid (four equal-weight windows are
+  quarters) whichever window had focus.
 - `modeOverride`, `monocle`, `masterRatioOverride`, `masterCountOverride`,
-  and `frameOverrides` (adopted frames).
+  and `frameOverrides` (adopted frames). The three overrides are transient:
+  a setting command applies one instantly, then the platform layer writes it
+  to that desktop's `[[space]]` block in the config file (debounced ~300ms
+  so a held grow/shrink key writes once, not per step) and clears the
+  override, so the config is the source of truth again. If the write fails
+  (invalid resulting config, unwritable file) the override is left in place
+  as the effective, unsaved value and the user is notified.
 - `focus`: this Space's focus history (MRU).
 
-`reset` discards order, tree shape, ratios, adopted frames, and ratio/count
-overrides. It rebuilds the BSP tree as the ideal dwindle tree in rank order
-(the heaviest window gets the largest, top-left tile). It **keeps** the
-layout mode and monocle, because those are the Space's configuration, not its
-arrangement (`layout default` drops the mode override).
+`reset` discards order, tree shape, and adopted frames — the *arrangement*
+only. It rebuilds the BSP tree as the ideal tree in rank order: dwindle
+by default (the heaviest window gets the largest, top-left tile), or the
+balanced grid for `bsp_shape = "balanced"`. It **keeps** the layout mode,
+monocle, master ratio and master count, because those are now config
+settings, not arrangement (`layout default` still drops the mode override
+by writing `mode` out of the config).
 
 `applyConfig` re-resolves rules and recomputes ideals. It never touches the
 overrides listed above. This is the direct fix for Rift's
@@ -174,6 +187,46 @@ reload-resets-layout bug, and it is covered by tests. A changed `split` is
 applied to the existing BSP tree of every Space that is *not* manual (shape
 and ratios kept, split directions rewritten), so config edits show up without
 a `reset`; manually arranged Spaces keep their split directions until `reset`.
+
+### 3.2.1 Config write-back
+
+Nothing is runtime-only: every setting the user changes from the menu bar, a
+setting command (`layout …`, `master-ratio`, `master-count`, master-stack
+`grow`/`shrink`/`balance`), or the Preferences window is written to
+`~/.config/ballast/config.toml` so it survives restarts. Sources:
+
+- **Menu bar / Preferences**: call `WindowManager.editConfig` or
+  `setSpaceSetting` directly, synchronously, on the edit.
+- **Setting commands** (hotkeys, `ballast send …`, the menu's own layout
+  items — all funnel through `Engine.perform`): `CommandOutcome.settings`
+  carries what changed; `WindowManager` merges it per-Space and flushes
+  after a ~300ms debounce.
+
+`WindowManager.editConfig` resolves `configURL`'s symlinks first (so a
+dotfiles-managed symlink is edited in place, never replaced by a plain
+file), reads the current text (the built-in starter template if the file
+doesn't exist yet), applies the requested change with `ConfigEditor` — a
+text-preserving TOML editor that keeps comments and formatting — validates
+the result with `Config.parse`, and only then writes it atomically and
+reloads. On any failure (parse/validation error, unwritable file) nothing is
+written, a notification explains why, and the in-memory runtime override
+stays the effective value until the next successful edit. The write informs
+`ConfigWatcher` of its own content so the file-watcher's hot reload doesn't
+fire a second, redundant reload.
+
+**Surfaces.** The menu bar covers the current desktop's layout settings
+(each submenu has a `Default (…)` entry that removes the desktop's override),
+the `[layout]` defaults, global settings, and the focused app's `app_id`
+rule. The Settings window (`Preferences/`, SwiftUI in an `NSWindow`) covers
+everything: General, Layout (defaults and every connected desktop, where a
+checked setting is a per-desktop override), Rules (ordered list plus a full
+editor), and Keyboard (a hotkey recorder that captures key codes, so
+recording doesn't depend on the keyboard layout). Text fields commit on
+Return or when focus leaves, and only when the text changed. Sliders commit
+when the drag ends. While the binding editor is open,
+`WindowManager.setHotkeysSuspended` unregisters Ballast's global hotkeys,
+so a combination that is already bound is recorded instead of running its
+command.
 
 ### 3.3 Weights
 
@@ -402,8 +455,12 @@ scripts/install.sh --uninstall
   Ballast; the menu asks first. Nothing is copied into `~/Library`.
 - **Updates.** launchd can't relaunch an agent whose bundle was replaced
   underneath it (exit 78, `EX_CONFIG`), so `install.sh` unregisters the agent,
-  replaces the bundle and registers it again. A user who turned Start at Login
-  off keeps it off.
+  waits until launchd has dropped the job, replaces the bundle and registers
+  it again. Registering too soon after the swap has also produced the same
+  `EX_CONFIG` respawn loop, so the script then waits up to 5 s for the agent
+  to be running and, if it isn't, unregisters, waits 2 s and registers once
+  more before giving up with an error. A user who turned Start at Login off
+  keeps it off.
 - **One instance.** `ballast run` holds a lock on
   `~/Library/Caches/dev.ballast/run.lock`. `install.sh` uses that lock to
   find a running Ballast and refuses to continue when it isn't the login

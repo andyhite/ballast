@@ -180,6 +180,39 @@ struct EngineTests {
         }
     }
 
+    @Test("balanced BSP Space stays a grid as windows open/close, whatever has focus, until arranged manually")
+    func balancedSpaceFollowsGrid() {
+        var config = Config()
+        var bsp = LayoutOverrides()
+        bsp.mode = .bsp
+        bsp.bspShape = .balanced
+        config.spaces[SpaceKey(display: Self.displayA, ordinal: 1)] = bsp
+        var engine = Self.makeEngine(config: config)
+        func quarters() -> Bool {
+            let frames = engine.layout(space: 1, area: Self.area).frames
+            let sizes = Set(frames.values.map { "\(Int($0.width))x\(Int($0.height))" })
+            return frames.count == 4 && sizes.count == 1
+        }
+        // Focus always sits on window 1, so dwindle would keep splitting its tile.
+        for id in 1...4 as ClosedRange<WindowID> {
+            _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
+            _ = engine.focus(1)
+        }
+        #expect(quarters())
+
+        _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
+        _ = engine.removeWindow(5)
+        #expect(quarters(), "a window coming and going leaves the grid intact")
+
+        _ = engine.perform(.resize(0.1), space: 1, area: Self.area)
+        #expect(!quarters(), "manual resize sticks")
+        _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
+        _ = engine.removeWindow(5)
+        #expect(!quarters(), "a manual Space does not snap back to the grid")
+        _ = engine.perform(.reset, space: 1, area: Self.area)
+        #expect(quarters())
+    }
+
     // MARK: - Per-(display,space) config
 
     @Test("mode(for:) differs per SpaceID according to Config.spaces")
@@ -536,6 +569,99 @@ struct EngineTests {
 
         _ = engine.perform(.masterCount(Int.min), space: 1, area: Self.area)
         #expect(engine.spacesForTesting[1]?.masterCountOverride == 1)
+    }
+
+    // MARK: - SettingsChange (config write-back)
+
+    @Test("layout mode commands emit a SettingsChange; config-default removes the override")
+    func layoutCommandsEmitSettingsChange() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        let setOutcome = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        #expect(setOutcome.settings == SettingsChange(space: 1, mode: .some(.bsp)))
+
+        let nextOutcome = engine.perform(.layout(.next), space: 1, area: Self.area)
+        #expect(nextOutcome.settings?.space == 1)
+        #expect(nextOutcome.settings?.mode != nil)
+
+        let previousOutcome = engine.perform(.layout(.previous), space: 1, area: Self.area)
+        #expect(previousOutcome.settings?.space == 1)
+        #expect(previousOutcome.settings?.mode != nil)
+
+        let defaultOutcome = engine.perform(.layout(.configDefault), space: 1, area: Self.area)
+        #expect(defaultOutcome.settings == SettingsChange(space: 1, mode: .some(nil)))
+    }
+
+    @Test(".masterRatio and master-stack resize/balance emit a masterRatio SettingsChange")
+    func masterRatioCommandsEmitSettingsChange() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.focus(1)
+
+        let ratioOutcome = engine.perform(.masterRatio(0.1), space: 1, area: Self.area)
+        #expect(ratioOutcome.settings?.space == 1)
+        #expect(ratioOutcome.settings?.masterRatio == engine.spacesForTesting[1]?.masterRatioOverride)
+        #expect(ratioOutcome.settings?.mode == nil)
+        #expect(ratioOutcome.settings?.masterCount == nil)
+
+        let resizeOutcome = engine.perform(.resize(0.05), space: 1, area: Self.area)
+        #expect(resizeOutcome.settings?.space == 1)
+        #expect(resizeOutcome.settings?.masterRatio == engine.spacesForTesting[1]?.masterRatioOverride)
+
+        let balanceOutcome = engine.perform(.balance, space: 1, area: Self.area)
+        #expect(balanceOutcome.settings == SettingsChange(space: 1, masterRatio: 0.5))
+    }
+
+    @Test(".masterCount emits a masterCount SettingsChange")
+    func masterCountCommandEmitsSettingsChange() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        let outcome = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        #expect(outcome.settings?.space == 1)
+        #expect(outcome.settings?.masterCount == engine.spacesForTesting[1]?.masterCountOverride)
+        #expect(outcome.settings?.mode == nil)
+        #expect(outcome.settings?.masterRatio == nil)
+    }
+
+    @Test("BSP resize/balance/swap/monocle/reset never emit a SettingsChange")
+    func bspCommandsNeverEmitSettingsChange() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = engine.focus(1)
+
+        #expect(engine.perform(.resize(0.1), space: 1, area: Self.area).settings == nil)
+        #expect(engine.perform(.balance, space: 1, area: Self.area).settings == nil)
+        #expect(engine.perform(.swap(.right), space: 1, area: Self.area).settings == nil)
+        #expect(engine.perform(.monocle, space: 1, area: Self.area).settings == nil)
+        #expect(engine.perform(.reset, space: 1, area: Self.area).settings == nil)
+    }
+
+    @Test("clearSettingOverrides clears only the requested fields")
+    func clearSettingOverridesClearsOnlyRequestedFields() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.perform(.layout(.set(.bsp)), space: 1, area: Self.area)
+        _ = engine.perform(.masterRatio(0.1), space: 1, area: Self.area)
+        _ = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        #expect(engine.spacesForTesting[1]?.modeOverride == .bsp)
+        #expect(engine.spacesForTesting[1]?.masterRatioOverride != nil)
+        #expect(engine.spacesForTesting[1]?.masterCountOverride != nil)
+
+        engine.clearSettingOverrides(1, mode: true, masterRatio: false, masterCount: false)
+        #expect(engine.spacesForTesting[1]?.modeOverride == nil)
+        #expect(engine.spacesForTesting[1]?.masterRatioOverride != nil)
+        #expect(engine.spacesForTesting[1]?.masterCountOverride != nil)
+
+        engine.clearSettingOverrides(1, mode: false, masterRatio: true, masterCount: true)
+        #expect(engine.spacesForTesting[1]?.masterRatioOverride == nil)
+        #expect(engine.spacesForTesting[1]?.masterCountOverride == nil)
+
+        // Unknown Space: no-op, does not trap.
+        engine.clearSettingOverrides(999, mode: true, masterRatio: true, masterCount: true)
     }
 }
 
