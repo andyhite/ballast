@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Starts Ballast at login; restarts it only if it exits abnormally (crash).
+     "Quit Ballast" from the menu exits cleanly and is respected. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.ballast</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Ballast.app/Contents/MacOS/ballast</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key><false/>
+  </dict>
+  <key>ThrottleInterval</key><integer>2</integer>
+  <key>ProcessType</key><string>Interactive</string>
+</dict>
+</plist>

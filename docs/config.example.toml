@@ -1,0 +1,125 @@
+# Ballast configuration — ~/.config/ballast/config.toml
+# (override with $BALLAST_CONFIG, $XDG_CONFIG_HOME, or `ballast --config PATH`)
+#
+# Hot-reloaded on save. An invalid file is rejected as a whole: the previous
+# config stays live and the error shows in the menu bar item + a notification.
+# Validate without applying: `ballast check-config PATH`.
+# Reloading never resets a Space's runtime layout mode, monocle flag, or
+# manual arrangement — only the defaults declared here change.
+
+[settings]
+focus_follows_mouse = false
+# Warp the cursor to the newly focused window when WM-initiated focus
+# (commands, close fallback) crosses a display boundary.
+cursor_follows_focus = true
+
+[settings.animation]
+enabled = true
+duration_ms = 180                  # 0…2000
+easing = "ease_out_cubic"          # linear | ease_out_cubic | ease_in_out_cubic | ease_out_quint
+# Only the focused window interpolates; every other window snaps (design doc §5).
+# "Reduce motion" in Accessibility settings always wins: no interpolation.
+
+# Defaults for every (display, Space) pair.
+[layout]
+mode = "master_stack"              # master_stack | bsp | float (passthrough: WM never touches the Space)
+master_ratio = 0.6                 # share of the master region, 0.05…0.95
+master_count = 1                   # 1…16
+stack_side = "right"               # right | left | bottom | top
+split = "auto"                     # BSP split for new windows: auto (longer side) | horizontal | vertical
+bsp_min_ratio = 0.25               # BSP weight-ratio clamp: a weight-10 window never starves
+bsp_max_ratio = 0.75               #   a weight-1 sibling below 25% of their shared region
+gaps = { inner = 8, outer = 8 }
+
+# Per-(display, Space) overrides, addressed by the display's persistent UUID
+# and the Space's 1-based ordinal among that display's desktops (fullscreen
+# Spaces are not counted). `ballast spaces` prints both.
+[[space]]
+display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
+ordinal = 1
+mode = "bsp"
+split = "horizontal"
+gaps = { inner = 12 }
+
+[[space]]
+display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
+ordinal = 2
+mode = "master_stack"
+stack_side = "bottom"
+master_ratio = 0.65
+
+[[space]]
+display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
+ordinal = 3
+mode = "float"                     # hands off this Space entirely
+
+# App rules. Match fields: app_id (bundle id, exact), app_name (substring,
+# case-insensitive), title_regex, title_substring (case-insensitive),
+# ax_role, ax_subrole. The matching rule with the most match fields wins;
+# ties go to the earlier rule. Unmatched windows: weight 1, tiled when they
+# are standard windows (AXStandardWindow), floating otherwise.
+#
+# Actions: weight (default 1), manage = false, float = true (+ placement,
+# size), sticky = true (best effort, see docs), on_self_move = snap_back|adopt.
+
+# Weighted: Ghostty takes the master slot from anything lighter, live.
+[[rule]]
+app_id = "com.mitchellh.ghostty"
+weight = 10
+on_self_move = "adopt"             # terminals grid-snap their size; don't fight them
+
+[[rule]]
+app_name = "Slack"
+weight = 1
+
+# Never touched.
+[[rule]]
+app_id = "com.1password.1password"
+manage = false
+
+# Floating with a placement (display fractions of the visible frame).
+[[rule]]
+app_id = "us.zoom.xos"
+title_substring = "Zoom Meeting"
+float = true
+placement = { x = 0.6, y = 0.05, w = 0.38, h = 0.4 }
+
+[[rule]]
+app_id = "com.apple.finder"
+ax_subrole = "AXDialog"            # Finder's copy/info dialogs, not its browser windows
+float = true
+placement = "center"
+size = { w = 0.35, h = 0.3 }
+
+[[rule]]
+title_regex = "^Picture.in.Picture$"
+float = true
+sticky = true
+placement = { x = 0.74, y = 0.72, w = 0.25, h = 0.25 }
+
+# Global hotkeys → commands (`ballast help` lists them all).
+[bindings]
+"alt+h" = "focus left"
+"alt+j" = "focus down"
+"alt+k" = "focus up"
+"alt+l" = "focus right"
+"alt+shift+h" = "swap left"
+"alt+shift+j" = "swap down"
+"alt+shift+k" = "swap up"
+"alt+shift+l" = "swap right"
+"alt+tab" = "focus-last"
+"alt+return" = "promote"
+"alt+r" = "reset"
+"alt+space" = "layout next"
+"alt+m" = "monocle"
+"alt+t" = "float"
+"alt+equal" = "grow"
+"alt+minus" = "shrink"
+"alt+shift+equal" = "master-count +1"
+"alt+shift+minus" = "master-count -1"
+"alt+0" = "balance"
+"alt+period" = "send-to-display next"
+"alt+comma" = "send-to-display prev"
+"alt+shift+period" = "focus-display next"
+"alt+shift+comma" = "focus-display prev"
+"hyper+r" = "reload"
