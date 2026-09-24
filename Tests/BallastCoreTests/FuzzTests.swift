@@ -64,17 +64,22 @@ struct EngineFuzzTests {
     static let allSpaceIDs: [SpaceID] = [1, 2, 3, 4, 5, 6]
     static let knownAppIDs = ["com.a.app", "com.b.app", "com.ghostty.app", "com.tinyspeck.slackmacgap"]
 
-    /// Master-grid scrolling past two stack windows by default, one
-    /// master-stack desktop and one unlimited grid, so every master layout runs.
+    /// Two-column master-grid scrolling past two windows per column by
+    /// default, one both-sides master-stack desktop and one unlimited
+    /// three-column both-sides grid, so every master layout shape runs.
     static func configA() -> Config {
         var config = Config()
         config.layout.gridMax = 2
         config.layout.stackPeek = 24
+        config.layout.gridColumns = 2
         var stack = LayoutOverrides()
         stack.mode = .masterStack
+        stack.stackBothSides = true
         config.spaces[SpaceKey(display: displayA, ordinal: 2)] = stack
         var unlimited = LayoutOverrides()
         unlimited.gridMax = 0
+        unlimited.gridColumns = 3
+        unlimited.stackBothSides = true
         config.spaces[SpaceKey(display: displayB, ordinal: 1)] = unlimited
         config.rules = [
             AppRule(match: RuleMatch(appID: "com.ghostty.app"), actions: RuleActions(weight: 8)),

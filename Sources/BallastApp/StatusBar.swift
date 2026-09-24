@@ -152,8 +152,12 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(masterSizeItem(scope: scope, baseline: baseline, current: ratioValue, isInherited: !ratioOverridden, enabled: enabled))
             menu.addItem(masterCountItem(scope: scope, baseline: baseline, current: countValue, isInherited: !countOverridden, enabled: enabled))
             menu.addItem(stackSideItem(scope: scope, baseline: baseline, effective: effective, isInherited: overrides?.stackSide == nil, enabled: enabled))
+            let bothSidesOverridden = overrides?.stackBothSides != nil
+            menu.addItem(stackBothSidesItem(scope: scope, baseline: baseline, current: effective.stackBothSides, isInherited: !bothSidesOverridden, enabled: enabled))
             if current == .masterGrid {
                 menu.addItem(gridMaxItem(scope: scope, baseline: baseline, current: effective.gridMax, isInherited: overrides?.gridMax == nil, enabled: enabled))
+                let columnsOverridden = overrides?.gridColumns != nil
+                menu.addItem(gridColumnsItem(scope: scope, baseline: baseline, current: effective.gridColumns, isInherited: !columnsOverridden, enabled: enabled))
             }
             if current == .masterStack || effective.gridMax > 0 {
                 menu.addItem(stackPeekItem(scope: scope, baseline: baseline, current: effective.stackPeek, isInherited: overrides?.stackPeek == nil, enabled: enabled))
@@ -203,8 +207,12 @@ final class StatusBar: NSObject, NSMenuDelegate {
             isInherited: !isKeySet(editorSnapshot, "master_count", in: .layout), enabled: enabled))
         menu.addItem(stackSideItem(scope: scope, baseline: LayoutSettings(), effective: layout,
             isInherited: !isKeySet(editorSnapshot, "stack_side", in: .layout), enabled: enabled))
+        menu.addItem(stackBothSidesItem(scope: scope, baseline: LayoutSettings(), current: layout.stackBothSides,
+            isInherited: !isKeySet(editorSnapshot, "stack_both_sides", in: .layout), enabled: enabled))
         menu.addItem(gridMaxItem(scope: scope, baseline: LayoutSettings(), current: layout.gridMax,
             isInherited: !isKeySet(editorSnapshot, "grid_max", in: .layout), enabled: enabled))
+        menu.addItem(gridColumnsItem(scope: scope, baseline: LayoutSettings(), current: layout.gridColumns,
+            isInherited: !isKeySet(editorSnapshot, "grid_columns", in: .layout), enabled: enabled))
         menu.addItem(stackPeekItem(scope: scope, baseline: LayoutSettings(), current: layout.stackPeek,
             isInherited: !isKeySet(editorSnapshot, "stack_peek", in: .layout), enabled: enabled))
         menu.addItem(.separator())
@@ -424,6 +432,27 @@ final class StatusBar: NSObject, NSMenuDelegate {
             isInherited: isInherited, enabled: enabled, options: options,
             onDefault: { [unowned self] in write(scope, "grid_max", nil) },
             onSelect: { [unowned self] value in write(scope, "grid_max", value) })
+    }
+
+    private func gridColumnsItem(scope: SettingScope, baseline: LayoutSettings, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = (1...4).map { n -> SettingOption in
+            SettingOption(label: "\(n)", value: .integer(n), checked: current == n)
+        }
+        return optionSubmenu("Grid Columns", defaultLabel: "Default (\(baseline.gridColumns))",
+            isInherited: isInherited, enabled: enabled, options: options,
+            onDefault: { [unowned self] in write(scope, "grid_columns", nil) },
+            onSelect: { [unowned self] value in write(scope, "grid_columns", value) })
+    }
+
+    private func stackBothSidesItem(scope: SettingScope, baseline: LayoutSettings, current: Bool, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = [
+            SettingOption(label: "On", value: .bool(true), checked: current),
+            SettingOption(label: "Off", value: .bool(false), checked: !current),
+        ]
+        return optionSubmenu("Stack on Both Sides", defaultLabel: "Default (\(baseline.stackBothSides ? "On" : "Off"))",
+            isInherited: isInherited, enabled: enabled, options: options,
+            onDefault: { [unowned self] in write(scope, "stack_both_sides", nil) },
+            onSelect: { [unowned self] value in write(scope, "stack_both_sides", value) })
     }
 
     private func stackPeekItem(scope: SettingScope, baseline: LayoutSettings, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {

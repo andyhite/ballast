@@ -52,6 +52,51 @@ struct EngineTests {
         #expect(master.width > stack.width)
     }
 
+    @Test("a new window joins the top of the stack; opening and closing never reorders the rest")
+    func newcomerTopsStack() {
+        var engine = Self.makeEngine()
+        for id: WindowID in 1...3 {
+            _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
+            _ = engine.focus(id)
+        }
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 3, 2])
+        _ = engine.focus(2) // focus history never moves the master
+        _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 1)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 4, 3, 2])
+        _ = engine.removeWindow(3)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 4, 2])
+        // The master closing hands its slot to the top of the stack.
+        _ = engine.removeWindow(1)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2])
+
+        // Two masters: the newcomer lands right after both.
+        _ = engine.perform(.masterCount(1), space: 1, area: Self.area)
+        _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2, 5])
+    }
+
+    @Test("a newcomer tops the stack after heavier stack windows; on a manual Space, right after the master")
+    func newcomerRespectsWeightAndManualMaster() {
+        var config = Config()
+        config.rules = [AppRule(match: RuleMatch(appID: "heavy"), actions: RuleActions(weight: 5))]
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "heavy"), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "heavy"), space: 1)
+        _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 1)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 2, 4, 3])
+
+        // Manual: window 3 is master; the newcomer goes right under it.
+        let swapped = engine.swap(1, 3, on: 1)
+        #expect(swapped)
+        let manual = engine.spacesForTesting[1]!.liveOrder
+        #expect(manual.first == 3)
+        _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
+        let order = engine.spacesForTesting[1]!.liveOrder
+        #expect(order.first == 3)
+        #expect(order[1] == 5)
+    }
+
     // MARK: - Manual override persistence
 
     @Test("manual master survives a newcomer with higher weight")
@@ -577,13 +622,19 @@ struct EngineTests {
     // MARK: - Scrolling stack
 
     /// `count` windows on Space 1 with no gaps: master 1, stack 2...count.
-    static func stackEngine(_ mode: LayoutMode = .masterStack, gridMax: Int = 0, count: Int) -> Engine {
+    static func stackEngine(_ mode: LayoutMode = .masterStack, gridMax: Int = 0, columns: Int = 1,
+                            bothSides: Bool = false, count: Int) -> Engine {
         var config = Config()
         config.layout.mode = mode
         config.layout.gridMax = gridMax
+        config.layout.gridColumns = columns
+        config.layout.stackBothSides = bothSides
         config.layout.gaps = Gaps(inner: 0, outer: 0)
         var engine = Self.makeEngine(config: config)
-        for id in 1...count { _ = engine.addWindow(WindowID(id), pid: Int32(id), facts: WindowFacts(), space: 1) }
+        // Each newcomer tops the stack, so the stack joins bottom-up.
+        for id in [1] + (1...count).dropFirst().reversed() {
+            _ = engine.addWindow(WindowID(id), pid: Int32(id), facts: WindowFacts(), space: 1)
+        }
         return engine
     }
 
@@ -652,6 +703,31 @@ struct EngineTests {
         #expect(Set(layout.covered.keys) == [2, 5])
         #expect(layout.frames[3]!.height == layout.frames[4]!.height)
         #expect(layout.frames[3]!.maxY <= layout.frames[4]!.minY)
+    }
+
+    @Test("master-grid columns: overflow scrolls in the outermost column only, and focusing it scrolls")
+    func masterGridColumnsScrollOutermost() {
+        var engine = Self.stackEngine(.masterGrid, gridMax: 1, columns: 2, count: 4)
+        #expect(engine.focus(4).contains(1))
+        let layout = engine.layout(space: 1, area: Self.area)
+        #expect(Set(layout.covered.keys) == [3])
+        #expect(layout.frames[2]!.height == Self.area.height)
+        #expect(layout.frames[2]!.maxX <= layout.frames[4]!.minX)
+    }
+
+    @Test("master-stack ignores grid_columns; with both sides each side scrolls on its own")
+    func masterStackColumnsAndBothSides() {
+        var single = Self.stackEngine(columns: 3, count: 4)
+        _ = single.focus(3)
+        #expect(Set(single.layout(space: 1, area: Self.area).covered.keys) == [2, 4])
+
+        var both = Self.stackEngine(bothSides: true, count: 5)
+        _ = both.focus(2)
+        _ = both.focus(5)
+        let layout = both.layout(space: 1, area: Self.area)
+        #expect(Set(layout.covered.keys) == [3, 4])
+        #expect(layout.frames[5]!.maxX <= layout.frames[1]!.minX)
+        #expect(layout.frames[1]!.maxX <= layout.frames[2]!.minX)
     }
 
     @Test("a tile in view is raised only while a window belonging behind it is in front of it")

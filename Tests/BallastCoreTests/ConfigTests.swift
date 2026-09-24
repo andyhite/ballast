@@ -257,6 +257,23 @@ struct ConfigTests {
         #expect(bad.contains { $0.contains("duration_ms") })
     }
 
+    @Test("focus_flash parses its keys and bounds duration_ms to 100...5000")
+    func focusFlash() {
+        switch Config.parse("[settings.focus_flash]\nenabled = false\nduration_ms = 1500\nhold = \"ctrl\"") {
+        case .success(let config):
+            #expect(config.focusFlash.enabled == false)
+            #expect(config.focusFlash.duration == 1.5)
+            #expect(config.focusFlash.hold == .ctrl)
+        case .failure(let error):
+            Issue.record("expected success, got: \(error.messages)")
+        }
+        #expect(Self.messages("[settings.focus_flash]\nduration_ms = 100").isEmpty)
+        #expect(Self.messages("[settings.focus_flash]\nduration_ms = 5000").isEmpty)
+        #expect(Self.messages("[settings.focus_flash]\nduration_ms = 99").contains { $0.contains("duration_ms") })
+        #expect(Self.messages("[settings.focus_flash]\nduration_ms = 5001").contains { $0.contains("duration_ms") })
+        #expect(Self.messages("[settings.focus_flash]\nhold = \"shift\"").contains { $0.contains("hold") })
+    }
+
     @Test("gaps accept values within 0...200")
     func gapsBoundaries() {
         let ok = Self.messages("[layout.gaps]\ninner = 200")
@@ -271,6 +288,33 @@ struct ConfigTests {
         #expect(Self.messages("[layout]\ngrid_max = 17").contains { $0.contains("grid_max") })
         #expect(Self.messages("[layout]\ngrid_max = -1").contains { $0.contains("grid_max") })
         #expect(Self.messages("[layout]\nstack_peek = 201").contains { $0.contains("stack_peek") })
+    }
+
+    @Test("grid_columns accepts 1...8 and stack_both_sides takes a boolean, per desktop too")
+    func columnAndSideKeys() {
+        #expect(Self.messages("[layout]\ngrid_columns = 8\nstack_both_sides = true").isEmpty)
+        #expect(Self.messages("[layout]\ngrid_columns = 0").contains { $0.contains("grid_columns") })
+        #expect(Self.messages("[layout]\ngrid_columns = 9").contains { $0.contains("grid_columns") })
+        #expect(Self.messages("[layout]\nstack_both_sides = 1").contains { $0.contains("stack_both_sides") })
+        let display = "55555555-5555-5555-5555-555555555555"
+        let text = """
+        [layout]
+        grid_columns = 3
+
+        [[space]]
+        display = "\(display)"
+        ordinal = 1
+        stack_both_sides = true
+        grid_columns = 1
+        """
+        guard case .success(let config) = Config.parse(text) else {
+            Issue.record("expected parse success")
+            return
+        }
+        let desktop = config.layoutSettings(for: SpaceKey(display: display, ordinal: 1))
+        #expect(desktop.stackBothSides && desktop.gridColumns == 1)
+        #expect(desktop.stackColumns(in: .masterStack) == 1)
+        #expect(config.layout.stackColumns(in: .masterGrid) == 3 && !config.layout.stackBothSides)
     }
 
     @Test("master_grid and master_stack parse as distinct modes, with per-desktop stack keys")

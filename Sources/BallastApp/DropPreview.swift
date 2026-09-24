@@ -27,23 +27,11 @@ final class DropPreview {
     }
 
     private static func makeWindow() -> NSWindow {
-        let window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: true)
-        window.isOpaque = false
-        window.backgroundColor = .clear
-        window.hasShadow = false
-        window.ignoresMouseEvents = true
-        window.isReleasedWhenClosed = false
-        window.animationBehavior = .none
+        let window = Overlay.makeWindow()
         // The tiles' level: a window can be ordered relative to another only
         // within the same level.
         window.level = .normal
-        window.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
-        let view = NSView()
-        view.wantsLayer = true
-        // Match the system window corner radius.
-        if #available(macOS 26, *) { view.layer?.cornerRadius = 16 } else { view.layer?.cornerRadius = 10 }
-        view.layer?.borderWidth = 2
-        window.contentView = view
+        window.contentView?.layer?.borderWidth = 2
         return window
     }
 
@@ -53,5 +41,27 @@ final class DropPreview {
             window.contentView?.layer?.backgroundColor = accent.withAlphaComponent(0.2).cgColor
             window.contentView?.layer?.borderColor = accent.withAlphaComponent(0.8).cgColor
         }
+    }
+}
+
+/// Borderless, click-through overlay windows drawn over other apps' windows.
+enum Overlay {
+    /// Never becomes key, shows on whichever Space is active, and Mission
+    /// Control hides it. Its layer-backed content view has the system window
+    /// corner radius; callers set the level, border, and colors.
+    static func makeWindow() -> NSWindow {
+        let window = NSWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: true)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.isReleasedWhenClosed = false
+        window.animationBehavior = .none
+        window.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle]
+        let view = NSView()
+        view.wantsLayer = true
+        if #available(macOS 26, *) { view.layer?.cornerRadius = 16 } else { view.layer?.cornerRadius = 10 }
+        window.contentView = view
+        return window
     }
 }

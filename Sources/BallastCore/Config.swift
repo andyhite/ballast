@@ -28,6 +28,25 @@ public struct AnimationSettings: Equatable, Sendable {
     public init() {}
 }
 
+/// The modifier whose hold shows the focus border; `none` turns holding off.
+public enum FocusFlashHold: String, CaseIterable, Equatable, Sendable {
+    case alt
+    case ctrl
+    case cmd
+    case none
+}
+
+/// The border that marks the focused window after a Ballast command moves
+/// focus, and while the hold modifier is down.
+public struct FocusFlashSettings: Equatable, Sendable {
+    public var enabled = true
+    /// Seconds the border stays up after a command moves focus, fade included.
+    public var duration = 0.8
+    public var hold = FocusFlashHold.alt
+
+    public init() {}
+}
+
 /// Fully-resolved layout settings for one (display, space).
 public struct LayoutSettings: Equatable, Sendable {
     /// `nil` leaves the mode to the display; see `mode(builtin:)`.
@@ -35,9 +54,16 @@ public struct LayoutSettings: Equatable, Sendable {
     public var masterRatio = 0.6
     public var masterCount = 1
     public var stackSide = StackSide.right
-    /// Master-grid: the most stack windows tiled at once; more scroll with
-    /// the stack like master-stack's one window. 0 = no limit.
+    /// Master-grid: the most stack windows tiled per column; past
+    /// `gridColumns * gridMax` on a side, the outermost column scrolls like
+    /// master-stack's one window. 0 = no limit.
     public var gridMax = 0
+    /// Master-grid: columns side by side on each stack side, filled
+    /// column-major from the one nearest the masters.
+    public var gridColumns = 1
+    /// Masters in the middle with a stack on both sides along `stackSide`'s
+    /// axis; `stackSide`'s side gets the first half of the stack.
+    public var stackBothSides = false
     /// Points of the previous and next stack windows left showing at either
     /// end of a scrolling stack.
     public var stackPeek = 30.0
@@ -70,6 +96,11 @@ public struct LayoutSettings: Equatable, Sendable {
         }
     }
 
+    /// Columns side by side on each stack side in `mode`.
+    public func stackColumns(in mode: LayoutMode) -> Int {
+        mode == .masterGrid ? max(gridColumns, 1) : 1
+    }
+
     /// The Weight Share Limit as a master-layout factor: no window's weight
     /// counts for more than this many times the lightest in its region, so two
     /// windows split a region at most 75/25 by default, like the two sides of
@@ -87,6 +118,8 @@ public struct LayoutOverrides: Equatable, Sendable {
     public var masterCount: Int?
     public var stackSide: StackSide?
     public var gridMax: Int?
+    public var gridColumns: Int?
+    public var stackBothSides: Bool?
     public var stackPeek: Double?
     public var split: Axis??
     public var bspShape: BSPShape?
@@ -104,6 +137,8 @@ public struct LayoutOverrides: Equatable, Sendable {
         if let masterCount { s.masterCount = masterCount }
         if let stackSide { s.stackSide = stackSide }
         if let gridMax { s.gridMax = gridMax }
+        if let gridColumns { s.gridColumns = gridColumns }
+        if let stackBothSides { s.stackBothSides = stackBothSides }
         if let stackPeek { s.stackPeek = stackPeek }
         if let split { s.split = split }
         if let bspShape { s.bspShape = bspShape }
@@ -127,6 +162,7 @@ public struct KeyBinding: Equatable, Sendable {
 
 public struct Config: Equatable, Sendable {
     public var animation = AnimationSettings()
+    public var focusFlash = FocusFlashSettings()
     public var focusFollowsMouse = false
     /// Warp the cursor to the focused window's center when focus crosses displays.
     public var cursorFollowsFocus = true
@@ -167,7 +203,7 @@ extension Config {
         top.allowOnly(["settings", "layout", "space", "rule", "bindings"])
 
         if let settings = top.table("settings") {
-            settings.allowOnly(["focus_follows_mouse", "cursor_follows_focus", "animation"])
+            settings.allowOnly(["focus_follows_mouse", "cursor_follows_focus", "animation", "focus_flash"])
             if let v = settings.bool("focus_follows_mouse") { config.focusFollowsMouse = v }
             if let v = settings.bool("cursor_follows_focus") { config.cursorFollowsFocus = v }
             if let anim = settings.table("animation") {
@@ -178,6 +214,15 @@ extension Config {
                     else { anim.error("duration_ms", "must be between 0 and 2000") }
                 }
                 if let v: Easing = anim.enumeration("easing") { config.animation.easing = v }
+            }
+            if let flash = settings.table("focus_flash") {
+                flash.allowOnly(["enabled", "duration_ms", "hold"])
+                if let v = flash.bool("enabled") { config.focusFlash.enabled = v }
+                if let ms = flash.number("duration_ms") {
+                    if (100...5000).contains(ms) { config.focusFlash.duration = ms / 1000 }
+                    else { flash.error("duration_ms", "must be between 100 and 5000") }
+                }
+                if let v: FocusFlashHold = flash.enumeration("hold") { config.focusFlash.hold = v }
             }
         }
 
@@ -254,7 +299,8 @@ extension Config {
     }
 
     private static let layoutKeys: Set<String> = [
-        "mode", "master_ratio", "master_count", "stack_side", "grid_max", "stack_peek", "split", "bsp_shape",
+        "mode", "master_ratio", "master_count", "stack_side", "stack_both_sides", "grid_max", "grid_columns",
+        "stack_peek", "split", "bsp_shape",
         "bsp_min_ratio", "bsp_max_ratio", "gaps",
     ]
 
@@ -273,6 +319,10 @@ extension Config {
         if let v = r.int("grid_max") {
             if (0...16).contains(v) { o.gridMax = v } else { r.error("grid_max", "must be within 0…16 (0 = no limit)") }
         }
+        if let v = r.int("grid_columns") {
+            if (1...8).contains(v) { o.gridColumns = v } else { r.error("grid_columns", "must be within 1…8") }
+        }
+        o.stackBothSides = r.bool("stack_both_sides")
         if let v = r.number("stack_peek") {
             if (0...200).contains(v) { o.stackPeek = v } else { r.error("stack_peek", "must be within 0…200") }
         }

@@ -134,6 +134,27 @@ struct ConfigEditorTests {
         }
     }
 
+    @Test("set creates [settings.focus_flash] after the last [settings.*] table")
+    func createsFocusFlashSection() {
+        let text = """
+        [settings]
+        focus_follows_mouse = false
+
+        [settings.animation]
+        enabled = true
+
+        [layout]
+        mode = "bsp"
+        """
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("hold", .string("none"), in: .focusFlash))
+        #expect(editor.text.contains("[settings.animation]\nenabled = true\n\n[settings.focus_flash]\nhold = \"none\"\n\n[layout]"))
+        switch editor.validated() {
+        case .success(let config): #expect(config.focusFlash.hold == FocusFlashHold.none)
+        case .failure(let e): Issue.record("expected success, got \(e)")
+        }
+    }
+
     // MARK: - Remove
 
     @Test("set with nil value removes the key line")

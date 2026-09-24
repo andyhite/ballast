@@ -96,6 +96,19 @@ The script ends with `N passed, 0 failed`.
   the top tile. **Expect:** the clicked window scrolls into view, both
   tiles in view show in full, and the window that lost focus shows only its
   peek strip below them. Focus the master afterwards: nothing changes.
+- **Grid columns:** on a `master_grid` Space with `grid_columns = 3` and
+  `grid_max = 2`, open 8 windows (plus the master). **Expect:** the stack
+  splits into 3 side-by-side columns, filled nearest the master first (the
+  two columns closest to the master hold 3 windows each, the outermost
+  holds the rest and scrolls with `stack_peek`); with only 3 stack windows
+  total, each column holds one and none scroll.
+- **Stack both sides:** on a `master_stack` Space with `stack_both_sides =
+  true` and 4+ other windows, focus a stack window. **Expect:** a
+  one-window stack shows on `stack_side`'s side and another on the
+  opposite side (left+right, or top+bottom if `stack_side` is `top`/
+  `bottom`), the master keeps `master_ratio` of the space, and the two
+  stacks split the remainder evenly; the earlier half of the stack order is
+  on `stack_side`'s side, the rest on the opposite side.
 - **Mode by display:** with no `mode` in `[layout]` and the laptop lid
   open, `ballast spaces` shows `mode=master_stack` for the built-in
   display's desktops that don't set their own mode, and `mode=master_grid`
@@ -105,6 +118,12 @@ The script ends with `N passed, 0 failed`.
   shows the reason, e.g. `Floating — default: no full-screen button`.
 - **Close fallback:** focus A, then B, then C on one Space and close C.
   Focus returns to B, not to whatever AppKit picks.
+- **Focus flash:** press `alt+l`. An accent-colored border flashes around
+  the newly focused window and fades out after about 0.8 s. Hold `alt` alone
+  and the border stays on the focused window, then disappears as soon as you
+  let go. Hold `alt`, press `l`, then let go: the border moves to the new
+  window and fades out on its own, even if you keep holding `alt` for a few
+  seconds first. Clicking another window shows no border.
 - **Display move:** `ballast send send-to-display next` moves the focused
   window to the other display, the cursor follows it, and the window is tiled
   there.

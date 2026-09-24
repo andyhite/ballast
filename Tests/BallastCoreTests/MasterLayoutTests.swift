@@ -333,4 +333,84 @@ struct MasterLayoutTests {
         #expect(Self.scrolling(6, limit: 1, recent: [2]).behind == [2: [3, 4, 5, 6]])
         #expect(Self.scrolling(3, limit: 2).behind.isEmpty)
     }
+
+    // MARK: - Columns and both sides
+
+    @Test("column sizes: even with the extra up front, never empty, overflow into the outermost", arguments: [
+        (5, 3, nil, [2, 2, 1]), (2, 3, nil, [1, 1]), (4, 2, 2, [2, 2]), (7, 2, 2, [2, 5]),
+        (3, 1, 1, [3]), (0, 3, 2, []),
+    ] as [(Int, Int, Int?, [Int])])
+    func columnSizes(count: Int, columns: Int, limit: Int?, expected: [Int]) {
+        #expect(MasterLayout.columnSizes(count, columns: columns, limit: limit) == expected)
+    }
+
+    @Test("a stack scrolls only once a side's outermost column passes the limit")
+    func scrollsPerSideAndColumn() {
+        #expect(!MasterLayout.scrolls(stackCount: 4, columns: 2, limit: 2, bothSides: false))
+        #expect(MasterLayout.scrolls(stackCount: 5, columns: 2, limit: 2, bothSides: false))
+        #expect(!MasterLayout.scrolls(stackCount: 2, columns: 1, limit: 1, bothSides: true))
+        #expect(MasterLayout.scrolls(stackCount: 3, columns: 1, limit: 1, bothSides: true))
+        #expect(!MasterLayout.scrolls(stackCount: 9, columns: 3, limit: nil, bothSides: true))
+    }
+
+    @Test("columns fill column-major from the one next to the masters")
+    func columnsFillFromTheMasters() {
+        let right = MasterLayout.plan(order: Array(1...6), in: Self.rect, masterCount: 1, ratio: 0.5, side: .right,
+                                      gap: 0, columns: 3).frames
+        #expect(right[1] == CGRect(x: 0, y: 0, width: 500, height: 500))
+        #expect(right[2] == CGRect(x: 500, y: 0, width: 167, height: 250))
+        #expect(right[3] == CGRect(x: 500, y: 250, width: 167, height: 250))
+        #expect(right[4]!.minX == 667 && right[5]!.minX == 667)
+        #expect(right[6] == CGRect(x: 833, y: 0, width: 167, height: 500))
+
+        let left = MasterLayout.plan(order: [1, 2, 3], in: Self.rect, masterCount: 1, ratio: 0.5, side: .left,
+                                     gap: 0, columns: 2).frames
+        #expect(left[2] == CGRect(x: 250, y: 0, width: 250, height: 500))
+        #expect(left[3] == CGRect(x: 0, y: 0, width: 250, height: 500))
+    }
+
+    @Test("past columns x limit only the outermost column scrolls")
+    func overflowScrollsOutermostColumn() {
+        let plan = MasterLayout.plan(order: Array(1...5), in: Self.rect, masterCount: 1, ratio: 0.5, side: .right,
+                                     gap: 0, stackLimit: 1, columns: 2, peek: 30, recent: [4])
+        #expect(plan.frames[2] == CGRect(x: 500, y: 0, width: 250, height: 500))
+        #expect(plan.inView == [2, 4])
+        #expect(Set(plan.covered.keys) == [3, 5])
+        #expect(plan.behind == [4: [3, 5]])
+        #expect(plan.frames[4]!.minX == 750 && plan.frames[4]!.minY == 30 && plan.frames[4]!.maxY == 470)
+    }
+
+    @Test("both sides: the master keeps its ratio in the middle, stack_side's side takes the first half")
+    func bothSidesCentersTheMaster() {
+        let plan = MasterLayout.plan(order: [1, 2, 3, 4], in: Self.rect, masterCount: 1, ratio: 0.5, side: .right,
+                                     gap: 10, bothSides: true)
+        #expect(plan.frames[4] == CGRect(x: 0, y: 0, width: 245, height: 500))
+        #expect(plan.frames[1] == CGRect(x: 255, y: 0, width: 490, height: 500))
+        #expect(plan.frames[2] == CGRect(x: 755, y: 0, width: 245, height: 245))
+        #expect(plan.frames[3] == CGRect(x: 755, y: 255, width: 245, height: 245))
+        #expect(plan.inView == [2, 3, 4])
+
+        let top = MasterLayout.plan(order: [1, 2, 3], in: Self.rect, masterCount: 1, ratio: 0.5, side: .top,
+                                    gap: 0, bothSides: true).frames
+        #expect(top[2]!.minY == 0 && top[1]!.minY == 125 && top[3]!.maxY == 500)
+    }
+
+    @Test("both sides with a one-window stack lays out like one side")
+    func bothSidesWithOneStackWindow() {
+        let both = MasterLayout.plan(order: [1, 2], in: Self.rect, masterCount: 1, ratio: 0.6, side: .left,
+                                     gap: 8, bothSides: true)
+        let one = MasterLayout.plan(order: [1, 2], in: Self.rect, masterCount: 1, ratio: 0.6, side: .left, gap: 8)
+        #expect(both == one)
+    }
+
+    @Test("both sides honour learned minimum widths before the ratio")
+    func bothSidesMinimumWidths() {
+        let frames = MasterLayout.plan(order: [1, 2, 3], in: Self.rect, masterCount: 1, ratio: 0.8, side: .right,
+                                       gap: 0, bothSides: true,
+                                       minSize: { $0 == 3 ? CGSize(width: 300, height: 0) : .zero }).frames
+        #expect(frames[3]!.width == 300)
+        #expect(frames[1]!.width >= 0 && frames[2]!.width >= 0)
+        #expect(frames[3]!.maxX <= frames[1]!.minX && frames[1]!.maxX <= frames[2]!.minX)
+        #expect(frames[2]!.maxX == 1000)
+    }
 }

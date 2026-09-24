@@ -16,11 +16,14 @@ Space each window lives on. Ballast watches those changes and tiles whatever is 
 each **(display, Space)** pair using that pair's layout mode.
 
 - **Per-desktop layouts.** Each desktop on each display has its own mode:
-  `master_grid` (masters beside a stack that tiles every window, up to
-  `grid_max`), `master_stack` (masters beside a stack that shows one window
-  at a time, its neighbors' edges peeking, and scrolls with `focus up/down` —
-  built for laptop screens), `bsp`, or `float`, where Ballast leaves the
-  desktop alone. Until you pick a mode, a laptop's built-in display gets
+  `master_grid` (masters beside one or two stacks, each split into
+  `grid_columns` side-by-side columns that fill column-major and hold up to
+  `grid_max` windows per column before the outermost column scrolls),
+  `master_stack` (masters beside a stack that shows one window at a time, its
+  neighbors' edges peeking, and scrolls with `focus up/down` — built for
+  laptop screens), `bsp`, or `float`, where Ballast leaves the desktop alone.
+  Either mode can put a stack on both sides of the master with
+  `stack_both_sides`. Until you pick a mode, a laptop's built-in display gets
   `master_stack` and external displays get `master_grid`.
 - **Dialogs float by default.** A window that isn't a standard resizable
   window — a settings pane, an update prompt, a confirmation sheet, anything
@@ -32,6 +35,10 @@ each **(display, Space)** pair using that pair's layout mode.
   they open.
 - **Your arrangement stays put.** Once you swap, promote, or resize by hand,
   Ballast keeps that arrangement until you `reset`. Config reloads never undo it.
+- **See where focus lands.** When a Ballast command moves focus, a border in
+  the accent color flashes around the newly focused window and fades out.
+  Hold Option (or the `hold` key you pick) to show the border around the
+  focused window until you let go. Set it up in `[settings.focus_flash]`.
 - **Settings are saved automatically.** The menu bar, the Settings window, and
   hotkeys all write to `config.toml`. Ballast changes only the values you
   changed and leaves your comments and formatting alone.

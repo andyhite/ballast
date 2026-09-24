@@ -342,8 +342,15 @@ final class InspectorModel: ObservableObject {
         if index < masterCount { return "master" }
         let stackIndex = index - masterCount
         let stackCount = order.count - masterCount
+        let slot = MasterLayout.slot(ofStackIndex: stackIndex, stackCount: stackCount,
+                                     columns: settings.stackColumns(in: mode), limit: settings.stackLimit(in: mode),
+                                     bothSides: settings.stackBothSides)
+        var place: [String] = []
+        if slot.sides > 1 { place.append("\((slot.side == 0 ? settings.stackSide : settings.stackSide.opposite).rawValue) side") }
+        if slot.columns > 1 { place.append("column \(slot.column + 1) of \(slot.columns)") }
+        let sideNote = place.isEmpty ? "" : " (\(place.joined(separator: ", ")))"
         guard let display = displayInfo(for: space) else {
-            return "stack \(stackIndex + 1) of \(stackCount)"
+            return "stack \(stackIndex + 1) of \(stackCount)\(sideNote)"
         }
         let layout = manager.engine.layout(space: space, area: display.visibleFrame)
         let viewState: String
@@ -352,7 +359,7 @@ final class InspectorModel: ObservableObject {
         } else {
             viewState = "in view"
         }
-        return "stack \(stackIndex + 1) of \(stackCount) — \(viewState)"
+        return "stack \(stackIndex + 1) of \(stackCount)\(sideNote) — \(viewState)"
     }
 
     private func resolveSpace(record: WindowRecord?, windowID: WindowID?) -> SpaceResolution {

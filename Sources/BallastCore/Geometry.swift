@@ -147,18 +147,19 @@ func tileLinear(_ ids: [WindowID], in rect: CGRect, axis: Axis, gap: Double,
                 minSize: (WindowID) -> CGSize) -> [WindowID: CGRect] {
     let lengths = distribute(total: rect.extent(axis), mins: ids.map { minSize($0).extent(axis) },
                              weights: ids.map(weight), maxWeightRatio: maxWeightRatio, gap: gap)
-    var frames: [WindowID: CGRect] = [:]
+    return Dictionary(zip(ids, segments(of: rect, axis: axis, lengths: lengths, gap: gap))) { a, _ in a }
+}
+
+/// Consecutive slices of `rect` along `axis`, one per entry of `lengths`,
+/// `gap` apart, with edges rounded to whole points.
+func segments(of rect: CGRect, axis: Axis, lengths: [Double], gap: Double) -> [CGRect] {
     var cursor = rect.start(axis)
-    for (id, length) in zip(ids, lengths) {
+    return lengths.map { length in
         let start = cursor.rounded()
         let end = (cursor + length).rounded()
-        switch axis {
-        case .horizontal: frames[id] = CGRect(x: start, y: rect.minY, width: end - start, height: rect.height)
-        case .vertical: frames[id] = CGRect(x: rect.minX, y: start, width: rect.width, height: end - start)
-        }
         cursor += length + gap
+        return rect.band(axis, from: start, length: end - start)
     }
-    return frames
 }
 
 extension CGSize {

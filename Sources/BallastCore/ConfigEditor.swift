@@ -26,6 +26,7 @@ public struct ConfigField: Equatable, Sendable {
 public enum ConfigSection: Hashable, Sendable {
     case settings
     case animation
+    case focusFlash
     case layout
     case space(SpaceKey)
     case rule(Int)
@@ -356,6 +357,9 @@ public struct ConfigEditor: Sendable {
         case .animation:
             return blocks.first { $0.header?.normalizedPath == "settings.animation" && $0.header?.isArrayTable == false }
                 .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
+        case .focusFlash:
+            return blocks.first { $0.header?.normalizedPath == "settings.focus_flash" && $0.header?.isArrayTable == false }
+                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
         case .layout:
             return blocks.first { $0.header?.normalizedPath == "layout" && $0.header?.isArrayTable == false }
                 .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
@@ -401,26 +405,25 @@ public struct ConfigEditor: Sendable {
         case .settings:
             insertSectionHeader("[settings]", before: firstLineIndex(lines), lines: &lines)
             return .success(())
-        case .animation:
+        case .animation, .focusFlash:
+            // A [settings.*] subtable goes right after the last existing one, else after [settings].
+            let header = section == .animation ? "[settings.animation]" : "[settings.focus_flash]"
             guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
-            if let settingsBlock = blocks.first(where: { $0.header?.normalizedPath == "settings" && $0.header?.isArrayTable == false }) {
-                insertBlockAfter(settingsBlock, header: "[settings.animation]", blocks: blocks, lines: &lines)
+            if let anchor = lastSettingsBlock(blocks) {
+                insertBlockAfter(anchor, header: header, blocks: blocks, lines: &lines)
             } else {
-                // Create [settings] first, then [settings.animation] right after.
+                // Create [settings] first, then the subtable right after.
                 insertSectionHeader("[settings]", before: firstLineIndex(lines), lines: &lines)
-                guard let blocks2 = try? parseBlocks(lines),
-                      let settingsBlock2 = blocks2.first(where: { $0.header?.normalizedPath == "settings" && $0.header?.isArrayTable == false }) else {
-                    return .failure(ConfigEditError("failed to create [settings.animation]"))
+                guard let blocks2 = try? parseBlocks(lines), let anchor2 = lastSettingsBlock(blocks2) else {
+                    return .failure(ConfigEditError("failed to create \(header)"))
                 }
-                insertBlockAfter(settingsBlock2, header: "[settings.animation]", blocks: blocks2, lines: &lines)
+                insertBlockAfter(anchor2, header: header, blocks: blocks2, lines: &lines)
             }
             return .success(())
         case .layout:
             guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
-            if let animBlock = blocks.first(where: { $0.header?.normalizedPath == "settings.animation" && $0.header?.isArrayTable == false }) {
-                insertBlockAfter(animBlock, header: "[layout]", blocks: blocks, lines: &lines)
-            } else if let settingsBlock = blocks.first(where: { $0.header?.normalizedPath == "settings" && $0.header?.isArrayTable == false }) {
-                insertBlockAfter(settingsBlock, header: "[layout]", blocks: blocks, lines: &lines)
+            if let anchor = lastSettingsBlock(blocks) {
+                insertBlockAfter(anchor, header: "[layout]", blocks: blocks, lines: &lines)
             } else {
                 insertSectionHeader("[layout]", before: firstLineIndex(lines), lines: &lines)
             }
@@ -459,6 +462,14 @@ public struct ConfigEditor: Sendable {
 
     private func firstRuleHeaderLine(_ blocks: [Block]) -> Int? {
         blocks.first { $0.header?.tableKind == "rule" }?.headerLine
+    }
+
+    /// The last `[settings]` or `[settings.*]` table in the document.
+    private func lastSettingsBlock(_ blocks: [Block]) -> Block? {
+        blocks.last { block in
+            guard let header = block.header, !header.isArrayTable else { return false }
+            return header.normalizedPath == "settings" || header.normalizedPath.hasPrefix("settings.")
+        }
     }
 
     private func firstLineIndex(_ lines: [String]) -> Int { 1 }

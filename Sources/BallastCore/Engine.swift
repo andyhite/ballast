@@ -219,7 +219,8 @@ public struct Engine: Sendable {
                 order: state.liveOrder, in: inner,
                 masterCount: state.masterCountOverride ?? s.masterCount,
                 ratio: state.masterRatioOverride ?? s.masterRatio,
-                side: s.stackSide, gap: s.gaps.inner, stackLimit: s.stackLimit(in: mode), peek: s.stackPeek,
+                side: s.stackSide, gap: s.gaps.inner, stackLimit: s.stackLimit(in: mode),
+                columns: s.stackColumns(in: mode), bothSides: s.stackBothSides, peek: s.stackPeek,
                 recent: state.focus.entries, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
             result.frames = plan.frames
             result.covered = plan.covered
@@ -623,13 +624,13 @@ public struct Engine: Sendable {
         mode(for: state.id) == .bsp ? (state.tree?.leaves ?? []) : state.liveOrder
     }
 
-    /// Whether `state`'s stack holds more windows than its layout shows at
-    /// once, so that moving focus scrolls it.
+    /// Whether a column of `state`'s stack holds more windows than its layout
+    /// shows at once, so that moving focus scrolls it.
     private func stackScrolls(_ state: SpaceState) -> Bool {
-        let s = settings(for: state.id)
-        guard let limit = s.stackLimit(in: mode(for: state.id)) else { return false }
+        let s = settings(for: state.id), mode = mode(for: state.id)
         let masters = max(state.masterCountOverride ?? s.masterCount, 1)
-        return state.members.count - masters > limit
+        return MasterLayout.scrolls(stackCount: state.members.count - masters, columns: s.stackColumns(in: mode),
+                                    limit: s.stackLimit(in: mode), bothSides: s.stackBothSides)
     }
 
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
@@ -685,21 +686,7 @@ public struct Engine: Sendable {
             s.tree = .leaf(id)
         }
         spaces[space] = s
-        recomputeIdeal(space)
-        guard var m = spaces[space], m.manual else { return }
-        // Manual Space: the newcomer joins the stack at its weight rank but
-        // never displaces a manually placed master.
-        m.manualOrder.removeAll { $0 == id }
-        let masters = max(m.masterCountOverride ?? settings(for: space).masterCount, 1)
-        let ideal = m.idealOrder
-        let rank = ideal.firstIndex(of: id) ?? ideal.count
-        let predecessors = Set(ideal.prefix(rank))
-        var insertAt = min(masters, m.manualOrder.count)
-        for (i, other) in m.manualOrder.enumerated() where predecessors.contains(other) {
-            insertAt = max(insertAt, i + 1)
-        }
-        m.manualOrder.insert(id, at: min(insertAt, m.manualOrder.count))
-        spaces[space] = m
+        recomputeIdeal(space, newcomer: id)
     }
 
     @discardableResult
@@ -719,7 +706,11 @@ public struct Engine: Sendable {
         return [space]
     }
 
-    private mutating func recomputeIdeal(_ space: SpaceID) {
+    /// Keeps the ideal order stable: windows keep their places, a window
+    /// that left is dropped, and the order is re-sorted by weight only (so a
+    /// weight change moves just that window). `newcomer`, a window just
+    /// attached, goes to the top of the stack.
+    private mutating func recomputeIdeal(_ space: SpaceID, newcomer: WindowID? = nil) {
         guard var s = spaces[space] else { return }
         // Heal any drift between members and the tree (defensive; should not happen).
         let members = s.members.filter { windows[$0] != nil }
@@ -727,11 +718,27 @@ public struct Engine: Sendable {
         if Set(s.tree?.leaves ?? []) != Set(members) || (s.tree?.leaves.count ?? 0) != members.count {
             s.tree = idealTree(members, on: space)
         }
-        let candidates = members.map { id in
-            WeightResolver.Candidate(id: id, weight: windows[id]?.rule.weight ?? 1,
+        func weight(_ id: WindowID) -> Double {
+            let w = windows[id]?.rule.weight ?? 1
+            return w.isFinite ? w : 0
+        }
+        let memberSet = Set(members)
+        let kept = s.idealOrder.filter { memberSet.contains($0) && $0 != newcomer }
+        let keptSet = Set(kept)
+        // Only after drift or a first sighting: members with no place yet join by rank.
+        let unplaced = members.filter { !keptSet.contains($0) && $0 != newcomer }.map { id in
+            WeightResolver.Candidate(id: id, weight: weight(id),
                                      focusRank: s.focus.rank(of: id), creation: windows[id]?.creation ?? 0)
         }
-        s.idealOrder = WeightResolver.rank(candidates)
+        let base = kept + WeightResolver.rank(unplaced)
+        let position = Dictionary(uniqueKeysWithValues: base.enumerated().map { ($1, $0) })
+        s.idealOrder = base.sorted { a, b in
+            weight(a) != weight(b) ? weight(a) > weight(b) : (position[a] ?? 0) < (position[b] ?? 0)
+        }
+        let masters = max(s.masterCountOverride ?? settings(for: space).masterCount, 1)
+        if let newcomer {
+            s.idealOrder = placingAtStackTop(newcomer, in: s.idealOrder, masters: masters)
+        }
         // A balanced Space follows its ideal grid until arranged manually.
         if !s.manual, settings(for: space).bspShape == .balanced {
             s.tree = idealTree(s.idealOrder, on: space)
@@ -740,8 +747,27 @@ public struct Engine: Sendable {
             let kept = s.manualOrder.filter { members.contains($0) }
             let missing = members.filter { !kept.contains($0) }
             s.manualOrder = kept + missing
+            // Right after the masters: a manually placed master is never displaced.
+            if let newcomer {
+                s.manualOrder.removeAll { $0 == newcomer }
+                s.manualOrder.insert(newcomer, at: min(masters, s.manualOrder.count))
+            }
         }
         spaces[space] = s
+    }
+
+    /// Weight-ranked `order` with `id` moved to the top of its weight tier in
+    /// the stack: right after the masters and every heavier window. A window
+    /// heavier than a master still takes that master's slot.
+    private func placingAtStackTop(_ id: WindowID, in order: [WindowID], masters: Int) -> [WindowID] {
+        var order = order
+        order.removeAll { $0 == id }
+        func weight(_ w: WindowID) -> Double { windows[w]?.rule.weight ?? 1 }
+        let own = weight(id)
+        let heavier = order.prefix { weight($0) > own }.count
+        let takesMaster = heavier < min(masters, order.count) && weight(order[heavier]) < own
+        order.insert(id, at: min(takesMaster ? heavier : max(masters, heavier), order.count))
+        return order
     }
 
     /// Nearest tiled window from `from` in `direction` on `space`, along the

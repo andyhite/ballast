@@ -230,30 +230,54 @@ command.
 
 ### 3.3 Master-grid and master-stack
 
-`WeightResolver.rank` sorts by:
+The ideal order is stable. Opening, closing, and focusing windows never
+reorders the windows already on a Space:
 
-1. weight, descending;
-2. focus recency on that Space (focused windows before never-focused ones);
-3. creation order, ascending;
-4. window id (a total order, so the result is deterministic).
+- **A window joins** at the top of the stack: right after the masters and
+  any heavier windows. A window heavier than a master takes the master
+  slot instead. On a manual Space it goes right after the masters whatever
+  its weight, so a manually placed master is never displaced.
+- **A window leaves** and the rest close up; when a master leaves, the top
+  of the stack takes its slot.
+- **Weights change** (a config reload or a rule matching a new title): the
+  order is re-sorted by weight alone, so equal-weight windows keep their
+  relative places.
 
-It is a pure function of `(windows, weights, focus history, creation order)`.
+Windows with no place yet (a Space whose order drifted from its members)
+join by `WeightResolver.rank`: weight descending, then focus recency on that
+Space (focused windows before never-focused ones), then creation order, then
+window id, so the result is deterministic.
 
 - **Master-grid and master-stack**: masters are `liveOrder.prefix(masterCount)`.
   When the Space isn't manual, a weight-10 window launching next to a
   weight-1 master takes the master slot on the same layout pass.
-  `master_ratio` divides the area between the master region and the stack;
-  inside each region, windows share its length in proportion to weight (a
-  weight-2 stack window is twice as tall as a weight-1 one). The Weight
+  `master_ratio` divides the area between the master region and the
+  stack region(s); inside each region, windows share its length in
+  proportion to weight (a weight-2 stack window is twice as tall as a
+  weight-1 one). With `stack_both_sides` off (the default), there is one
+  stack region on `stack_side`. With it on, both modes put a stack on
+  each side of the master along `stack_side`'s axis (left+right for
+  `right`/`left`, top+bottom for `bottom`/`top`); the master keeps
+  `master_ratio` of the space and the two stacks split the remainder
+  evenly. The stack order is split in two: the first half (rounded up)
+  goes to `stack_side`'s stack, the rest to the opposite side; with a
+  single stack window, only `stack_side`'s stack is used and the layout
+  matches the single-stack case exactly. The Weight
   Share Limit applies per region: no weight counts for more than
   `bsp_max_ratio / bsp_min_ratio` times the lightest (3× by default), so two
   windows split a region at most 75/25, like the two sides of a BSP split.
   Capping relative to the lightest keeps the lighter windows' proportions
   (10:2:1 counts as 3:2:1). A window whose share is below its learned AX
   minimum size gets that minimum, and the others re-share the rest by
-  weight. `master_stack` always shows a one-window stack (§3.4); `master_grid`
-  tiles the whole stack unless it grows past `grid_max`, then scrolls the
-  same way.
+  weight. `master_stack` always shows a one-window stack per side (§3.4);
+  `master_grid` splits each stack into `grid_columns` (`LayoutSettings.
+  stackColumns(in:)`) side-by-side columns, filled column-major nearest the
+  master first — earlier columns take the extra when the count doesn't
+  divide evenly — and tiles every window in a column unless that side grows
+  past `grid_columns * grid_max`, at which point every column but the
+  outermost caps at `grid_max` and the outermost column scrolls the same way
+  as `master_stack` (§3.4). `grid_columns` is ignored (treated as 1) outside
+  `master_grid`.
 - **BSP**: each split's ratio is `sum(first subtree weights) / sum(both)`,
   clamped to `[bsp_min_ratio, bsp_max_ratio]` (the Weight Share Limit). A
   manual ratio wins. Learned AX minimum sizes are honored on top of this
@@ -272,13 +296,22 @@ It is a pure function of `(windows, weights, focus history, creation order)`.
 
 ### 3.4 Scrolling stack
 
-A master layout's stack scrolls once it holds more windows than
-`stackLimit(in: mode)` (`LayoutSettings.stackLimit`): 1 for `master_stack`,
-`gridMax` for `master_grid` when `gridMax > 0`, otherwise unlimited (no
-scrolling — `master_grid`'s default). `MasterLayout.plan`/`stackPlan`
-(`MasterLayout.swift`) computes the geometry:
+Each stack region (one, or two when `stack_both_sides` is on) is evaluated
+independently. `master_stack` never has more than one column and scrolls
+once it holds more than 1 window. `master_grid` splits a region into
+`stackColumns(in: mode)` (`grid_columns`) columns; a region scrolls once it
+holds more than `grid_columns * grid_max` windows (`grid_max > 0`), at which
+point columns fill column-major, nearest the master first, each fixed at
+`grid_max` windows except the outermost, which takes the remainder and
+scrolls exactly like a single `master_stack` stack. With `grid_columns == 1`
+and `stack_both_sides` off, this degenerates to the original single-stack
+behavior. `grid_max == 0` means no limit: a region never scrolls, and its
+columns just divide the windows evenly (earlier columns get the extra).
+`MasterLayout.plan`/`stackPlan` (`MasterLayout.swift`) computes the
+geometry for the scrolling (outermost) column:
 
-- **Deck with peeks.** `stackLimit` equal-size slots fill the stack region.
+- **Deck with peeks.** `grid_max` (or `stackLimit` for `master_stack`)
+  equal-size slots fill the scrolling column/region.
   The stack window just before the view is shifted `stack_peek` toward the
   start, so its far edge (title bar, for a window above) shows past the
   view; the one just after is shifted `stack_peek` toward the end the same
@@ -446,6 +479,20 @@ tracks.
   raise a tiled monocle window over it.
 - **Cursor warp.** Only for WM-initiated focus that crosses a display
   (`cursor_follows_focus`). A user's own click never warps the cursor.
+- **Focus flash.** When a command changes `engine.focused`, a
+  click-through, accent-colored border flashes around the new focus for
+  `focus_flash.duration_ms`, fading over its last 40% (at most 300 ms, and
+  no fade under Reduce Motion). While the `hold` modifier is down (alone or
+  with shift), the border marks the current focus, including focus changes
+  from clicks. On release, a command's flash that is still running finishes
+  on its own timer, one that ended during the hold plays its fade now, and
+  with no command during the hold the border hides at once. Focus that
+  doesn't come from a Ballast command (clicks, Cmd-Tab, focus follows mouse,
+  close fallback) never flashes. The
+  overlay is one AppKit window at the floating level, so the app raise that
+  follows a focus change can't cover it. It is sized to the window's planned
+  frame and follows that frame when a later pass scrolls the stack. It hides
+  on a Space change or when the window closes.
 - **Focus follows mouse (optional).** A mouse-moved global monitor, throttled
   to about 16 Hz, hit-tests the AX window under the cursor on a background
   queue, with at most one test in flight. A beachballing app under the

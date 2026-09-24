@@ -1,7 +1,7 @@
 import Foundation
 
 public enum LayoutMode: String, CaseIterable, Equatable, Sendable {
-    /// Masters beside a stack that tiles every window (up to `grid_max`, then scrolls).
+    /// Masters beside a stack tiled in `grid_columns` columns (up to `grid_max` per column, then scrolls).
     case masterGrid = "master_grid"
     /// Masters beside a stack that shows one window at a time and scrolls.
     case masterStack = "master_stack"

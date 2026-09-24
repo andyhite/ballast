@@ -61,6 +61,9 @@ final class WindowManager: AppObserverDelegate {
     /// The confirmed drag while the button is down; drives `dropPreview`.
     private var drag: DragSession?
     private let dropPreview = DropPreview()
+    private let focusFlash = FocusFlash()
+    /// The focus flash's hold modifier is down (alone, or with shift).
+    private var holdDown = false
     private var snapBackTimes: [WindowID: [Date]] = [:]
     /// Dock "Assign To Desktop" bindings, captured when an app launches.
     private var launchBindings: [pid_t: SpaceID] = [:]
@@ -179,7 +182,10 @@ final class WindowManager: AppObserverDelegate {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), AX.messagingTimeout)
         applyBindings()
         if workspaceTokens.isEmpty { observeWorkspace() }
-        if eventMonitors.isEmpty { observeMouse() }
+        if eventMonitors.isEmpty {
+            observeMouse()
+            observeModifiers()
+        }
         attachDock(attempt: 0)
         for app in NSWorkspace.shared.runningApplications { observe(app) }
         fullResync()
@@ -239,7 +245,10 @@ final class WindowManager: AppObserverDelegate {
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             self?.setHidden(pid: app.processIdentifier, false)
         }
-        on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in self?.requestResync() }
+        on(NSWorkspace.activeSpaceDidChangeNotification) { [weak self] _ in
+            self?.focusFlash.hide()
+            self?.requestResync()
+        }
         on(NSWorkspace.didWakeNotification) { [weak self] _ in self?.requestResync() }
         on(NSWorkspace.accessibilityDisplayOptionsDidChangeNotification) { [weak self] _ in
             self?.reduceMotion = SystemSettings.reduceMotion
@@ -265,6 +274,17 @@ final class WindowManager: AppObserverDelegate {
         if let moved = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in
             self?.focusFollowsMouse()
         }) { eventMonitors.append(moved) }
+    }
+
+    /// Global for other apps, local for Ballast's own windows (Settings).
+    private func observeModifiers() {
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
+            self?.modifiersChanged(event.modifierFlags)
+        }) { eventMonitors.append(global) }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged, handler: { [weak self] event in
+            self?.modifiersChanged(event.modifierFlags)
+            return event
+        }) { eventMonitors.append(local) }
     }
 
     private func observe(_ app: NSRunningApplication) {
@@ -429,6 +449,7 @@ final class WindowManager: AppObserverDelegate {
         }
         elements[id] = nil
         expected[id] = nil
+        if focusFlash.target == id { focusFlash.hide() }
         lastRequested[id] = nil
         inFlight[id] = nil
         pendingChecks.remove(id)
@@ -468,6 +489,7 @@ final class WindowManager: AppObserverDelegate {
         guard let id = windowID(element) else { return }
         if let previous = engine.focused, previous != id { lastFocusLoss = (previous, Date()) }
         markDirty(engine.focus(id))
+        if holdDown { holdFocusFlash() }
         refreshSurfaces()
     }
 
@@ -579,6 +601,8 @@ final class WindowManager: AppObserverDelegate {
         for space in spaces.sorted() { layout(space, reassignedThisPass: &reassignedThisPass) }
         // A layout change mid-drag (a window opened or closed) moves the landing frame.
         if !spaces.isEmpty { updateDropPreview(force: true) }
+        // Focus can scroll a stack: the flash follows its window to the new slot.
+        if let id = focusFlash.target, let frame = expected[id] { focusFlash.move(to: frame) }
         refreshSurfaces()
     }
 
@@ -642,7 +666,10 @@ final class WindowManager: AppObserverDelegate {
             Log.ax.debug("window \(id) did not accept a frame")
             return
         }
-        if current { expected[id] = actual }
+        if current {
+            expected[id] = actual
+            if id == focusFlash.target { focusFlash.move(to: actual) }
+        }
         // Refused to shrink: remember the minimum and reflow the rest around it.
         // Only a completed, still-current request says anything about constraints.
         if outcome.completed, current,
@@ -860,6 +887,7 @@ final class WindowManager: AppObserverDelegate {
             AX.raise(element)
         }
         markDirty(engine.focus(id))
+        if holdDown { holdFocusFlash() }
         if warp, engine.config.cursorFollowsFocus, let target = display(of: id), target.uuid != previousDisplay?.uuid,
            let frame = expected[id] ?? AX.frame(element) {
             CGWarpMouseCursorPosition(frame.center)
@@ -888,6 +916,43 @@ final class WindowManager: AppObserverDelegate {
         }
     }
 
+    /// Where the focus flash draws around `id`: its planned frame, else its
+    /// live one (a floating window Ballast never placed).
+    private func flashFrame(_ id: WindowID) -> CGRect? {
+        guard isOnActiveSpace(id), let w = engine.windows[id], !w.hidden, !w.minimized else { return nil }
+        return expected[id] ?? elements[id].flatMap(AX.frame)
+    }
+
+    /// After a command moved focus.
+    private func flashFocus() {
+        let settings = engine.config.focusFlash
+        guard settings.enabled, let id = engine.focused, let frame = flashFrame(id) else { return }
+        focusFlash.flash(id, frame: frame, duration: settings.duration, fade: !reduceMotion)
+    }
+
+    private func holdFocusFlash() {
+        guard let id = engine.focused, let frame = flashFrame(id) else { focusFlash.release(); return }
+        focusFlash.hold(id, frame: frame)
+    }
+
+    /// The hold modifier counts alone or with shift, so `alt+shift+…`
+    /// commands show the window they act on; any other modifier (`hyper`)
+    /// doesn't.
+    private func modifiersChanged(_ flags: NSEvent.ModifierFlags) {
+        let settings = engine.config.focusFlash
+        let required: NSEvent.ModifierFlags? = switch settings.hold {
+        case .alt: .option
+        case .ctrl: .control
+        case .cmd: .command
+        case .none: nil
+        }
+        let pressed = flags.intersection([.option, .control, .command])
+        let down = status == .running && settings.enabled && required != nil && pressed == required
+        guard down != holdDown else { return }
+        holdDown = down
+        if down { holdFocusFlash() } else { focusFlash.release() }
+    }
+
     // MARK: Commands
 
     /// The Space commands act on: the focused window's Space when it is
@@ -910,6 +975,7 @@ final class WindowManager: AppObserverDelegate {
             return
         }
         let space = currentSpace
+        let focusedBefore = engine.focused
         let area = space.flatMap { engine.snapshot.key(for: $0) }.flatMap { displays.with(uuid: $0.display) }?.visibleFrame
         let outcome = engine.perform(command, space: space, area: area)
         markDirty(outcome.dirty)
@@ -923,6 +989,7 @@ final class WindowManager: AppObserverDelegate {
         case .dumpState?: dumpState()
         case nil: break
         }
+        if engine.focused != focusedBefore { flashFocus() }
         refreshSurfaces()
     }
 
@@ -1057,6 +1124,7 @@ final class WindowManager: AppObserverDelegate {
             configError = nil
             configNote = nil
             markDirty(engine.applyConfig(config))
+            if !config.focusFlash.enabled { focusFlash.hide() }
             if status == .running { applyBindings() }
             Log.config.info("config reloaded")
         case .failure(let error):

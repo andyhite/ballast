@@ -97,12 +97,27 @@ struct LayoutPane: View {
                     }
                     .labelsHidden()
                 }
+                fieldRow("Stack Both Sides", inherited: overrides?.stackBothSides == nil) {
+                    Toggle("", isOn: Binding(
+                        get: { effective.stackBothSides },
+                        set: { commitDesktopField("stack_both_sides", .bool($0)) }
+                    ))
+                    .labelsHidden()
+                }
                 fieldRow("Grid Max", inherited: overrides?.gridMax == nil) {
                     Stepper(
                         value: Binding(get: { effective.gridMax }, set: { commitDesktopField("grid_max", .integer($0)) }),
                         in: 0...16
                     ) {
                         Text(effective.gridMax == 0 ? "No limit" : "\(effective.gridMax)").monospacedDigit()
+                    }
+                }
+                fieldRow("Grid Columns", inherited: overrides?.gridColumns == nil) {
+                    Stepper(
+                        value: Binding(get: { effective.gridColumns }, set: { commitDesktopField("grid_columns", .integer($0)) }),
+                        in: 1...8
+                    ) {
+                        Text("\(effective.gridColumns)").monospacedDigit()
                     }
                 }
                 fieldRow("Stack Peek", inherited: overrides?.stackPeek == nil) {
@@ -372,8 +387,12 @@ struct LayoutPane: View {
             commitMasterCount0(inheriting ? nil : effective.masterCount)
         case "Stack Side":
             commitDesktopField("stack_side", inheriting ? nil : .string(effective.stackSide.rawValue))
+        case "Stack Both Sides":
+            commitDesktopField("stack_both_sides", inheriting ? nil : .bool(effective.stackBothSides))
         case "Grid Max":
             commitDesktopField("grid_max", inheriting ? nil : .integer(effective.gridMax))
+        case "Grid Columns":
+            commitDesktopField("grid_columns", inheriting ? nil : .integer(effective.gridColumns))
         case "Stack Peek":
             commitDesktopField("stack_peek", inheriting ? nil : .integer(Int(effective.stackPeek)))
         case "Split Direction":

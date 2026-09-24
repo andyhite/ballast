@@ -89,7 +89,7 @@ struct GeneralPane: View {
             Section("Window Animation") {
                 Toggle("Animate window moves", isOn: Binding(
                     get: { config.animation.enabled },
-                    set: { commitAnimation("enabled", .bool($0)) }
+                    set: { commit("enabled", .bool($0), in: .animation) }
                 ))
                 CommitSlider(
                     title: "Duration",
@@ -97,16 +97,45 @@ struct GeneralPane: View {
                     range: 0...2000,
                     step: 10,
                     format: { "\(Int($0.rounded())) ms" },
-                    commit: { commitAnimation("duration_ms", .integer(Int($0.rounded()))) }
+                    commit: { commit("duration_ms", .integer(Int($0.rounded())), in: .animation) }
                 )
                 Picker("Easing", selection: Binding(
                     get: { config.animation.easing },
-                    set: { commitAnimation("easing", .string($0.rawValue)) }
+                    set: { commit("easing", .string($0.rawValue), in: .animation) }
                 )) {
                     ForEach(Easing.allCases, id: \.self) { easing in
                         Text(easing.label).tag(easing)
                     }
                 }
+            }
+            .disabled(editingDisabled)
+
+            Section("Focus Border") {
+                Toggle("Flash the focused window's border", isOn: Binding(
+                    get: { config.focusFlash.enabled },
+                    set: { commit("enabled", .bool($0), in: .focusFlash) }
+                ))
+                CommitSlider(
+                    title: "Duration",
+                    liveValue: config.focusFlash.duration * 1000,
+                    range: 100...5000,
+                    step: 50,
+                    format: { "\(Int($0.rounded())) ms" },
+                    commit: { commit("duration_ms", .integer(Int($0.rounded())), in: .focusFlash) }
+                )
+                .disabled(!config.focusFlash.enabled)
+                Picker("Show while holding", selection: Binding(
+                    get: { config.focusFlash.hold },
+                    set: { commit("hold", .string($0.rawValue), in: .focusFlash) }
+                )) {
+                    ForEach(FocusFlashHold.allCases, id: \.self) { hold in
+                        Text(hold.label).tag(hold)
+                    }
+                }
+                .disabled(!config.focusFlash.enabled)
+                Text("A Ballast command that moves focus flashes the border, then fades it out. Holding the key shows it until you let go.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .disabled(editingDisabled)
 
@@ -145,16 +174,8 @@ struct GeneralPane: View {
         .padding()
     }
 
-    private func commit(_ key: String, _ value: ConfigValue?) {
-        if let error = manager.editConfig({ $0.set(key, value, in: .settings) }) {
-            editError = error.description
-        } else {
-            editError = nil
-        }
-    }
-
-    private func commitAnimation(_ key: String, _ value: ConfigValue?) {
-        if let error = manager.editConfig({ $0.set(key, value, in: .animation) }) {
+    private func commit(_ key: String, _ value: ConfigValue?, in section: ConfigSection = .settings) {
+        if let error = manager.editConfig({ $0.set(key, value, in: section) }) {
             editError = error.description
         } else {
             editError = nil
@@ -169,5 +190,16 @@ struct GeneralPane: View {
             loginItemError = error.localizedDescription
         }
         loginItemStatus = LoginItem.status
+    }
+}
+
+private extension FocusFlashHold {
+    var label: String {
+        switch self {
+        case .alt: "Option (⌥)"
+        case .ctrl: "Control (⌃)"
+        case .cmd: "Command (⌘)"
+        case .none: "Nothing"
+        }
     }
 }

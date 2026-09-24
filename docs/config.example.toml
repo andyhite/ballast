@@ -24,19 +24,35 @@ easing = "ease_out_cubic"          # linear | ease_out_cubic | ease_in_out_cubic
 # Only the focused window interpolates; every other window snaps (design doc §5).
 # "Reduce motion" in Accessibility settings always wins: no interpolation.
 
+# A border that marks the focused window. A Ballast command that moves focus
+# flashes it, then fades it out; holding `hold` alone (or with shift) shows it
+# until you let go. Clicks, Cmd-Tab, and focus follows mouse never flash.
+[settings.focus_flash]
+enabled = true
+duration_ms = 800                  # 100…5000, fade included (none under Reduce Motion)
+hold = "alt"                       # alt | ctrl | cmd | none
+
 # Defaults for every (display, Space) pair.
 [layout]
 # mode = "master_grid"             # unset: master_stack on a built-in (laptop) display, master_grid on
                                    #   external ones. Set it to pin one mode for every display:
-                                   #   master_grid: masters beside a stack that tiles every window (up to
-                                   #   grid_max, then scrolls) | master_stack: masters beside a stack that
-                                   #   shows one window at a time and scrolls | bsp | float (passthrough:
-                                   #   WM never touches the Space)
+                                   #   master_grid: masters beside a stack that tiles every window in
+                                   #   grid_columns columns (up to grid_max per column, then the outermost
+                                   #   column scrolls) | master_stack: masters beside a stack that shows
+                                   #   one window at a time and scrolls | bsp | float (passthrough: WM
+                                   #   never touches the Space)
 master_ratio = 0.6                 # share of the master region, strictly between 0.05 and 0.95
 master_count = 1                   # 1…16
 stack_side = "right"               # right | left | bottom | top
-grid_max = 0                       # master_grid only: most stack windows tiled at once; the rest scroll
-                                   #   like master_stack's one window. 0 = no limit. 0…16
+stack_both_sides = false           # put a stack on both sides of the master (left+right or top+bottom,
+                                   #   per stack_side's axis); master_ratio is the master's share, the two
+                                   #   sides split the rest evenly. master_grid and master_stack only
+grid_columns = 1                   # master_grid only: columns each stack side is split into, side by
+                                   #   side, filled column-major nearest the master first. 1…8
+grid_max = 0                       # master_grid only: most stack windows tiled per column; once a side
+                                   #   holds more than grid_columns * grid_max, every column but the
+                                   #   outermost caps at grid_max and the outermost scrolls like
+                                   #   master_stack's one window. 0 = no limit. 0…16
 stack_peek = 30                    # points of the previous/next stack window left showing at either end
                                    #   while a stack scrolls (master_stack, or master_grid past grid_max).
                                    #   0…200
