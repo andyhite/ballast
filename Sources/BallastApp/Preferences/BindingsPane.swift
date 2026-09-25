@@ -105,7 +105,27 @@ struct BindingsPane: View {
         }
     }
 
-    private func commitBinding(spec: String, commandText: String, previousLiteralKey: String?) {
+    /// Finds another binding, if any, already bound to `hotkey` — by
+    /// normalized `Hotkey` equality, not literal spelling, so aliases like
+    /// `hyper+r` vs `ctrl+alt+shift+cmd+r` still conflict. The row being
+    /// edited (identified by its literal key) is excluded, so editing a
+    /// binding's own entry is allowed, including a canonical-spelling
+    /// change.
+    static func conflictingBinding(_ hotkey: Hotkey, excluding previousLiteralKey: String?, in bindings: [KeyBinding]) -> KeyBinding? {
+        bindings.first { $0.hotkey == hotkey && $0.hotkeyText != previousLiteralKey }
+    }
+
+    /// Commits a binding add/edit. Returns an error message on failure (the
+    /// sheet stays open and editable; neither binding is touched) or `nil`
+    /// on success.
+    private func commitBinding(spec: String, commandText: String, previousLiteralKey: String?) -> String? {
+        guard case .success(let newHotkey) = Hotkey.parse(spec) else {
+            return "Record a valid hotkey first."
+        }
+        if let conflict = Self.conflictingBinding(newHotkey, excluding: previousLiteralKey, in: model.config.bindings) {
+            errorMessage = "Already bound to \u{201C}\(conflict.commandText)\u{201D}. Choose a different hotkey."
+            return errorMessage
+        }
         let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
             if let previousLiteralKey, previousLiteralKey != spec {
                 switch editor.set(previousLiteralKey, nil, in: .bindings) {
@@ -117,9 +137,11 @@ struct BindingsPane: View {
         }
         if let error {
             errorMessage = error.description
+            return errorMessage
         } else {
             errorMessage = nil
             selection = Hotkey.parse(spec).value
+            return nil
         }
     }
 
@@ -144,14 +166,14 @@ private extension Result {
 private struct BindingEditSheet: View {
     @Environment(\.dismiss) private var dismiss
     let existing: BindingRow?
-    let onCommit: (_ spec: String, _ commandText: String, _ previousLiteralKey: String?) -> Void
+    let onCommit: (_ spec: String, _ commandText: String, _ previousLiteralKey: String?) -> String?
 
     @State private var spec: String
     @State private var commandText: String
     @State private var showSuggestions = false
     @State private var errorMessage: String?
 
-    init(existing: BindingRow?, onCommit: @escaping (String, String, String?) -> Void) {
+    init(existing: BindingRow?, onCommit: @escaping (String, String, String?) -> String?) {
         self.existing = existing
         self.onCommit = onCommit
         _spec = State(initialValue: existing?.literalKey ?? "")
@@ -214,8 +236,12 @@ private struct BindingEditSheet: View {
         case .failure(let error):
             errorMessage = error.description
         case .success:
-            onCommit(spec, commandText, existing?.literalKey)
-            dismiss()
+            if let failure = onCommit(spec, commandText, existing?.literalKey) {
+                errorMessage = failure
+            } else {
+                errorMessage = nil
+                dismiss()
+            }
         }
     }
 }

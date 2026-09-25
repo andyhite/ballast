@@ -367,15 +367,44 @@ struct LayoutPane: View {
         commitDesktopField("bsp_max_ratio", .float(max))
     }
 
-    private func commitGaps(inner: Double?, outer: Double?) {
-        let newInner = inner ?? overrides?.gapsInner
-        let newOuter = outer ?? overrides?.gapsOuter
+    /// Pure merge used by `commitGaps`/`commitGapsInherit`: an untouched
+    /// component keeps falling back to whatever it currently resolves to
+    /// so it is neither lost nor reset when the inline table is rewritten.
+    /// `.desktop` scope falls back to the existing override (`nil` keeps
+    /// inheriting from `[layout]`); `.defaults` scope has no override to
+    /// fall back to, so it must use the current effective (`[layout]`)
+    /// value instead.
+    static func mergedGapFields(
+        scope: LayoutScope, inner: Double?, outer: Double?,
+        overrideInner: Double?, overrideOuter: Double?,
+        effectiveInner: Double, effectiveOuter: Double
+    ) -> [ConfigField] {
+        let fallbackInner: Double?
+        let fallbackOuter: Double?
+        switch scope {
+        case .defaults:
+            fallbackInner = effectiveInner
+            fallbackOuter = effectiveOuter
+        case .desktop:
+            fallbackInner = overrideInner
+            fallbackOuter = overrideOuter
+        }
+        let newInner = inner ?? fallbackInner
+        let newOuter = outer ?? fallbackOuter
         // Only fields that already have (or are gaining) an override belong
         // in the inline table; an untouched, still-inherited field is left
         // out entirely so it keeps falling back to `[layout]`.
         var fields: [ConfigField] = []
         if let newInner { fields.append(ConfigField("inner", .float(newInner))) }
         if let newOuter { fields.append(ConfigField("outer", .float(newOuter))) }
+        return fields
+    }
+
+    private func commitGaps(inner: Double?, outer: Double?) {
+        let fields = Self.mergedGapFields(
+            scope: scope, inner: inner, outer: outer,
+            overrideInner: overrides?.gapsInner, overrideOuter: overrides?.gapsOuter,
+            effectiveInner: effective.gaps.inner, effectiveOuter: effective.gaps.outer)
         commitDesktopField("gaps", fields.isEmpty ? nil : .inlineTable(fields))
     }
 

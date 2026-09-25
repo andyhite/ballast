@@ -111,7 +111,10 @@ The menu, top to bottom:
 2. **Monocle**, **Reset Arrangement**, and **Re-layout Desktop**.
 3. **The focused app ▸**: Weight (1, 2, 3, 5, 8, 13), Manage (Always or
    Never), Float (Automatic, Always, or Never), and **Inspect Window…**.
-   Picking a `(default)` entry removes that key from the app's rule.
+   Picking a `(default)` entry removes that key from the app's rule. This
+   submenu tracks the last-focused window regardless of `manage`, so it
+   stays available — with Manage ▸ **Always** one click away — even for an
+   app you just set to Never and that Ballast is no longer tiling.
 4. **Settings…** (`⌘,`): four tabs, General, Layout, Rules, and Keyboard.
    Global settings and the defaults for all desktops live only here. The
    Keyboard tab records hotkeys.
@@ -181,7 +184,7 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 | `layout master_grid\|master_stack\|bsp\|float\|next\|prev\|default` | Change this desktop's mode |
 | `monocle`, `float` | Toggle full-tile monocle / float the focused window |
 | `grow [n]`, `shrink [n]`, `balance` | Resize the focused tile / even out splits |
-| `master-ratio <±d>`, `master-count <±d>` | Adjust the master region |
+| `master-ratio <±d>`, `master-count <±d>` | Adjust the master region (ratio clamped strictly between 5% and 95%, never reversing direction near a bound) |
 | `send-to-display next\|prev`, `focus-display next\|prev` | Move a window or focus to the next/previous display |
 | `reload`, `dump-state` | Reload config / write state to `~/Library/Caches/dev.ballast/state.json` |
 

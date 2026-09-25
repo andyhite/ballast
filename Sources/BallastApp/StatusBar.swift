@@ -203,7 +203,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     private func focusedAppMenuItem(enabled: Bool) -> NSMenuItem? {
         let engine = manager.engine
-        guard let focusedID = engine.focused, let window = engine.windows[focusedID] else { return nil }
+        // `frontmost` tracks the last-focused tracked window regardless of
+        // `manage`, so the submenu (and its Manage ▸ "Always (default)")
+        // stays available for apps the user just set to Manage ▸ Never.
+        guard let focusedID = engine.frontmost, let window = engine.windows[focusedID] else { return nil }
         let appName = window.facts.appName ?? "Unknown App"
         let menu = NSMenu(title: appName)
         if let bundleID = window.facts.bundleID {

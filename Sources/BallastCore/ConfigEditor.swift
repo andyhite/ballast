@@ -64,6 +64,12 @@ public struct ConfigEditor: Sendable {
             default:
                 break
             }
+            guard let value else {
+                // Removing a key from a section that doesn't exist yet is a
+                // no-op; creating it just to leave it empty would be a
+                // phantom section, not byte-identical with "nothing to do".
+                return .success(())
+            }
             // Section missing: create it, then retry the set inside it.
             switch createSection(section, lines: &lines) {
             case .failure(let e): return .failure(e)
@@ -98,11 +104,11 @@ public struct ConfigEditor: Sendable {
         guard let blocks = try? parseBlocks(lines) else {
             return .failure(ConfigEditError("could not parse document"))
         }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" }
+        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         let insertAfterLine: Int
         var needsBlankBefore = false
         if let last = ruleBlocks.last {
-            insertAfterLine = contentEnd(last, lines: lines)
+            insertAfterLine = entryContentEnd(last, allBlocks: blocks, lines: lines)
             needsBlankBefore = true
         } else if let bindingsBlock = blocks.first(where: { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false }) {
             insertAfterLine = bindingsBlock.headerLine - 1
@@ -132,12 +138,12 @@ public struct ConfigEditor: Sendable {
         guard let blocks = try? parseBlocks(lines) else {
             return .failure(ConfigEditError("could not parse document"))
         }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" }
+        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         guard index >= 0, index < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index \(index) out of range"))
         }
         let block = ruleBlocks[index]
-        let (start, end) = blockRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
+        let (start, end) = entryRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
         removeLineRange(start...end, lines: &lines)
         text = joinLines(lines)
         return .success(())
@@ -149,14 +155,14 @@ public struct ConfigEditor: Sendable {
         guard let blocks = try? parseBlocks(lines) else {
             return .failure(ConfigEditError("could not parse document"))
         }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" }
+        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         guard from >= 0, from < ruleBlocks.count, to >= 0, to < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index out of range"))
         }
         if from == to { return .success(()) }
 
         let fromBlock = ruleBlocks[from]
-        let (fromStart, fromEnd) = blockRangeWithLeadingComment(fromBlock, allBlocks: blocks, lines: lines)
+        let (fromStart, fromEnd) = entryRangeWithLeadingComment(fromBlock, allBlocks: blocks, lines: lines)
         let movedLines = Array(lines[(fromStart - 1)...(fromEnd - 1)])
 
         // Remove the moved block first, tracking line-number shift.
@@ -167,20 +173,20 @@ public struct ConfigEditor: Sendable {
         guard let blocks2 = try? parseBlocks(working) else {
             return .failure(ConfigEditError("failed to move rule"))
         }
-        let ruleBlocks2 = blocks2.filter { $0.header?.tableKind == "rule" }
+        let ruleBlocks2 = blocks2.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         // Determine insertion point in the post-removal document.
         let insertAfterLine: Int
         if to >= ruleBlocks2.count {
             // Insert after the (new) last rule.
             if let last = ruleBlocks2.last {
-                insertAfterLine = contentEnd(last, lines: working)
+                insertAfterLine = entryContentEnd(last, allBlocks: blocks2, lines: working)
             } else {
                 insertAfterLine = working.count
             }
         } else {
             // Insert before rule `to` in the post-removal doc.
             let target = ruleBlocks2[to]
-            let (targetStart, _) = blockRangeWithLeadingComment(target, allBlocks: blocks2, lines: working)
+            let (targetStart, _) = entryRangeWithLeadingComment(target, allBlocks: blocks2, lines: working)
             insertAfterLine = targetStart - 1
         }
         var newLines = movedLines
@@ -201,7 +207,7 @@ public struct ConfigEditor: Sendable {
         guard let block = findSpaceBlock(key, blocks: blocks, lines: lines) else {
             return .success(())
         }
-        let (start, end) = blockRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
+        let (start, end) = entryRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
         removeLineRange(start...end, lines: &lines)
         text = joinLines(lines)
         return .success(())
@@ -370,7 +376,7 @@ public struct ConfigEditor: Sendable {
             guard let block = findSpaceBlock(key, blocks: blocks, lines: lines) else { return nil }
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
         case .rule(let index):
-            let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" }
+            let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
             guard index >= 0, index < ruleBlocks.count else { return nil }
             let block = ruleBlocks[index]
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
@@ -441,7 +447,7 @@ public struct ConfigEditor: Sendable {
             if let last = spaceBlocks.last {
                 var newLines: [String] = ["", body.removeFirst()]
                 newLines.append(contentsOf: body)
-                insert(newLines, after: contentEnd(last, lines: lines), lines: &lines)
+                insert(newLines, after: entryContentEnd(last, allBlocks: blocks, lines: lines), lines: &lines)
             } else if let ruleBlocks = firstRuleHeaderLine(blocks) {
                 var newLines = body
                 newLines.append("")
@@ -868,6 +874,45 @@ public struct ConfigEditor: Sendable {
             start -= 1
         }
         return (start, end)
+    }
+
+    // MARK: - Array-table entry ownership (nested child tables)
+
+    /// `[[rule]]`/`[[space]]` entries can be followed by non-array child
+    /// tables that belong to them (`[rule.size]`, `[rule.placement]`,
+    /// `[space.gaps]`, ...). Those child blocks must move, get removed, and
+    /// get skipped over as a unit with their owning entry rather than being
+    /// orphaned or miscounted as sibling `[[rule]]`/`[[space]]` entries.
+    private func ownedBodyEnd(for entryBlock: Block, allBlocks: [Block]) -> Int {
+        guard let kind = entryBlock.header?.tableKind,
+              let idx = allBlocks.firstIndex(where: { $0.headerLine == entryBlock.headerLine }) else {
+            return entryBlock.bodyEnd
+        }
+        var end = entryBlock.bodyEnd
+        var i = idx + 1
+        while i < allBlocks.count {
+            let candidate = allBlocks[i]
+            guard let header = candidate.header,
+                  header.isArrayTable == false,
+                  header.path.count > 1,
+                  header.path.first == kind else { break }
+            end = candidate.bodyEnd
+            i += 1
+        }
+        return end
+    }
+
+    /// `contentEnd`, but extended through any owned child tables.
+    private func entryContentEnd(_ entryBlock: Block, allBlocks: [Block], lines: [String]) -> Int {
+        let extended = Block(header: entryBlock.header, headerLine: entryBlock.headerLine, bodyStart: entryBlock.bodyStart, bodyEnd: ownedBodyEnd(for: entryBlock, allBlocks: allBlocks))
+        return contentEnd(extended, lines: lines)
+    }
+
+    /// `blockRangeWithLeadingComment`, but extended through any owned child
+    /// tables so remove/move take the whole entry with it.
+    private func entryRangeWithLeadingComment(_ entryBlock: Block, allBlocks: [Block], lines: [String]) -> (start: Int, end: Int) {
+        let extended = Block(header: entryBlock.header, headerLine: entryBlock.headerLine, bodyStart: entryBlock.bodyStart, bodyEnd: ownedBodyEnd(for: entryBlock, allBlocks: allBlocks))
+        return blockRangeWithLeadingComment(extended, allBlocks: allBlocks, lines: lines)
     }
 
     // MARK: - Rendering

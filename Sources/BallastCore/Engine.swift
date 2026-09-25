@@ -664,15 +664,32 @@ public struct Engine: Sendable {
         return w.space == space && w.isManaged && !w.minimized && !w.hidden
     }
 
+    /// Bounds must stay strictly inside Config's `master_ratio` validation
+    /// (0.05…0.95, exclusive): landing exactly on 0.05 or 0.95 renders as a
+    /// value the config parser then rejects, so the persisted override fails
+    /// `Config.validated` and the caller surfaces that error instead of
+    /// silently applying it. `ConfigEditor`'s float rendering is a shortest
+    /// round-trip representation, so any in-bounds `Double` survives
+    /// persistence exactly — only the strict-interior requirement matters.
+    /// Only a delta that would actually cross a bound gets clamped, to the
+    /// nearest representable value still strictly inside it
+    /// (`nextUp`/`nextDown`); an already-valid near-bound ratio is moved by
+    /// the full requested delta, so growing near 0.95 or shrinking near 0.05
+    /// is never reversed into the opposite direction.
     @discardableResult
     private mutating func adjustMasterRatio(_ space: SpaceID, by delta: Double) -> Double {
         guard delta.isFinite else { return spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio }
         let current = spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio
-        // Bounds must match Config's master_ratio validation (0.05…0.95,
-        // exclusive); narrower bounds here would clamp an already-valid
-        // ratio back into range and silently reverse the requested
-        // grow/shrink direction.
-        let clamped = min(max(current + delta, 0.05), 0.95)
+        let lowerBound = 0.05, upperBound = 0.95
+        let target = current + delta
+        let clamped: Double
+        if target <= lowerBound {
+            clamped = lowerBound.nextUp
+        } else if target >= upperBound {
+            clamped = upperBound.nextDown
+        } else {
+            clamped = target
+        }
         spaces[space, default: SpaceState(id: space)].masterRatioOverride = clamped
         return clamped
     }

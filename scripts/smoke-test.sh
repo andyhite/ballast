@@ -36,11 +36,22 @@ active_spaces() { dump | jq -c '[.spaces[] | select(.active and .ordinal != null
 CONFIG_BACKUP=""
 restore_config() {
   [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ] || return 0
+  # Wait for any in-flight ~0.3s settings persistence to land before we
+  # overwrite the config, instead of guessing a fixed delay: poll dump-state
+  # until every Space's transient mode_override has cleared, capped so a
+  # stuck/dead Ballast can't hang the restore.
+  local waited=0
+  while [ "$waited" -lt 20 ]; do
+    dump 2>/dev/null | jq -e '[.spaces[]? | select(.mode_override != null)] | length == 0' >/dev/null 2>&1 && break
+    sleep 0.05
+    waited=$((waited + 1))
+  done
   if cat "$CONFIG_BACKUP" > "$CONFIG"; then
     rm -f "$CONFIG_BACKUP"
     CONFIG_BACKUP=""
   else
     echo "  ✗ FATAL: failed to restore $CONFIG from backup; original preserved at $CONFIG_BACKUP — restore it manually" >&2
+    exit 1
   fi
 }
 on_signal() {
@@ -59,6 +70,18 @@ command -v jq >/dev/null || { echo "jq is required"; exit 2; }
 dump | jq -e '.status == "running"' >/dev/null || { echo "Ballast is not in the running state:"; jq .status "$STATE"; exit 2; }
 CONFIG=$(jq -r '.config' "$STATE")
 [ -f "$CONFIG" ] || { echo "no config at $CONFIG"; exit 2; }
+
+# Back up the entire config before any command below can mutate it, and abort
+# without touching the file at all if the backup can't be made. restore_config
+# (armed via the EXIT/INT/TERM traps above) puts the original bytes back after
+# every setting-mutating command in every step, not just step 1.
+if tmp_backup=$(mktemp "${TMPDIR:-/tmp}/ballast-smoke-config.XXXXXX") && cat "$CONFIG" > "$tmp_backup"; then
+  CONFIG_BACKUP=$tmp_backup   # arm the restore only once the copy is complete
+else
+  echo "could not create a private backup of $CONFIG; aborting without touching it" >&2
+  rm -f "${tmp_backup:-}" 2>/dev/null
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 step "1. Two Spaces on two displays keep independent modes across a config reload"
@@ -80,42 +103,30 @@ override_mode="bsp"; [ "$default_mode" = "bsp" ] && override_mode="master_grid"
 pre=$(active_spaces)
 target_id=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].space_id' <<<"$pre")
 target_manual=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].manual' <<<"$pre")
+target_mode=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].mode' <<<"$pre")
 target_override=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].mode_override' <<<"$pre")
-if [ "$target_manual" = "true" ] && [ -n "$target_override" ] && [ "$target_override" != "null" ]; then
-  ok "Space $target_id is manual with an explicit $target_override override before touching config"
+if [ "$target_manual" = "true" ] && [ "$target_mode" = "$override_mode" ] && { [ -z "$target_override" ] || [ "$target_override" = "null" ]; }; then
+  ok "Space $target_id is manual, effective mode persisted as $override_mode, and the transient override cleared"
 
-  backup_ok=0
-  if tmp_backup=$(mktemp "${TMPDIR:-/tmp}/ballast-smoke-config.XXXXXX") && cat "$CONFIG" > "$tmp_backup"; then
-    CONFIG_BACKUP=$tmp_backup   # arm the restore only once the copy is complete
-    backup_ok=1
+  printf '\n# smoke-test touch %s\n' "$(date +%s)" >> "$CONFIG"
+  sleep 1.0
+  post=$(active_spaces)
+
+  target_same=$(jq -n --argjson a "$pre" --argjson b "$post" --argjson id "$target_id" \
+    '(($a[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]}) ==
+     (($b[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]})')
+  modes_same=$(jq -n --argjson a "$pre" --argjson b "$post" \
+    '[$a[] | {space_id, mode, mode_override}] == [$b[] | {space_id, mode, mode_override}]')
+  if [ "$target_same" = "true" ] && [ "$modes_same" = "true" ]; then
+    ok "modes/overrides unchanged and the manual arrangement on Space $target_id is preserved by reload"
   else
-    bad "could not create a private backup of $CONFIG; skipping reload check without touching the config"
-    rm -f "$tmp_backup" 2>/dev/null
+    bad "state changed across reload"; diff <(jq -S . <<<"$pre") <(jq -S . <<<"$post")
   fi
-
-  if [ "$backup_ok" -eq 1 ]; then
-    printf '\n# smoke-test touch %s\n' "$(date +%s)" >> "$CONFIG"
-    sleep 1.0
-    post=$(active_spaces)
-    restore_config
-    sleep 0.5
-
-    target_same=$(jq -n --argjson a "$pre" --argjson b "$post" --argjson id "$target_id" \
-      '(($a[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]}) ==
-       (($b[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]})')
-    modes_same=$(jq -n --argjson a "$pre" --argjson b "$post" \
-      '[$a[] | {space_id, mode, mode_override}] == [$b[] | {space_id, mode, mode_override}]')
-    if [ "$target_same" = "true" ] && [ "$modes_same" = "true" ]; then
-      ok "modes/overrides unchanged and the manual arrangement on Space $target_id is preserved by reload"
-    else
-      bad "state changed across reload"; diff <(jq -S . <<<"$pre") <(jq -S . <<<"$post")
-    fi
-    dump | jq -e '.config_error == null' >/dev/null && ok "reload accepted (no config error)" || bad "config error: $(jq -r .config_error "$STATE")"
-  fi
+  dump | jq -e '.config_error == null' >/dev/null && ok "reload accepted (no config error)" || bad "config error: $(jq -r .config_error "$STATE")"
 else
-  bad "Space $target_id never entered manual mode with an explicit override (layout $override_mode + promote); skipping reload check without touching the config"
+  bad "Space $target_id never reached manual mode $override_mode with the transient override cleared (layout $override_mode + promote); skipping reload check without further mutating the config"
 fi
-"$BALLAST" send layout default; "$BALLAST" send reset; sleep 0.3   # leave the Space as step 1 found it
+"$BALLAST" send layout "$default_mode"; "$BALLAST" send reset; sleep 0.3   # put the Space back to the mode it had before this step's override (the config file itself is restored to its exact original bytes by the EXIT/INT/TERM trap, not by this line)
 
 # ---------------------------------------------------------------------------
 step "2. Weight-based master reassignment when a heavier app launches"

@@ -846,6 +846,45 @@ struct EngineTests {
         #expect(ratio >= 0.93)
     }
 
+    @Test("growing a ratio already within an epsilon of 0.95 never reverses direction")
+    func masterRatioGrowNearUpperBoundNeverReverses() {
+        var config = Config()
+        config.layout.masterRatio = 0.95.nextDown.nextDown.nextDown
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        let before = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
+        _ = engine.perform(.masterRatio(0.1), space: 1, areas: Self.areas)
+        let after = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
+        #expect(after >= before)
+        #expect(after < 0.95)
+    }
+
+    @Test("shrinking a ratio already within an epsilon of 0.05 never reverses direction")
+    func masterRatioShrinkNearLowerBoundNeverReverses() {
+        var config = Config()
+        config.layout.masterRatio = 0.05.nextUp.nextUp.nextUp
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        let before = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
+        _ = engine.perform(.masterRatio(-0.1), space: 1, areas: Self.areas)
+        let after = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
+        #expect(after <= before)
+        #expect(after > 0.05)
+    }
+
+    @Test("zero-delta master-ratio adjustment leaves the ratio unchanged")
+    func masterRatioZeroDeltaLeavesRatioUnchanged() {
+        var config = Config()
+        config.layout.masterRatio = 0.6
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        _ = engine.perform(.masterRatio(0), space: 1, areas: Self.areas)
+        #expect(engine.spacesForTesting[1]?.masterRatioOverride == 0.6)
+    }
+
     @Test("shrinking an already-low but valid master ratio never grows it")
     func masterRatioShrinkNeverGrowsValidLowRatio() {
         var config = Config()
@@ -856,6 +895,42 @@ struct EngineTests {
         _ = engine.perform(.masterRatio(-0.05), space: 1, areas: Self.areas)
         let ratio = engine.spacesForTesting[1]?.masterRatioOverride ?? config.layout.masterRatio
         #expect(ratio <= 0.07)
+    }
+
+    @Test("extreme master-ratio grow/shrink survives ConfigEditor persistence and Config.validated")
+    func masterRatioExtremeCommandsRoundTripThroughConfigEditor() {
+        for delta in [1.0, -1.0] {
+            var engine = Self.makeEngine()
+            _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+            let outcome = engine.perform(.masterRatio(delta), space: 1, areas: Self.areas)
+            let applied = outcome.settings?.masterRatio
+            #expect(applied != nil)
+            guard let ratio = applied else { continue }
+
+            var editor = ConfigEditor(text: "[layout]\nmaster_ratio = 0.6\n")
+            let setResult = editor.set("master_ratio", .float(ratio), in: .layout)
+            guard case .success = setResult else {
+                Issue.record("expected ConfigEditor.set to succeed for ratio \(ratio)")
+                continue
+            }
+            switch editor.validated() {
+            case .success(let config): #expect(config.layout.masterRatio == ratio)
+            case .failure(let e): Issue.record("expected \(ratio) to validate, got \(e)")
+            }
+        }
+    }
+
+    @Test("repeated boundary master-ratio commands are stable")
+    func masterRatioRepeatedBoundaryCommandsStable() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+
+        _ = engine.perform(.masterRatio(-1.0), space: 1, areas: Self.areas)
+        let first = engine.spacesForTesting[1]?.masterRatioOverride
+        _ = engine.perform(.masterRatio(-1.0), space: 1, areas: Self.areas)
+        let second = engine.spacesForTesting[1]?.masterRatioOverride
+        #expect(first == second)
     }
 
     // MARK: - Hidden windows

@@ -378,4 +378,194 @@ struct ConfigEditorTests {
         case .failure: break
         }
     }
+
+    // MARK: - Nested child tables (`[rule.size]`, `[rule.placement]`, `[space.gaps]`)
+
+    static let ruleWithChildTables = """
+    [[rule]]
+    app_id = "com.first.app"
+    float = true
+    [rule.size]
+    w = 0.5
+    h = 0.5
+
+    [[rule]]
+    app_id = "com.second.app"
+    float = true
+    [rule.placement]
+    x = 0.1
+    y = 0.1
+    w = 0.3
+    h = 0.3
+    """
+
+    @Test("removeRule on a rule with a [rule.size] child leaves an earlier rule's own child table intact and removes the target's")
+    func removeRuleWithChildTablesPreservesSiblingChild() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        expectSuccess(editor.removeRule(at: 1))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules.count == 1)
+            #expect(config.rules.first?.match.appID == "com.first.app")
+            #expect(config.rules.first?.actions.size?.width == 0.5)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        #expect(!editor.text.contains("[rule.placement]"))
+        #expect(editor.text.contains("[rule.size]"))
+    }
+
+    @Test("[rule.size]/[rule.placement] child tables are not counted as their own [[rule]] entries")
+    func childTablesDoNotInflateRuleCount() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules.count == 2)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        switch editor.set("weight", .float(3), in: .rule(2)) {
+        case .success: Issue.record("expected out-of-range failure for the child table miscounted as a rule")
+        case .failure: break
+        }
+    }
+
+    @Test("appendRule after a rule with a child table keeps the child table with its own rule")
+    func appendRuleAfterChildTablePreservesOwnership() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        let result = editor.appendRule([ConfigField("app_id", .string("com.third.app"))])
+        guard case .success(2) = result else { Issue.record("expected index 2"); return }
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules.count == 3)
+            #expect(config.rules[1].actions.placement != nil)
+            #expect(config.rules.last?.match.appID == "com.third.app")
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+    }
+
+    @Test("moveRule moves a rule's [rule.size] child table along with it")
+    func moveRuleCarriesChildTable() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        expectSuccess(editor.moveRule(from: 0, to: 1))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules.count == 2)
+            #expect(config.rules[0].match.appID == "com.second.app")
+            #expect(config.rules[0].actions.placement != nil)
+            #expect(config.rules[1].match.appID == "com.first.app")
+            #expect(config.rules[1].actions.size?.width == 0.5)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+    }
+
+    @Test("adding a new space after one with a [space.gaps] child table preserves that child table")
+    func addSpaceAfterOnePreservesGapsChildTable() {
+        let text = """
+        [[space]]
+        display = "11111111-1111-1111-1111-111111111111"
+        ordinal = 1
+
+        [space.gaps]
+        inner = 12
+        """
+        var editor = ConfigEditor(text: text)
+        let key2 = SpaceKey(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
+        expectSuccess(editor.set("mode", .string("float"), in: .space(key2)))
+        switch editor.validated() {
+        case .success(let config):
+            let key1 = SpaceKey(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
+            #expect(config.spaces[key1]?.gapsInner == 12)
+            #expect(config.spaces[key2]?.mode == .float)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        #expect(editor.text.contains("[space.gaps]\ninner = 12"))
+    }
+
+    @Test("removing a missing key from a [[space]] that doesn't exist yet is a byte-identical no-op")
+    func removeMissingKeyFromAbsentSpaceIsNoOp() {
+        let text = "[layout]\nmode = \"bsp\"\n"
+        var editor = ConfigEditor(text: text)
+        let key = SpaceKey(display: "33333333-3333-3333-3333-333333333333", ordinal: 3)
+        expectSuccess(editor.set("mode", nil, in: .space(key)))
+        #expect(editor.text == text)
+        #expect(!editor.text.contains("[[space]]"))
+    }
+
+    @Test("removeSpace on one of two spaces removes its own [space.gaps] and leaves the sibling's [space.gaps] intact")
+    func removeSpaceWithChildTablePreservesSiblingChild() {
+        let text = """
+        [[space]]
+        display = "11111111-1111-1111-1111-111111111111"
+        ordinal = 1
+
+        [space.gaps]
+        inner = 4
+
+        [[space]]
+        display = "22222222-2222-2222-2222-222222222222"
+        ordinal = 2
+
+        [space.gaps]
+        inner = 20
+        """
+        var editor = ConfigEditor(text: text)
+        let removed = SpaceKey(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
+        let kept = SpaceKey(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
+        expectSuccess(editor.removeSpace(removed))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.spaces[removed] == nil)
+            #expect(config.spaces[kept]?.gapsInner == 20)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        let occurrences = editor.text.components(separatedBy: "[space.gaps]").count - 1
+        #expect(occurrences == 1)
+        #expect(editor.text.contains("[space.gaps]\ninner = 20"))
+    }
+
+    @Test("set on a rule's own field leaves its trailing [rule.size] child table untouched")
+    func setRuleFieldLeavesChildTableIntact() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        expectSuccess(editor.set("app_id", .string("com.first.renamed"), in: .rule(0)))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules[0].match.appID == "com.first.renamed")
+            #expect(config.rules[0].actions.size?.width == 0.5)
+            #expect(config.rules[0].actions.size?.height == 0.5)
+            #expect(config.rules.count == 2)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        #expect(editor.text.contains("[rule.size]\nw = 0.5\nh = 0.5"))
+    }
+
+    @Test("set inserting a new field on a rule with a trailing child table lands before the child header, not inside it")
+    func setInsertsNewRuleFieldBeforeChildTable() {
+        var editor = ConfigEditor(text: Self.ruleWithChildTables)
+        expectSuccess(editor.set("weight", .float(2.5), in: .rule(0)))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.rules[0].match.appID == "com.first.app")
+            #expect(config.rules[0].actions.size?.width == 0.5)
+            #expect(config.rules.count == 2)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        #expect(editor.text.contains("weight = 2.5\n[rule.size]"))
+    }
+
+    @Test("removing a missing key from a section that doesn't exist yet is a byte-identical no-op")
+    func removeMissingKeyFromAbsentSectionIsNoOp() {
+        let text = "[layout]\nmode = \"bsp\"\n"
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("duration_ms", nil, in: .animation))
+        #expect(editor.text == text)
+        #expect(!editor.text.contains("[settings.animation]"))
+    }
+
 }

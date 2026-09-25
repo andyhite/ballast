@@ -69,6 +69,11 @@ final class WindowManager: AppObserverDelegate {
     private var launchBindings: [pid_t: SpaceID] = [:]
     private var lastMouseFocusCheck = Date.distantPast
     private var configLoaded = false
+    /// True once a real config file was successfully read from disk at
+    /// least once (built-in defaults for a file that never existed do not
+    /// count). Once true, a later disappearance must never cause `editConfig`
+    /// to recreate the starter template and silently drop the live config.
+    private var configEverLoadedFromDisk = false
     /// Last focus transition, to recognise "AppKit moved focus, then the window closed".
     private var lastFocusLoss: (window: WindowID, at: Date)?
     /// Spaces already seen by a full resync (first sighting adopts the ideal BSP tree).
@@ -156,7 +161,10 @@ final class WindowManager: AppObserverDelegate {
         begin()
     }
 
-    private func loadInitialConfig() -> Bool {
+    /// Not `private`: `@testable` test seam so tests can exercise the
+    /// startup config load without going through `tryStart`'s AX/SkyLight
+    /// gates (which would need real permissions and a live WM).
+    func loadInitialConfig() -> Bool {
         guard !configLoaded else { return true }
         guard FileManager.default.fileExists(atPath: configURL.path) else {
             configNote = "No config file; using built-in defaults"
@@ -169,6 +177,7 @@ final class WindowManager: AppObserverDelegate {
             engine = Engine(config: config)
             configNote = nil
             configLoaded = true
+            configEverLoadedFromDisk = true
             return true
         case .failure(let error):
             status = .invalidConfig(error.message)
@@ -725,10 +734,21 @@ final class WindowManager: AppObserverDelegate {
         // Only a completed, still-current request says anything about constraints.
         if outcome.completed, current,
            actual.width > requested.width + 2 || actual.height > requested.height + 2 {
-            markDirty(engine.learnMinSize(id, CGSize(width: max(actual.width, requested.width),
-                                                     height: max(actual.height, requested.height))))
+            markDirty(engine.learnMinSize(id, Self.learnedMinSize(requested: requested, actual: actual)))
         }
         if pendingChecks.contains(id) { scheduleLayout() }
+    }
+
+    /// The size to feed `Engine.learnMinSize` for a completed, still-current
+    /// frame request: the actual length on the axis the window refused to
+    /// shrink to (more than 2 pt over the request), or 0 for an axis it
+    /// accepted. `learnMinSize` max-merges each axis independently, so a 0
+    /// leaves any earlier, unrelated learnt constraint on that axis untouched
+    /// instead of clamping it down (or up) to this request's length.
+    static func learnedMinSize(requested: CGRect, actual: CGRect) -> CGSize {
+        let refusedWidth = actual.width > requested.width + 2 ? actual.width : 0
+        let refusedHeight = actual.height > requested.height + 2 ? actual.height : 0
+        return CGSize(width: refusedWidth, height: refusedHeight)
     }
 
     /// Classifies frame changes the WM did not make. The AX read that
@@ -1190,8 +1210,12 @@ final class WindowManager: AppObserverDelegate {
     /// Live per-Space state (mode overrides, manual arrangements) is kept.
     func reloadConfig() {
         defer { NotificationCenter.default.post(name: Self.configDidChange, object: self) }
-        if case .invalidConfig = status { tryStart(); return }
-        defer { if status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
+        // `watcher` only exists once `launch()` has run. A config load/edit
+        // before that (e.g. tests exercising `loadInitialConfig`/`editConfig`
+        // directly on an unlaunched manager) must apply the config but never
+        // reach `tryStart`'s AX prompt or app startup.
+        if case .invalidConfig = status { if watcher != nil { tryStart() }; return }
+        defer { if watcher != nil, status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
         guard FileManager.default.fileExists(atPath: configURL.path) else {
             configError = "Config file missing at \(configURL.path); keeping the current config"
             refreshSurfaces()
@@ -1201,6 +1225,7 @@ final class WindowManager: AppObserverDelegate {
         case .success(let config):
             configError = nil
             configNote = nil
+            configEverLoadedFromDisk = true
             markDirty(engine.applyConfig(config))
             if !config.focusFlash.enabled { focusFlash.hide() }
             if status == .running { applyBindings() }
@@ -1275,16 +1300,28 @@ final class WindowManager: AppObserverDelegate {
         return result
     }
 
-    /// Reads the config file (the starter template if it does not exist
-    /// yet), applies `change`, validates the result, and — only if that
-    /// succeeds — writes it atomically to the symlink-resolved path and
-    /// reloads. On any failure nothing is written, a notification is
+    /// Reads the config file, applies `change`, validates the result, and —
+    /// only if that succeeds — writes it atomically to the symlink-resolved
+    /// path and reloads. On any failure nothing is written, a notification is
     /// posted, and the error is returned; `reloadConfig()` still posts
     /// `configDidChange` via the write path below.
+    ///
+    /// If the file does not exist, this falls back to the starter template —
+    /// but only when no real config was ever successfully loaded from disk.
+    /// Once one has been, a later disappearance (moved/renamed, briefly
+    /// absent during a dotfiles restore, …) must fail the edit instead of
+    /// silently recreating a starter over the user's config; `reloadConfig`
+    /// already keeps the live, in-memory config running in that case, and
+    /// the edit can be retried once the file reappears.
     @discardableResult
     func editConfig(_ change: (inout ConfigEditor) -> Result<Void, ConfigEditError>) -> ConfigEditError? {
         let resolvedURL = configURL.resolvingSymlinksInPath()
         let missing = !FileManager.default.fileExists(atPath: resolvedURL.path)
+        if missing, configEverLoadedFromDisk {
+            let editError = ConfigEditError("Config file missing at \(resolvedURL.path); not recreating it")
+            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
+            return editError
+        }
         let text: String
         if missing {
             text = StatusBar.starterConfig

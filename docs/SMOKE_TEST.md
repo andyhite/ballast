@@ -49,16 +49,22 @@ The script checks everything it can by reading
 `ballast send dump-state`). It pauses at each step that needs a human; after
 you press enter it counts down a few seconds so you can click back onto the
 target window before the next command fires — you never need to re-focus
-between the commands that follow one pause. The config it edits for step 1 is
-backed up to a private temp file (created fresh each run, so it never
-overwrites a backup of your own) only after the manual-override check below
-passes; it is always restored on exit, Ctrl-C, or `kill`. A symlinked config
-stays a symlink, and if the restore itself ever fails the script leaves the
-backup in place and prints where it is instead of deleting it.
+between the commands that follow one pause. Before touching anything, the
+script backs up your entire config to a private temp file (created fresh
+each run, so it never overwrites a backup of your own); if the backup can't
+be made it aborts without touching the config at all. From then on the
+original bytes are restored — via traps on normal exit, Ctrl-C, and `kill`
+— covering every setting-mutating command in every step, not just step 1's
+own reload check. Before overwriting the file, the restore polls
+`dump-state` (up to 20 checks, with 50 ms between checks) until every Space's transient mode
+override has cleared, instead of guessing a fixed delay for in-flight
+settings persistence to land. A symlinked config stays a
+symlink, and if the restore itself ever fails it exits 1 and the script
+leaves the backup in place and prints where it is instead of deleting it.
 
 | # | What the script does | What you do / expect |
 |---|---|---|
-| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_grid` isn't already that Space's mode) plus a `promote` on the first display. Only if that Space is actually manual with the override set does it back up and touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without ever touching your config. Restores `layout default` + `reset` afterwards either way. | Focus a window (2+ tiled windows on its Space) on the named FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangeme…
+| 1 | Checks that the active Spaces on the two displays have different modes. Applies an explicit `layout` override (whichever of `bsp`/`master_grid` isn't already that Space's mode) plus a `promote` on the first display. Only if that Space is actually manual with the override set does it touch the config to trigger a hot reload, then restore it exactly; otherwise it fails that check and skips the reload without further mutating the config. Restores the Space to the mode it had before this step's override (not a hard `layout default`), then `reset`, afterwards either way — the config file itself is put back to its exact original bytes by the exit/signal restore, not by this. | Focus a window (2+ tiled windows on its Space) on the named FIRST display when the countdown starts. **Expect:** the Space becomes manual with the explicit override before the config is touched, then `modes/overrides unchanged and the manual arrangeme…
 | 2 | Resets the Space, launches the light app, then launches the heavy app. | Focus a `master_grid` Space and quit the heavy app first. **Expect:** the heavy app slides into the master slot on its own, and the light app moves to the stack. The Space is still not manual. |
 | 3 | Diffs Space membership before and after your Mission Control drag. | In Mission Control, drag a tiled window onto another desktop thumbnail whose mode differs, then exit. **Expect:** the window is reported on its new Space, laid out in that Space's mode (for example it joins the BSP tree), and the source Space closes the gap. |
 | 4 | Toggles monocle on and off. Checks that every frame is identical while monocle is on and that the arrangement is restored exactly afterwards. Swaps with Reduce Motion on, then off. | **Expect:** a `Z` suffix in the menu bar while monocle is on. With Reduce Motion **on**, swaps snap instantly. With it **off**, the focused window glides (~180 ms) and the others snap. |

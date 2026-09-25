@@ -204,11 +204,21 @@ setting command (`layout …`, `master-ratio`, `master-count`, master
 
 `WindowManager.editConfig` resolves `configURL`'s symlinks first (so a
 dotfiles-managed symlink is edited in place, never replaced by a plain
-file), reads the current text (the built-in starter template if the file
-doesn't exist yet), applies the requested change with `ConfigEditor` — a
-text-preserving TOML editor that keeps comments and formatting — validates
-the result with `Config.parse`, and only then writes it atomically and
-reloads. On any failure (parse/validation error, unwritable file) nothing is
+file), reads the current text, applies the requested change with
+`ConfigEditor` — a text-preserving TOML editor that keeps comments and
+formatting and moves, removes, or skips a `[[rule]]`/`[[space]]` entry's
+owned child tables (`[rule.size]`, `[space.gaps]`, ...) as a unit with it,
+never orphaning or miscounting them as siblings — validates the result with
+`Config.parse`, and only then writes it atomically and reloads. Removing a
+key from a section that doesn't exist yet (clearing an already-absent
+setting) is a no-op: it never creates a phantom section or override just to
+leave it empty. If the file is missing, `editConfig` falls back to the
+built-in starter template only when no real config has ever been
+successfully loaded from disk; once one has, a later disappearance (moved,
+renamed, briefly absent during a dotfiles restore) fails the edit instead of
+silently recreating a starter over the user's config, and the edit can be
+retried once the file reappears. On any failure (parse/validation error,
+unwritable file, missing file after one was already loaded) nothing is
 written, a notification explains why, and the in-memory runtime override
 stays the effective value until the next successful edit. The write informs
 `ConfigWatcher` of its own content so the file-watcher's hot reload doesn't
@@ -226,11 +236,17 @@ General, Layout (defaults and every connected desktop, where a
 checked setting is a per-desktop override), Rules (ordered list plus a full
 editor), and Keyboard (a hotkey recorder that captures key codes, so
 recording doesn't depend on the keyboard layout). Text fields commit on
-Return or when focus leaves, and only when the text changed. Sliders commit
+Return or when focus leaves, and only when the text changed; the Gaps
+fields commit inner and outer independently, so changing one on the Layout
+defaults tab never touches the other's saved value. Sliders commit
 when the drag ends. While the binding editor is open,
 `WindowManager.setHotkeysSuspended` unregisters Ballast's global hotkeys,
 so a combination that is already bound is recorded instead of running its
-command.
+command. Recording a hotkey already bound to another command (by
+normalized `Hotkey` equality, so `hyper+r` and `ctrl+alt+shift+cmd+r`
+still conflict) is rejected with an inline error naming the conflicting
+command: neither binding is written, and the editor stays open so the user
+can pick a different key.
 
 ### 3.3 Master-grid and master-stack
 
@@ -286,9 +302,13 @@ window id, so the result is deterministic.
   clamped to `[bsp_min_ratio, bsp_max_ratio]` (the Weight Share Limit). A
   manual ratio wins. Learned AX minimum sizes are honored on top of this
   (see §4).
-  Grow/shrink uses the configured BSP ratio bounds; the master layouts use the
-  same ratio bounds as configuration validation, so neither command reverses
-  direction at a valid starting ratio.
+  Grow/shrink and `master-ratio <±d>` clamp the master region strictly
+  between 0.05 and 0.95 — the same bound `master_ratio` validation enforces
+  on the config file, one Double `nextUp`/`nextDown` step inside it so the
+  clamped, persisted value always parses back — and never reverse direction:
+  a delta that would cross a bound instead lands the full requested delta
+  short of it, so shrinking near 0.05 or growing near 0.95 keeps moving the
+  same way it started.
 - **Which mode a desktop gets**: a runtime override (the menu, `layout …`)
   wins until it is written back, then the desktop's `[[space]]` mode, then
   `[layout]` mode. With neither set, `LayoutSettings.mode` stays `nil` and
@@ -383,9 +403,10 @@ geometry for the scrolling (outermost) column:
 - **`AXEnhancedUserInterface = false`** is written to every app element on
   first contact.
 - **No repeated requests.** A request equal to the last request for that
-  window is not re-sent. If a window refuses a size, the actual frame is
-  recorded. If it refused to *shrink*, the engine learns a minimum size and
-  reflows the siblings around it (`learnMinSize`, honored by both layouts). It
+  window is not re-sent. If a window refuses to shrink on an axis, the
+  engine learns a minimum size for *that axis only* and reflows the
+  siblings around it (`learnMinSize`, honored by both layouts); an axis the
+  window accepted leaves any earlier learned minimum on that axis alone. It
   is never retried every pass. A learned minimum only grows, so a stale one
   (read while an app was mid-resize) squeezes its siblings for good; the
   `relayout` command forgets a Space's learned minimums, clears its
