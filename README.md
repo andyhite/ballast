@@ -9,6 +9,10 @@
   Runs with SIP fully enabled.
 </p>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Demo: Ballast tiles windows as they open and swaps two when you drag one onto the other">
+</p>
+
 ---
 
 macOS keeps owning your desktops: it creates them, switches them, and decides which
