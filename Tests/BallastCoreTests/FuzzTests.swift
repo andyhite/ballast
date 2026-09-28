@@ -185,6 +185,16 @@ struct EngineFuzzTests {
             // idealOrder set == members.
             #expect(Set(state.idealOrder) == Set(state.members), "seed \(seed) step \(step): idealOrder != members on space \(spaceID)")
 
+            // recentTiles ranks exactly the members; only windows of the
+            // focused tile's app, joined since it took focus, rank ahead of it.
+            #expect(state.recentTiles.count == state.members.count && Set(state.recentTiles) == Set(state.members),
+                    "seed \(seed) step \(step): recentTiles \(state.recentTiles) != members \(state.members) on space \(spaceID)")
+            if let focused = engine.focused, let index = state.recentTiles.firstIndex(of: focused) {
+                let pid = engine.windows[focused]?.pid
+                #expect(state.recentTiles[..<index].allSatisfy { engine.windows[$0]?.pid == pid },
+                        "seed \(seed) step \(step): another app's window ranks ahead of focused \(focused) on space \(spaceID)")
+            }
+
             // manualOrder set == members, no dups, when manual.
             if state.manual {
                 #expect(Set(state.manualOrder).count == state.manualOrder.count, "seed \(seed) step \(step): duplicate manualOrder on space \(spaceID)")
@@ -272,10 +282,11 @@ struct EngineFuzzTests {
                                 "seed \(seed) step \(step): raising \(tile) of focused \(front)'s app on space \(spaceID)")
                     }
                 }
-                // The view always holds the focused window.
-                if let focused = engine.focused, state.members.contains(focused) {
-                    #expect(layout.covered[focused] == nil,
-                            "seed \(seed) step \(step): focused \(focused) tucked behind the view on space \(spaceID)")
+                // The view always holds the front window: the tile that last
+                // took focus or joined.
+                if let front = state.recentTiles.first {
+                    #expect(layout.covered[front] == nil,
+                            "seed \(seed) step \(step): front \(front) tucked behind the view on space \(spaceID)")
                 }
             }
         }

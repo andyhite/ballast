@@ -824,6 +824,64 @@ struct EngineTests {
         #expect(engine.layout(space: 1, area: Self.area).raise == nil)
     }
 
+    @Test("a window that opens tops a scrolling stack in view before focus reaches it; only a stack window taking focus scrolls it away")
+    func newcomerShowsBeforeFocus() {
+        // Window 3 has focus when its app opens window 5; focus hasn't followed yet.
+        var engine = Self.stackEngine(count: 4)
+        _ = engine.focus(3)
+        _ = engine.addWindow(5, pid: 3, facts: WindowFacts(), space: 1)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 5, 2, 3, 4])
+        var layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.covered[5] == nil && layout.covered[3] != nil)
+        // Raising window 3 would hand it its app's focus back, over the new window.
+        #expect(layout.raise == nil && layout.behind.isEmpty)
+
+        // The master taking focus leaves the stack where it is; a stack window taking it scrolls.
+        _ = engine.focus(1)
+        #expect(engine.layout(space: 1, area: Self.area).covered[5] == nil)
+        _ = engine.focus(3)
+        layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.covered[3] == nil && layout.covered[5] != nil)
+
+        // master-grid past grid_max: the view scrolls up to the new window.
+        var grid = Self.stackEngine(.masterGrid, gridMax: 2, count: 5)
+        _ = grid.focus(5)
+        _ = grid.addWindow(6, pid: 5, facts: WindowFacts(), space: 1)
+        #expect(Set(grid.layout(space: 1, area: Self.area).covered.keys) == [3, 4, 5])
+    }
+
+    @Test("a window of another app never scrolls the focused tile out of view; with focus elsewhere it shows, raised")
+    func newcomerOfAnotherApp() {
+        var engine = Self.stackEngine(count: 4)
+        _ = engine.focus(3)
+        // Nothing can be raised over the active app's window: window 7 waits behind window 3.
+        _ = engine.addWindow(7, pid: 7, facts: WindowFacts(), space: 1)
+        var layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.covered[3] == nil && layout.covered[7] != nil)
+        #expect(layout.raise == 3)
+
+        // Focus is on the other display: window 8 shows, raised over the windows tucked behind it.
+        _ = engine.addWindow(9, pid: 9, facts: WindowFacts(), space: 4)
+        _ = engine.focus(9)
+        _ = engine.addWindow(8, pid: 8, facts: WindowFacts(), space: 1)
+        layout = engine.layout(space: 1, area: Self.area)
+        #expect(layout.covered[8] == nil)
+        #expect(layout.raise == 8)
+    }
+
+    @Test("monocle fronts a window that opens, never raising the window focus hasn't left yet over it")
+    func monocleFrontsNewcomer() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.focus(2)
+        _ = engine.perform(.monocle, space: 1, areas: Self.areas)
+        _ = engine.addWindow(3, pid: 2, facts: WindowFacts(), space: 1)
+        #expect(engine.layout(space: 1, area: Self.area).raise == nil)
+        _ = engine.focus(3)
+        #expect(engine.layout(space: 1, area: Self.area).raise == 3)
+    }
+
     // MARK: - Stage Manager passthrough
 
     @Test("passthrough forces float mode with no frames")

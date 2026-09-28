@@ -42,6 +42,13 @@ public struct SpaceState: Equatable, Sendable {
     public var masterCountOverride: Int?
     /// Tiled windows on this Space, in join order.
     public internal(set) var members: [WindowID] = []
+    /// `members` by when each last took focus or joined the Space, most
+    /// recent first. The view follows it — a scrolling stack keeps the first
+    /// in view, monocle puts it in front — so a window that just opened shows
+    /// before focus reaches it, or if focus never does. A window of another
+    /// app than a focused tile here joins right behind that tile instead:
+    /// nothing can be raised over the active app's window.
+    public internal(set) var recentTiles: [WindowID] = []
     /// Weight-computed ideal arrangement; recomputed on structural changes.
     public internal(set) var idealOrder: [WindowID] = []
     /// True once the user rearranged manually; the ideal is then not applied
@@ -65,11 +72,11 @@ public struct SpaceLayout: Equatable, Sendable {
     public var mode: LayoutMode
     public var monocle: Bool
     public var frames: [WindowID: CGRect]
-    /// Window to raise above its siblings: monocle's front window, or the
-    /// focused window in view of a scrolling stack. Never a window of the
-    /// focused window's app but the focused window itself: raising a window
-    /// makes it its app's focused window, which steals focus from an active
-    /// app.
+    /// Window to raise above its siblings: the front window (see
+    /// `SpaceState.recentTiles`) of monocle, or of a scrolling stack while
+    /// it is in view. Never a window of the focused window's app but the
+    /// focused window itself: raising a window makes it its app's focused
+    /// window, which steals focus from an active app.
     public var raise: WindowID?
     /// Stack windows tucked behind a tile while the stack scrolls, each with
     /// the strip of it left showing (zero-length when fully hidden).
@@ -211,12 +218,12 @@ public struct Engine: Sendable {
             guard let focused = frontmost, id != focused, let pid = windows[focused]?.pid else { return true }
             return windows[id]?.pid != pid
         }
-        let recentTile = state.focus.entries.first { state.members.contains($0) }
+        let front = state.recentTiles.first
         var result = SpaceLayout(mode: mode, monocle: state.monocle, frames: [:], raise: nil)
         var deck: [WindowID: [WindowID]] = [:]
         if state.monocle {
             result.frames = Dictionary(state.members.map { ($0, inner) }, uniquingKeysWith: { a, _ in a })
-            if let front = recentTile ?? state.liveOrder.first, raisable(front) { result.raise = front }
+            if let front, raisable(front) { result.raise = front }
         } else if mode == .bsp {
             result.frames = state.tree?.layout(in: inner, context: bspContext(s)) ?? [:]
             result.navigation = result.frames
@@ -227,15 +234,15 @@ public struct Engine: Sendable {
                 ratio: state.masterRatioOverride ?? s.masterRatio,
                 side: s.stackSide, gap: s.gaps.inner, stackLimit: s.stackLimit(in: mode),
                 columns: s.stackColumns(in: mode), bothSides: s.stackBothSides, peek: s.stackPeek,
-                recent: state.focus.entries, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
+                recent: state.recentTiles, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
             result.frames = plan.frames
             result.covered = plan.covered
             result.navigation = plan.navigation
             deck = plan.behind
             result.scrolling = plan.scrolling
-            // Keep the focused window in view on top of the ones tucked behind it.
-            if !plan.covered.isEmpty, let recentTile, plan.inView.contains(recentTile), raisable(recentTile) {
-                result.raise = recentTile
+            // Keep the front window in view on top of the ones tucked behind it.
+            if !plan.covered.isEmpty, let front, plan.inView.contains(front), raisable(front) {
+                result.raise = front
             }
         }
         var pinned = Set<WindowID>()
@@ -413,7 +420,12 @@ public struct Engine: Sendable {
         focused = id
         guard let space = w.space else { return [] }
         spaces[space, default: SpaceState(id: space)].focus.touch(id)
-        guard let state = spaces[space] else { return [] }
+        guard var state = spaces[space] else { return [] }
+        if let index = state.recentTiles.firstIndex(of: id) {
+            state.recentTiles.remove(at: index)
+            state.recentTiles.insert(id, at: 0)
+            spaces[space] = state
+        }
         return state.monocle || stackScrolls(state) ? [space] : []
     }
 
@@ -720,6 +732,13 @@ public struct Engine: Sendable {
         var s = spaces[space] ?? SpaceState(id: space)
         guard !s.members.contains(id) else { return }
         s.members.append(id)
+        // Shown first, as though focused, unless a tile here of another app
+        // has focus: nothing can be raised over the active app's window.
+        var rank = 0
+        if let f = focused, let index = s.recentTiles.firstIndex(of: f), windows[f]?.pid != windows[id]?.pid {
+            rank = index + 1
+        }
+        s.recentTiles.insert(id, at: rank)
         let anchor = focused.flatMap { s.tree?.contains($0) == true ? $0 : nil }
             ?? s.focus.entries.first { s.tree?.contains($0) == true }
         let axis = settings(for: space).split
@@ -736,6 +755,7 @@ public struct Engine: Sendable {
     private mutating func detach(_ id: WindowID, from space: SpaceID) -> Set<SpaceID> {
         guard var s = spaces[space], s.members.contains(id) else { return [] }
         s.members.removeAll { $0 == id }
+        s.recentTiles.removeAll { $0 == id }
         s.manualOrder.removeAll { $0 == id }
         s.frameOverrides[id] = nil
         if let tree = s.tree {
@@ -757,7 +777,10 @@ public struct Engine: Sendable {
         guard var s = spaces[space] else { return }
         // Heal any drift between members and the tree (defensive; should not happen).
         let members = s.members.filter { windows[$0] != nil }
-        if members != s.members { s.members = members }
+        if members != s.members {
+            s.members = members
+            s.recentTiles.removeAll { windows[$0] == nil }
+        }
         if Set(s.tree?.leaves ?? []) != Set(members) || (s.tree?.leaves.count ?? 0) != members.count {
             s.tree = idealTree(members, on: space)
         }
@@ -869,8 +892,7 @@ public struct Engine: Sendable {
         let plan = layout(space: space, area: area)
         guard state.monocle else { return plan.frames.filter { plan.covered[$0.key] == nil } }
         // The window `layout` raises in monocle.
-        guard let front = state.focus.entries.first(where: { state.members.contains($0) }) ?? state.liveOrder.first,
-              let frame = plan.frames[front] else { return [:] }
+        guard let front = state.recentTiles.first, let frame = plan.frames[front] else { return [:] }
         return [front: frame]
     }
 

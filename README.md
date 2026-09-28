@@ -27,7 +27,8 @@ each **(display, Space)** pair using that pair's layout mode.
   neighbors' edges peeking, and scrolls with `focus up/down` — built for
   laptop screens), `bsp`, or `float`, where Ballast leaves the desktop alone.
   Either mode can put a stack on both sides of the master with
-  `stack_both_sides`. Until you pick a mode, a laptop's built-in display gets
+  `stack_both_sides`, and a window you open joins the top of the stack, in
+  view. Until you pick a mode, a laptop's built-in display gets
   `master_stack` and external displays get `master_grid`.
 - **Dialogs float by default.** A window that isn't a standard resizable
   window — a settings pane, an update prompt, a confirmation sheet, an Open

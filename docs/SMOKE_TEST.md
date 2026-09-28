@@ -102,6 +102,12 @@ The script ends with `N passed, 0 failed`.
   the top tile. **Expect:** the clicked window scrolls into view, both
   tiles in view show in full, and the window that lost focus shows only its
   peek strip below them. Focus the master afterwards: nothing changes.
+- **New window in view:** on a `master_stack` Space with one master and 3+
+  stack windows, focus the bottom stack window and press ⌘N in its app.
+  **Expect:** the new window appears at the top of the stack, in view and
+  focused, with the next stack window's edge peeking below it. Focus the
+  master afterwards: the stack doesn't scroll. On a `master_grid` Space with
+  `grid_max = 2`, the same scrolls the grid up to the new window.
 - **Grid columns:** on a `master_grid` Space with `grid_columns = 3` and
   `grid_max = 2`, open 8 windows (plus the master). **Expect:** the stack
   splits into 3 side-by-side columns, filled nearest the master first (the

@@ -172,6 +172,12 @@ Each `SpaceState` holds:
   (invalid resulting config, unwritable file) the override is left in place
   as the effective, unsaved value and the user is notified.
 - `focus`: this Space's focus history (MRU).
+- `recentTiles`: the tiles by when each last took focus or joined the
+  Space, most recent first. It picks what a scrolling stack shows (§3.4)
+  and monocle's front window, so a window that just opened shows before
+  focus reaches it, or if focus never does. A window of another app than a
+  focused tile on its Space joins right behind that tile instead: nothing
+  can be raised over the active app's window.
 
 `reset` discards order, tree shape, and adopted frames — the *arrangement*
 only. It rebuilds the BSP tree as the ideal tree in rank order: dwindle
@@ -256,7 +262,8 @@ reorders the windows already on a Space:
 - **A window joins** at the top of the stack: right after the masters and
   any heavier windows. A window heavier than a master takes the master
   slot instead. On a manual Space it goes right after the masters whatever
-  its weight, so a manually placed master is never displaced.
+  its weight, so a manually placed master is never displaced. A scrolling
+  stack brings it into view (§3.4) without waiting for its focus.
 - **A window leaves** and the rest close up; when a master leaves, the top
   of the stack takes its slot.
 - **Weights change** (a config reload or a rule matching a new title): the
@@ -349,10 +356,13 @@ geometry for the scrolling (outermost) column:
   `(order, shown, recent)`: the view holds `recent`'s first stack window,
   and among the starting positions that do, the one that also keeps the
   next most recent one in view wins, and so on; a remaining tie goes to the
-  position nearest the start of the stack. `recent` is the Space's focus
-  history filtered to stack members, so there is no separate scroll-offset
-  state to keep in sync — the view is derived fresh from focus every layout
-  pass.
+  position nearest the start of the stack. `recent` is the Space's
+  `recentTiles` (§3.2): its tiles by when each last took focus or joined.
+  A window that opens scrolls into view at once, though a pass can run
+  before its focus reaches Ballast and some windows open without taking
+  focus; focusing the master afterwards leaves the stack where it is. There
+  is no separate scroll-offset state to keep in sync — the view is derived
+  fresh every layout pass.
 - **Navigation.** `SpaceLayout.navigation` gives directional focus/swap a
   virtual strip that continues past both ends of the view, so `focus
   down`/`focus up` (or `left`/`right` when `stack_side` is `top`/`bottom`)
@@ -368,18 +378,21 @@ geometry for the scrolling (outermost) column:
   or peeking behind it, but macOS orders windows by focus history: a window
   focused before the view scrolled, or one whose app came forward (⌘-Tab,
   the Dock, a click on another of its windows), can end up over a tile.
-  `SpaceLayout.raise` names the focused window in view, and every pass
-  re-raises it. `SpaceLayout.behind` lists the other end tiles with the
-  windows that belong behind them; each pass on an active Space reads the
-  on-screen order (`CGWindowListCopyWindowInfo`, window numbers only) and
-  raises just the tiles `tilesToRaise(frontToBack:)` finds covered, so a
-  floating window over the stack stays put unless the deck is out of order.
-  Two rules bound every raise: nothing goes over a focused floating or
-  unmanaged window on that Space (monocle's guard), and no window of the
-  focused window's app is raised but the focused window itself. `AXRaise`
-  makes a window its app's focused window, which would steal focus from an
-  active app; a background app's raised window comes to the front of every
-  app's windows but the active app's, which is all the deck needs.
+  `SpaceLayout.raise` names the front window (the first of `recentTiles`)
+  while it is in view, and every pass re-raises it. `SpaceLayout.behind`
+  lists the other end tiles with the windows that belong behind them; each
+  pass on an active Space reads the on-screen order
+  (`CGWindowListCopyWindowInfo`, window numbers only) and raises just the
+  tiles `tilesToRaise(frontToBack:)` finds covered, so a floating window
+  over the stack stays put unless the deck is out of order. Two rules bound
+  every raise: nothing goes over a focused floating or unmanaged window on
+  that Space (monocle's guard), and no window of the focused window's app
+  is raised but the focused window itself. `AXRaise` makes a window its
+  app's focused window, which would steal focus from an active app; a
+  background app's raised window comes to the front of every app's windows
+  but the active app's, which is all the deck needs. So a window the
+  focused app just opened is not raised until its own focus arrives;
+  opening it already put it in front.
 - **Why not real offscreen scrolling.** macOS won't let a titled window's
   top edge go above the menu bar or the top of a display, reassigns windows
   pushed onto a neighboring display to that display's Space instead of
