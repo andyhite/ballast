@@ -30,10 +30,11 @@ each **(display, Space)** pair using that pair's layout mode.
   `stack_both_sides`. Until you pick a mode, a laptop's built-in display gets
   `master_stack` and external displays get `master_grid`.
 - **Dialogs float by default.** A window that isn't a standard resizable
-  window — a settings pane, an update prompt, a confirmation sheet, anything
-  modal, fixed-size, or without a full-screen button — floats over the
-  window it belongs to instead of tiling. Set `float = false` on a rule, or
-  use the Window Inspector's rule buttons, for the exceptions.
+  window — a settings pane, an update prompt, a confirmation sheet, an Open
+  or Save panel, anything modal, fixed-size, or without a full-screen
+  button — floats over the window it belongs to instead of tiling. Set
+  `float = false` on a rule, or use the Window Inspector's rule buttons, for
+  the exceptions.
 - **Weighted windows.** Rules give apps a weight. Heavier windows take the master
   slot and get more room, a taller stack slot or a bigger BSP tile, the moment
   they open.

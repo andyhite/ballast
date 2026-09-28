@@ -8,6 +8,9 @@ public struct WindowFacts: Equatable, Sendable {
     public var title: String?
     public var role: String?
     public var subrole: String?
+    /// `AXIdentifier`. AppKit gives its Open and Save panels `open-panel` and
+    /// `save-panel`.
+    public var identifier: String?
     /// `AXModal`: the app runs the window modally.
     public var modal: Bool?
     /// Whether the window's size can be set (`AXSize` is settable).
@@ -18,13 +21,14 @@ public struct WindowFacts: Equatable, Sendable {
     public var fullScreen: Bool?
 
     public init(bundleID: String? = nil, appName: String? = nil, title: String? = nil,
-                role: String? = nil, subrole: String? = nil,
+                role: String? = nil, subrole: String? = nil, identifier: String? = nil,
                 modal: Bool? = nil, resizable: Bool? = nil, fullScreen: Bool? = nil) {
         self.bundleID = bundleID
         self.appName = appName
         self.title = title
         self.role = role
         self.subrole = subrole
+        self.identifier = identifier
         self.modal = modal
         self.resizable = resizable
         self.fullScreen = fullScreen
@@ -34,10 +38,13 @@ public struct WindowFacts: Equatable, Sendable {
     /// Document windows tile. Dialogs, panels, sheets, modal and fixed-size
     /// windows float, and so do windows that can't go full screen, which is
     /// how settings, update and confirmation windows usually look. Unknown
-    /// facts count as the tiling answer.
+    /// facts count as the tiling answer. Open and Save panels shown with
+    /// `begin` read as non-modal standard windows with no title-bar buttons,
+    /// so only their identifier gives them away.
     public var floatReason: FloatReason? {
         if let role, role != "AXWindow" { return .role(role) }
         if let subrole, subrole != "AXStandardWindow" { return .subrole(subrole) }
+        if identifier == "open-panel" || identifier == "save-panel" { return .filePanel }
         if modal == true { return .modal }
         if resizable == false { return .fixedSize }
         if fullScreen == false { return .noFullScreen }
@@ -49,6 +56,7 @@ public struct WindowFacts: Equatable, Sendable {
 public enum FloatReason: Equatable, Sendable, CustomStringConvertible {
     case role(String)
     case subrole(String)
+    case filePanel
     case modal
     case fixedSize
     case noFullScreen
@@ -57,6 +65,7 @@ public enum FloatReason: Equatable, Sendable, CustomStringConvertible {
         switch self {
         case .role(let role): return "role \(role)"
         case .subrole(let subrole): return "subrole \(subrole)"
+        case .filePanel: return "open/save panel"
         case .modal: return "modal window"
         case .fixedSize: return "fixed size"
         case .noFullScreen: return "no full-screen button"

@@ -72,11 +72,16 @@ final class FrameApplier {
         _ r: Request, generation: UInt64, generations: Generations, queue: DispatchQueue,
         completion: @escaping (Outcome) -> Void
     ) {
-        guard let start = AX.frame(r.element) else { completion(Outcome(actual: nil, completed: false)); return }
+        // Checked before any AX read: a request already superseded while it
+        // waited on the app's serial queue (by a newer apply, `cancel`, or
+        // `forget(window:)` on untrack) must not pay an AX round-trip — up
+        // to the 1s messaging timeout on an unresponsive app — just to have
+        // its result discarded.
         guard generations.isCurrent(r.window, generation) else {
-            completion(Outcome(actual: start, completed: false))
+            completion(Outcome(actual: nil, completed: false))
             return
         }
+        guard let start = AX.frame(r.element) else { completion(Outcome(actual: nil, completed: false)); return }
         if start.approximatelyEquals(r.target, tolerance: 0.5) {
             completion(Outcome(actual: start, completed: true))
             return
@@ -110,7 +115,7 @@ final class FrameApplier {
         queue.asyncAfter(deadline: deadline) {
             // Stale generation check happens before any further AX read.
             guard generations.isCurrent(r.window, generation) else {
-                completion(Outcome(actual: AX.frame(r.element), completed: false))
+                completion(Outcome(actual: nil, completed: false))
                 return
             }
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - begin)

@@ -99,9 +99,9 @@ mode = "float"                     # hands off this Space entirely
 # (case-insensitive), ax_role, ax_subrole. The matching rule with the most
 # match fields wins; ties go to the earlier rule. Unmatched windows: weight
 # 1, tiled only when they are standard windows (AXStandardWindow) that
-# aren't modal, can be resized, and have a full-screen button — dialogs,
-# panels, and settings/update/confirmation windows float instead. Add
-# `float = false` to a rule to tile one anyway.
+# aren't modal or an Open/Save panel, can be resized, and have a full-screen
+# button — dialogs, panels, and settings/update/confirmation windows float
+# instead. Add `float = false` to a rule to tile one anyway.
 #
 # Actions: weight (default 1), manage = false, float = true (+ placement,
 # size), sticky = true (best effort, see docs), on_self_move = snap_back|adopt.

@@ -84,6 +84,7 @@ private struct RawWindowFacts {
     let title: String?
     let role: String?
     let subrole: String?
+    let identifier: String?
     let modal: Bool?
     let resizable: Bool?
     let closeButtonPresent: Bool
@@ -187,6 +188,7 @@ final class InspectorModel: ObservableObject {
                 title: AX.string(focused, kAXTitleAttribute),
                 role: AX.string(focused, kAXRoleAttribute),
                 subrole: AX.string(focused, kAXSubroleAttribute),
+                identifier: AX.string(focused, kAXIdentifierAttribute),
                 modal: AX.bool(focused, "AXModal"),
                 resizable: AX.isSettable(focused, kAXSizeAttribute),
                 closeButtonPresent: closeButton != nil,
@@ -219,7 +221,7 @@ final class InspectorModel: ObservableObject {
         let record = windowID.flatMap { engine.windows[$0] }
         let facts = record?.facts ?? WindowFacts(
             bundleID: bundleID, appName: appName, title: raw.title, role: raw.role, subrole: raw.subrole,
-            modal: raw.modal, resizable: raw.resizable, fullScreen: raw.fullScreenButton)
+            identifier: raw.identifier, modal: raw.modal, resizable: raw.resizable, fullScreen: raw.fullScreenButton)
 
         var sections: [InspectorSnapshot.Section] = []
         sections.append(InspectorSnapshot.Section(title: "App", rows: [

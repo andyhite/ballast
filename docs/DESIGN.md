@@ -568,14 +568,20 @@ tracks.
   reports more than one Space) are left untiled.
 - **Default floating.** `WindowFacts.floatReason` (`Rules.swift`) decides
   whether a window floats when no rule sets `float` explicitly, in this
-  order: role isn't `AXWindow`, subrole isn't `AXStandardWindow`, `AXModal`
-  is true, `AXSize` isn't settable, then no full-screen button. Unknown
+  order: role isn't `AXWindow`, subrole isn't `AXStandardWindow`,
+  `AXIdentifier` is `open-panel` or `save-panel`, `AXModal` is true,
+  `AXSize` isn't settable, then no full-screen button. Unknown
   facts count as the tiling answer, so a fact Ballast can't read never turns
   a document window into a floater. `fullScreen` is judged only while the
   window's close button reads `AXEnabled = true`: macOS removes the
   full-screen button while a sheet is attached, and a window with no title
   bar has no buttons to read either way, so both cases report `nil` instead
-  of a false `.noFullScreen`. Facts are re-read on deminiaturize and unhide:
+  of a false `.noFullScreen`. AppKit's Open and Save panels need the
+  identifier check: shown non-modally (`begin(completionHandler:)`, e.g.
+  TextEdit's File → Open…) they read as resizable, non-modal
+  `AXStandardWindow`s with no title-bar buttons, sandboxed app or not, so
+  every other check says "tile". Run with `runModal()` they already read as
+  `AXDialog`. Facts are re-read on deminiaturize and unhide:
   AppKit reports a minimized window, and every window of a hidden app, as
   subrole `AXDialog`, so a window first seen in either state would otherwise
   float for good. A rule's own `float = true|false`

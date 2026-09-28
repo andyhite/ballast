@@ -247,8 +247,9 @@ final class WindowManager: AppObserverDelegate {
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             guard let observer = observers[app.processIdentifier] else { observe(app); return }
-            discoverWindows(observer)
-            if let window = observer.focusedWindow { focusChanged(to: window) }
+            discoverWindows(observer) { [weak self] in
+                if let window = observer.focusedWindow { self?.focusChanged(to: window) }
+            }
         }
         on(NSWorkspace.didHideApplicationNotification) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -353,7 +354,7 @@ final class WindowManager: AppObserverDelegate {
         // once the app is unhidden so the resolved facts are correct again.
         guard !hidden, let observer = observers[pid] else { return }
         for (id, element) in elements where engine.windows[id]?.pid == pid {
-            markDirty(engine.updateFacts(id, windowFacts(element, observer: observer)))
+            markDirty(engine.updateFacts(id, Self.windowFacts(element, observer: observer)))
         }
     }
 
@@ -388,7 +389,7 @@ final class WindowManager: AppObserverDelegate {
             markDirty(engine.setMinimized(id, !deminiaturized))
             // AppKit reports subrole AXDialog while minimized; re-read on restore.
             if deminiaturized, let pid = engine.windows[id]?.pid, let observer = observers[pid] {
-                markDirty(engine.updateFacts(id, windowFacts(element, observer: observer)))
+                markDirty(engine.updateFacts(id, Self.windowFacts(element, observer: observer)))
             }
         case kAXMovedNotification, kAXResizedNotification:
             // Only windows in the last plan can be displaced from their tile
@@ -411,16 +412,55 @@ final class WindowManager: AppObserverDelegate {
         return elements.first { CFEqual($0.value, element) }?.key
     }
 
-    private func discoverWindows(_ observer: AppObserver) {
-        for window in observer.windows { track(window, observer: observer) }
+    /// Reads every window of `observer`'s app and tracks the ones not
+    /// already known. The AX reads (`observer.windows`, then each
+    /// candidate window's role/fullscreen/facts/minimized state) run on
+    /// that app's own serial queue, not the main thread — the same
+    /// isolation `FrameApplier` already gives frame writes — so one
+    /// unresponsive app's AX round-trips during a bulk resync
+    /// (`fullResync`, called on every Space change, wake, display change,
+    /// and Mission Control exit) never block discovery, or anything else
+    /// on the main thread, for every other observed app. `completion`
+    /// (main thread) runs after every discovered window has been
+    /// committed; callers that need to act on a specific window right
+    /// after activation (e.g. following focus) must wait for it rather
+    /// than assuming discovery finished synchronously.
+    private func discoverWindows(_ observer: AppObserver, completion: (() -> Void)? = nil) {
+        guard let provider else { completion?(); return }
+        // Snapshot, not a live reference: read on the worker queue below
+        // without touching `self.elements` off the main thread. A window
+        // that starts being tracked concurrently (a live `AXWindowCreated`
+        // notification racing this discovery) is still caught safely by
+        // `commitTracked`'s own `elements[id] == nil` check on main.
+        let known = Set(elements.keys)
+        applier.perform(pid: observer.pid) {
+            var found: [(id: WindowID, element: AXUIElement, facts: WindowFacts, minimized: Bool)] = []
+            for element in observer.windows {
+                guard let id = provider.windowID(for: element), id != 0, !known.contains(id) else { continue }
+                guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { continue }
+                // Native fullscreen windows live on their own Space: ignore entirely.
+                if AX.bool(element, "AXFullScreen") == true { continue }
+                let facts = Self.windowFacts(element, observer: observer)
+                let minimized = AX.bool(element, kAXMinimizedAttribute) == true
+                found.append((id, element, facts, minimized))
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { completion?(); return }
+                for w in found {
+                    commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized)
+                }
+                completion?()
+            }
+        }
     }
 
     /// Reads a window's `WindowFacts` from AX. `fullScreen` is judged only
     /// when the close button exists and is enabled: macOS drops the
     /// full-screen button while a sheet is attached, and title-bar-less
     /// windows have no buttons at all, so both cases must read as unknown
-    /// rather than "no full-screen button".
-    private func windowFacts(_ element: AXUIElement, observer: AppObserver) -> WindowFacts {
+    /// rather than "no full-screen button". `static`: called from
+    /// `discoverWindows`'s background closure, which must not touch `self`.
+    private static func windowFacts(_ element: AXUIElement, observer: AppObserver) -> WindowFacts {
         let closeButton = AX.element(element, "AXCloseButton")
         let closeEnabled = closeButton.flatMap { AX.bool($0, kAXEnabledAttribute) } == true
         let fullScreen: Bool? = closeEnabled ? AX.element(element, "AXFullScreenButton") != nil : nil
@@ -428,18 +468,32 @@ final class WindowManager: AppObserverDelegate {
                            title: AX.string(element, kAXTitleAttribute),
                            role: AX.string(element, kAXRoleAttribute),
                            subrole: AX.string(element, kAXSubroleAttribute),
+                           identifier: AX.string(element, kAXIdentifierAttribute),
                            modal: AX.bool(element, "AXModal"),
                            resizable: AX.isSettable(element, kAXSizeAttribute),
                            fullScreen: fullScreen)
     }
 
+    /// Live path: a single window from an `AXWindowCreated` notification,
+    /// already on the main thread with the element in hand. Small enough
+    /// (one window, not a whole app's inventory) that reading its facts
+    /// inline is not worth the round trip through `discoverWindows`.
     private func track(_ element: AXUIElement, observer: AppObserver) {
         guard let provider, let id = provider.windowID(for: element), id != 0 else { return }
         if elements[id] != nil { return }
         guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { return }
         // Native fullscreen windows live on their own Space: ignore entirely.
         if AX.bool(element, "AXFullScreen") == true { return }
-        let facts = windowFacts(element, observer: observer)
+        let facts = Self.windowFacts(element, observer: observer)
+        let minimized = AX.bool(element, kAXMinimizedAttribute) == true
+        commitTracked(id, element: element, observer: observer, facts: facts, minimized: minimized)
+    }
+
+    /// Registers AX notifications for a window and adds it to the engine,
+    /// using facts already read from AX by either caller above. Always
+    /// runs on the main thread.
+    private func commitTracked(_ id: WindowID, element: AXUIElement, observer: AppObserver, facts: WindowFacts, minimized: Bool) {
+        guard elements[id] == nil else { return } // raced with a live notification for the same window
         guard observer.observe(window: element) else {
             Log.ax.notice("window \(id) of \(facts.appName ?? "?", privacy: .public) refused AX notifications; not tracked yet")
             return
@@ -447,7 +501,7 @@ final class WindowManager: AppObserverDelegate {
         elements[id] = element
         let space = resolveSpace(for: id, pid: observer.pid, element: element)
         markDirty(engine.addWindow(id, pid: observer.pid, facts: facts, space: space))
-        if AX.bool(element, kAXMinimizedAttribute) == true { markDirty(engine.setMinimized(id, true)) }
+        if minimized { markDirty(engine.setMinimized(id, true)) }
         if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
         if space.map({ engine.mode(for: $0) }) != .float { placeFloating(id, element: element) }
         if engine.windows[id]?.rule.sticky == true {
@@ -590,10 +644,31 @@ final class WindowManager: AppObserverDelegate {
 
     private func runPass() {
         passScheduled = false
-        guard status == .running else { return }
+        guard status == .running else {
+            // A resync was requested (Space change, wake, display change,
+            // Mission Control exit, `relayout`) while not running. If that's
+            // because Spaces settings were wrong and have since been fixed,
+            // this is the only place left to notice: none of those triggers
+            // reach `fullResync()`'s own `.blocked` recovery branch, because
+            // they all end at this guard first.
+            if resyncPending, case .blocked = status {
+                resyncPending = false
+                tryStart()
+            }
+            return
+        }
         if resyncPending {
             resyncPending = false
             fullResync()
+            // `fullResync` can itself set `.blocked` (Spaces settings changed
+            // while running) or transition away from `.running` some other
+            // way. Laying out dirty Spaces from a snapshot that's already
+            // known stale, or bringing a window forward on it, would fight
+            // whatever state Ballast is settling into next.
+            guard status == .running else {
+                pendingFocus = nil
+                return
+            }
         }
         classifyExternalMoves()
         let spaces = dirty
@@ -1160,7 +1235,13 @@ final class WindowManager: AppObserverDelegate {
         let destination = CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
                                  width: size.width, height: size.height).integral
         applier.cancel(id)
-        expected[id] = destination
+        // Only a window that's actually a member of a laid-out Space's plan
+        // gets its departure cleaned up by `layout()`; setting `expected`
+        // for a floating window (or one on a float-mode desktop) would
+        // leave a stale entry forever, wrongly opening the moved/resized
+        // gate meant only for tiled windows and poisoning the next
+        // `send-to-display`'s source frame.
+        if laidOut.values.contains(where: { $0.contains(id) }) { expected[id] = destination }
         lastRequested[id] = nil
         inFlight[id, default: 0] += 1
         applier.apply(.init(window: id, pid: w.pid, element: element, target: destination, animation: nil)) { [weak self] id, requested, outcome in
@@ -1346,6 +1427,24 @@ final class WindowManager: AppObserverDelegate {
         do {
             if missing {
                 try FileManager.default.createDirectory(at: resolvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            } else {
+                // Re-read immediately before writing: an external editor (or
+                // another Ballast command's debounced settings flush) may
+                // have changed the file after this edit's initial read
+                // above. Overwriting that unseen change would silently
+                // drop it; fail the edit instead so the caller can reload
+                // and retry. This narrows, rather than eliminates, the
+                // race — a write landing between this check and the write
+                // just below is still possible — but closes the window
+                // that was previously open for this whole function's
+                // read-edit-validate duration.
+                let onDisk = try? String(contentsOf: resolvedURL, encoding: .utf8)
+                guard onDisk == text else {
+                    let editError = ConfigEditError(
+                        "Config file changed on disk since this edit started; not overwriting it. Reload and retry.")
+                    Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
+                    return editError
+                }
             }
             try data.write(to: resolvedURL, options: .atomic)
         } catch {
@@ -1424,7 +1523,9 @@ final class WindowManager: AppObserverDelegate {
         ]
         let url = Self.stateDumpURL
         do {
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
             let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: url, options: .atomic)
         } catch {

@@ -122,6 +122,9 @@ The script ends with `N passed, 0 failed`.
 - **Dialogs float:** open an app's Settings window and an "About" window.
   **Expect:** both float over the tiled windows, and **Window Inspector…**
   shows the reason, e.g. `Floating — default: no full-screen button`.
+- **File panels float:** in TextEdit, choose File → Open…. **Expect:** the
+  Open panel floats where TextEdit put it, the tiled windows don't reflow,
+  and **Window Inspector…** shows `Floating — default: open/save panel`.
 - **Close fallback:** focus A, then B, then C on one Space and close C.
   Focus returns to B, not to whatever AppKit picks.
 - **Focus flash:** press `alt+l`. An accent-colored border flashes around

@@ -896,10 +896,18 @@ public struct Engine: Sendable {
         }?.0
     }
 
+    /// Overlap allowed between two windows' facing edges before they still
+    /// count as "touching" for directional focus — unrelated to
+    /// `CGRect.approximatelyEquals`'s AX-rounding tolerance (Geometry.swift),
+    /// which answers a different question (did an AX write land where
+    /// requested) at a different scale (sub-point rounding vs. deliberate
+    /// gap slack between tiles).
+    private static let directionalTouchTolerance = 4.0
+
     /// How far `r` lies past `origin`'s edge in `direction`, allowing a few
     /// points of overlap for touching edges; `nil` unless it lies beyond.
     private static func gap(from origin: CGRect, _ direction: Direction, to r: CGRect) -> Double? {
-        let tolerance = 4.0
+        let tolerance = directionalTouchTolerance
         switch direction {
         case .left: return r.maxX <= origin.minX + tolerance ? origin.minX - r.maxX : nil
         case .right: return r.minX >= origin.maxX - tolerance ? r.minX - origin.maxX : nil

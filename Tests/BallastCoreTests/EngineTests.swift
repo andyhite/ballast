@@ -491,6 +491,10 @@ struct EngineTests {
         (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", modal: true), false),
         (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", resizable: false), false),
         (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", fullScreen: false), false),
+        // Open/Save panels shown with `begin`, as read on macOS 26: standard,
+        // non-modal, resizable, and no close button, so full screen is unknown.
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", identifier: "open-panel", modal: false, resizable: true), false),
+        (WindowFacts(role: "AXWindow", subrole: "AXStandardWindow", identifier: "save-panel", modal: false, resizable: true), false),
     ])
     func dialogHeuristics(facts: WindowFacts, tiles: Bool) {
         var engine = Self.makeEngine()

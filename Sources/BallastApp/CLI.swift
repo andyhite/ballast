@@ -57,10 +57,14 @@ public enum BallastCLI {
     private static func acquireSingleInstanceLock() -> Bool {
         let cacheDir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Caches/dev.ballast")
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: cacheDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let lockPath = cacheDir.appendingPathComponent("run.lock").path
-        let fd = open(lockPath, O_CREAT | O_RDWR, 0o644)
-        guard fd >= 0 else { return true }
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        // Cannot even attempt the lock (full disk, missing/unmounted cache
+        // directory, permission denied): treat as lock-held rather than
+        // silently allowing a second instance to manage windows.
+        guard fd >= 0 else { return false }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)
             return false
@@ -71,7 +75,11 @@ public enum BallastCLI {
 
     private static func run(configURL: URL) -> Int32 {
         guard acquireSingleInstanceLock() else {
-            FileHandle.standardError.write(Data("another Ballast instance is running\n".utf8))
+            // Exit 0: launchd's `KeepAlive.SuccessfulExit = false` (see
+            // scripts/dev.ballast.plist) restarts only on a non-zero exit.
+            // Another instance already managing windows, or a lock file
+            // that could not be opened, is not a crash to loop-restart on.
+            FileHandle.standardError.write(Data("another Ballast instance is running (or its lock file could not be opened)\n".utf8))
             return 0
         }
         let app = NSApplication.shared

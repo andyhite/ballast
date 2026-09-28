@@ -205,80 +205,132 @@ public final class ConfigWatcher {
     }
 }
 
-/// A single, dynamically re-armable directory watch that always tracks the
-/// nearest existing ancestor of a target directory path. When the target
-/// directory (or one of its missing ancestors) is created, `rearm` advances
-/// the watch deeper; when the currently-watched directory itself is deleted
-/// or replaced, `rearm` steps back up to whatever ancestor still exists.
-/// Callers are expected to call `rearm` again from within `onEvent`.
+/// A dynamically re-armable set of directory watches that together notice
+/// every filesystem change that could affect where `leafParent` resolves.
+///
+/// A single watch on the nearest existing ancestor is not enough when
+/// `followSymlinks` is false: the original path may pass through a symlink
+/// *above* its immediate parent — `$BALLAST_CONFIG` or `$XDG_CONFIG_HOME`
+/// pointing into a dotfiles checkout, or `~/.config` itself symlinked
+/// wholesale, are both real layouts dotfiles managers produce. `lstat`
+/// only refuses to follow the *final* component of the path it's given;
+/// the kernel still transparently resolves every symlink above that. So
+/// naively `lstat`-ing whole candidate paths while walking upward — the
+/// original approach here — lands on the resolved leaf directory without
+/// ever noticing an ancestor symlink at all, and a later retarget of that
+/// symlink then produces no filesystem event anyone is watching for:
+/// the file it now points at can be edited forever without Ballast
+/// noticing. `rearm` instead walks the path one component at a time from
+/// the root, opening a watch on the *containing* directory of every
+/// symlink it finds along the way (so retargeting or removing that
+/// symlink is itself an event), plus the deepest existing directory
+/// reached. Callers are expected to call `rearm` again from within
+/// `onEvent`.
 private final class DirectoryChainWatcher {
-    private(set) var watchedPath: String?
-    private var source: DispatchSourceFileSystemObject?
-    private var descriptor: Int32 = -1
+    private struct Watch {
+        let path: String
+        let descriptor: Int32
+        let source: DispatchSourceFileSystemObject
+    }
+
+    private(set) var watchedPaths: [String] = []
+    private var watches: [Watch] = []
     private let onEvent: () -> Void
 
     init(onEvent: @escaping () -> Void) {
         self.onEvent = onEvent
     }
 
-    /// Re-arms the watch on the nearest existing ancestor of `leafParent`
-    /// (the directory that should eventually contain the file we care
-    /// about). No-ops if already watching that exact directory.
+    /// Re-arms the watch set for `leafParent` (the directory that should
+    /// eventually contain the file we care about). No-ops if every watch
+    /// is already open on exactly the desired set of directories.
     func rearm(leafParent: String, followSymlinks: Bool) {
-        let desired = Self.nearestExistingDirectory(at: leafParent, followSymlinks: followSymlinks)
-        if desired == watchedPath, descriptor >= 0 {
-            var openStat = stat()
-            var currentStat = stat()
-            let openIsValid = fstat(descriptor, &openStat) == 0
-            let currentIsValid = stat(desired, &currentStat) == 0
-            if openIsValid, currentIsValid,
-                openStat.st_dev == currentStat.st_dev, openStat.st_ino == currentStat.st_ino
-            {
-                return
-            }
-        }
+        let desired = followSymlinks
+            ? [Self.nearestExistingDirectory(at: leafParent)]
+            : Self.symlinkAwareChain(leafParent: leafParent)
+        if desired == watchedPaths, Self.allStillValid(watches) { return }
 
         cancel()
-
-        let fd = open(desired, O_EVTONLY)
-        guard fd >= 0 else {
-            ConfigWatcher.logger.error("failed to open directory \(desired, privacy: .public) for watching")
-            return
+        for path in desired {
+            let fd = open(path, O_EVTONLY)
+            guard fd >= 0 else {
+                ConfigWatcher.logger.error("failed to open directory \(path, privacy: .public) for watching")
+                continue
+            }
+            let src = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .delete, .rename, .attrib],
+                queue: .main
+            )
+            src.setEventHandler { [weak self] in self?.onEvent() }
+            src.setCancelHandler { close(fd) }
+            src.resume()
+            watches.append(Watch(path: path, descriptor: fd, source: src))
         }
-        descriptor = fd
-        watchedPath = desired
-
-        let src = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .delete, .rename, .attrib],
-            queue: .main
-        )
-        src.setEventHandler { [weak self] in
-            self?.onEvent()
-        }
-        src.setCancelHandler { close(fd) }
-        src.resume()
-        source = src
+        watchedPaths = watches.map(\.path)
     }
 
     func cancel() {
-        source?.cancel()
-        source = nil
-        descriptor = -1
-        watchedPath = nil
+        for watch in watches { watch.source.cancel() }
+        watches = []
+        watchedPaths = []
     }
 
-    /// Walks upward from `path` looking for the nearest existing directory.
-    /// When `followSymlinks` is false, a symlink component is treated as
-    /// not-a-directory, so the search continues to its parent — landing the
-    /// watch on the directory that contains the link rather than the
-    /// directory it points to.
-    private static func nearestExistingDirectory(at path: String, followSymlinks: Bool) -> String {
+    /// Every currently-open watch still refers, by inode, to the directory
+    /// it was opened for — nothing along the chain was deleted, replaced,
+    /// or retargeted since the last `rearm`.
+    private static func allStillValid(_ watches: [Watch]) -> Bool {
+        watches.allSatisfy { watch in
+            var openStat = stat(), currentStat = stat()
+            guard fstat(watch.descriptor, &openStat) == 0, stat(watch.path, &currentStat) == 0 else { return false }
+            return openStat.st_dev == currentStat.st_dev && openStat.st_ino == currentStat.st_ino
+        }
+    }
+
+    /// Walks `leafParent` one path component at a time from the root,
+    /// `lstat`-ing each individual component in isolation (never a
+    /// multi-component string, which the kernel would silently resolve
+    /// through any symlink above the final one). Returns, root-to-leaf:
+    /// the containing directory of every symlink component found, plus
+    /// the deepest existing directory reached — the fully resolved
+    /// `leafParent` itself when every component exists and none is a
+    /// symlink, or the nearest existing ancestor when a component is
+    /// missing.
+    private static func symlinkAwareChain(leafParent: String) -> [String] {
+        let standardized = (leafParent as NSString).standardizingPath
+        let components = standardized.split(separator: "/").map(String.init)
+        var chain: [String] = []
+        var soFar = "/"
+        for component in components {
+            let candidate = soFar == "/" ? "/\(component)" : "\(soFar)/\(component)"
+            var st = stat()
+            guard lstat(candidate, &st) == 0 else {
+                chain.append(soFar) // missing: watch the deepest existing ancestor for its creation
+                return Self.deduped(chain)
+            }
+            if (st.st_mode & S_IFMT) == S_IFLNK {
+                chain.append(soFar) // symlink component: watch its container for a retarget/removal
+            }
+            soFar = candidate
+        }
+        chain.append(soFar) // fully resolved: also watch the leaf directory itself
+        return Self.deduped(chain)
+    }
+
+    private static func deduped(_ paths: [String]) -> [String] {
+        var seen = Set<String>()
+        return paths.filter { seen.insert($0).inserted }
+    }
+
+    /// Walks upward from `path` looking for the nearest existing
+    /// directory, following symlinks throughout. Used only for the
+    /// already-resolved target path, which has no further symlinks left
+    /// to discover.
+    private static func nearestExistingDirectory(at path: String) -> String {
         var candidate = (path as NSString).standardizingPath
         while true {
             var st = stat()
-            let statResult = followSymlinks ? stat(candidate, &st) : lstat(candidate, &st)
-            if statResult == 0, (st.st_mode & S_IFMT) == S_IFDIR {
+            if stat(candidate, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR {
                 return candidate
             }
             let parent = (candidate as NSString).deletingLastPathComponent
