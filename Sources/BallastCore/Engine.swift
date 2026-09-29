@@ -16,6 +16,10 @@ public struct WindowRecord: Equatable, Sendable {
     /// Independent of `minimized`: hiding an app must not disturb minimized
     /// state, and vice versa.
     public var hidden = false
+    /// A native tab that another tab of its window group covers. The app keeps
+    /// it alive and posts no destruction, so it stays tracked but holds no
+    /// tile. Independent of `minimized` and `hidden`.
+    public var backgroundTab = false
     /// Minimum size learned from AX refusals (never shrunk below this).
     public var minSize: CGSize = .zero
 
@@ -192,7 +196,7 @@ public struct Engine: Sendable {
 
     public func isTiled(_ id: WindowID) -> Bool {
         guard let w = windows[id], let space = w.space else { return false }
-        return w.isManaged && !w.isFloating && !w.minimized && !w.hidden && !snapshot.isFullscreen(space)
+        return w.isManaged && !w.isFloating && !w.minimized && !w.hidden && !w.backgroundTab && !snapshot.isFullscreen(space)
     }
 
     public func layout(space: SpaceID, area: CGRect) -> SpaceLayout {
@@ -401,6 +405,45 @@ public struct Engine: Sendable {
         guard windows[id] != nil, windows[id]?.hidden != hidden else { return [] }
         windows[id]?.hidden = hidden
         return syncMembership(id)
+    }
+
+    /// Tracks a native tab going behind (or coming in front of) its group.
+    public mutating func setBackgroundTab(_ id: WindowID, _ background: Bool) -> Set<SpaceID> {
+        guard windows[id] != nil, windows[id]?.backgroundTab != background else { return [] }
+        windows[id]?.backgroundTab = background
+        return syncMembership(id)
+    }
+
+    /// A tab switch: `shown` comes in front in `hidden`'s place and inherits
+    /// its tile, order, and adopted frame, so the arrangement stays put.
+    /// `shown` may already be a member (a tab window the platform tracked
+    /// before it noticed the switch).
+    public mutating func swapTab(hiding hidden: WindowID, showing shown: WindowID) -> Set<SpaceID> {
+        guard hidden != shown, windows[hidden] != nil, windows[shown] != nil else { return [] }
+        windows[hidden]?.backgroundTab = true
+        windows[shown]?.backgroundTab = false
+        guard let space = windows[hidden]?.space, windows[shown]?.space == space, isTiled(shown),
+              var s = spaces[space], s.members.contains(hidden) else {
+            return syncMembership(hidden).union(syncMembership(shown))
+        }
+        func inherit(_ ids: inout [WindowID]) {
+            ids.removeAll { $0 == shown }
+            if let i = ids.firstIndex(of: hidden) { ids[i] = shown }
+        }
+        inherit(&s.members)
+        inherit(&s.recentTiles)
+        inherit(&s.idealOrder)
+        inherit(&s.manualOrder)
+        if let tree = s.tree {
+            switch tree.substituting(shown, for: hidden) {
+            case .success(let next): s.tree = next
+            case .failure: s.tree = idealTree(s.members, on: space)
+            }
+        }
+        if let frame = s.frameOverrides.removeValue(forKey: hidden) { s.frameOverrides[shown] = frame }
+        spaces[space] = s
+        recomputeIdeal(space)
+        return [space]
     }
 
     /// Records focus. Only dirties a Space whose rendering depends on focus:
@@ -673,7 +716,7 @@ public struct Engine: Sendable {
 
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
         guard let w = windows[id] else { return false }
-        return w.space == space && w.isManaged && !w.minimized && !w.hidden
+        return w.space == space && w.isManaged && !w.minimized && !w.hidden && !w.backgroundTab
     }
 
     /// Bounds must stay strictly inside Config's `master_ratio` validation

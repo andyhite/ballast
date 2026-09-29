@@ -49,6 +49,9 @@ final class WindowManager: AppObserverDelegate {
     /// window that refused a size is not retried every pass).
     private var lastRequested: [WindowID: CGRect] = [:]
     private var inFlight: [WindowID: Int] = [:]
+    /// Windows tracked since their app's tabs were last reconciled: one of
+    /// them may be the tab that just came in front of a tab that vanished.
+    private var arrivals = Set<WindowID>()
     /// Windows whose moved/resized notification still needs classifying.
     private var pendingChecks = Set<WindowID>()
     /// Windows the user is dragging (mouse was down when they moved).
@@ -370,6 +373,7 @@ final class WindowManager: AppObserverDelegate {
         switch notification {
         case kAXWindowCreatedNotification:
             track(element, observer: observer)
+            discoverWindows(observer) // reconciles native tabs
         case kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification:
             // Only the active app's focused window is the user's focus. A
             // background app's changes when a window of it closes, or when
@@ -377,6 +381,9 @@ final class WindowManager: AppObserverDelegate {
             // activation instead.
             guard observer.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
             focusChanged(to: element)
+            // A native tab switch posts no destruction: it shows up only as a
+            // new main window and a changed `AXWindows`.
+            discoverWindows(observer)
         case kAXUIElementDestroyedNotification:
             if let id = elements.first(where: { CFEqual($0.value, element) })?.key {
                 let hadFocus = lastFocusLoss.map { $0.window == id && Date().timeIntervalSince($0.at) < 0.5 } ?? false
@@ -435,8 +442,11 @@ final class WindowManager: AppObserverDelegate {
         let known = Set(elements.keys)
         applier.perform(pid: observer.pid) {
             var found: [(id: WindowID, element: AXUIElement, facts: WindowFacts, minimized: Bool)] = []
+            var visible = Set<WindowID>()
             for element in observer.windows {
-                guard let id = provider.windowID(for: element), id != 0, !known.contains(id) else { continue }
+                guard let id = provider.windowID(for: element), id != 0 else { continue }
+                visible.insert(id)
+                guard !known.contains(id) else { continue }
                 guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { continue }
                 // Native fullscreen windows live on their own Space: ignore entirely.
                 if AX.bool(element, "AXFullScreen") == true { continue }
@@ -449,9 +459,61 @@ final class WindowManager: AppObserverDelegate {
                 for w in found {
                     commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized)
                 }
+                reconcileTabs(pid: observer.pid, visible: visible, readAfter: known)
                 completion?()
             }
         }
+    }
+
+    /// Native tabs of one window group are separate windows, and the app
+    /// lists only the selected one in `AXWindows` without ever announcing
+    /// the others' departure. Given the ids the app lists now, this hides
+    /// tracked windows that dropped out and restores those that came back.
+    /// A window that came in front takes over the tile of the window that
+    /// dropped out with it, so a tab switch never rearranges the Space.
+    /// `tracked`: the windows known when `visible` was read; one tracked
+    /// since cannot have dropped out of a list that predates it.
+    private func reconcileTabs(pid: pid_t, visible: Set<WindowID>, readAfter tracked: Set<WindowID>) {
+        let fresh = arrivals.filter { visible.contains($0) && engine.windows[$0]?.pid == pid }
+        arrivals.subtract(fresh)
+        // An empty list is a failed read, not an app with no windows; a
+        // hidden app's windows are already out of the layout.
+        guard !visible.isEmpty, NSRunningApplication(processIdentifier: pid)?.isHidden != true else { return }
+        var vanished: [WindowID] = []
+        var appeared: [WindowID] = []
+        for (id, w) in engine.windows where w.pid == pid && !w.minimized {
+            // Only windows on a visible Space are expected in `AXWindows`.
+            guard let space = w.space, engine.snapshot.isActive(space) else { continue }
+            if !visible.contains(id) {
+                if !w.backgroundTab, tracked.contains(id) { vanished.append(id) }
+            } else if w.backgroundTab || fresh.contains(id) {
+                appeared.append(id)
+            }
+        }
+        appeared.sort()
+        let frames = Dictionary(uniqueKeysWithValues: appeared.map { ($0, elements[$0].flatMap(AX.frame)) })
+        for old in vanished.sorted() {
+            let space = engine.windows[old]?.space
+            let was = expected[old]
+            // Tabs of a group share one frame: the closest arrival is its successor.
+            let successor = appeared.filter { engine.windows[$0]?.space == space }.min { a, b in
+                Self.distance(frames[a] ?? nil, was) < Self.distance(frames[b] ?? nil, was)
+            }
+            if let successor {
+                appeared.removeAll { $0 == successor }
+                markDirty(engine.swapTab(hiding: old, showing: successor))
+            } else {
+                markDirty(engine.setBackgroundTab(old, true))
+            }
+        }
+        for id in appeared where engine.windows[id]?.backgroundTab == true {
+            markDirty(engine.setBackgroundTab(id, false))
+        }
+    }
+
+    private static func distance(_ a: CGRect?, _ b: CGRect?) -> CGFloat {
+        guard let a, let b else { return .infinity }
+        return abs(a.minX - b.minX) + abs(a.minY - b.minY) + abs(a.width - b.width) + abs(a.height - b.height)
     }
 
     /// Reads a window's `WindowFacts` from AX. `fullScreen` is judged only
@@ -501,6 +563,7 @@ final class WindowManager: AppObserverDelegate {
         elements[id] = element
         let space = resolveSpace(for: id, pid: observer.pid, element: element)
         markDirty(engine.addWindow(id, pid: observer.pid, facts: facts, space: space))
+        arrivals.insert(id)
         if minimized { markDirty(engine.setMinimized(id, true)) }
         if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
         if space.map({ engine.mode(for: $0) }) != .float { placeFloating(id, element: element) }
@@ -521,6 +584,7 @@ final class WindowManager: AppObserverDelegate {
         inFlight[id] = nil
         pendingChecks.remove(id)
         dragCandidates.remove(id)
+        arrivals.remove(id)
         dropPoints[id] = nil
         if drag?.window == id { endDrag() }
         snapBackTimes[id] = nil
@@ -1027,7 +1091,7 @@ final class WindowManager: AppObserverDelegate {
     /// When focus scrolls a stack, the window comes forward (activation and
     /// raise) once the previously focused window has slid off it.
     func focusWindow(_ id: WindowID, warp: Bool = true) {
-        guard let element = elements[id], let w = engine.windows[id], !w.hidden else { return }
+        guard let element = elements[id], let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
         let previousDisplay = engine.focused.flatMap(display(of:)) ?? displays.containing(currentMouseLocation())
         let covering = engine.focused == id ? nil : engine.focused
         focusGeneration &+= 1
@@ -1049,7 +1113,7 @@ final class WindowManager: AppObserverDelegate {
 
     /// Activates `id`'s app and makes `id` its frontmost, main window.
     private func bringForward(_ id: WindowID) {
-        guard let element = elements[id], let w = engine.windows[id], !w.hidden else { return }
+        guard let element = elements[id], let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
         NSRunningApplication(processIdentifier: w.pid)?.activate()
         applier.perform(pid: w.pid) {
             AX.setBool(element, kAXMainAttribute, true)
@@ -1081,7 +1145,7 @@ final class WindowManager: AppObserverDelegate {
     /// Where the focus flash draws around `id`: its planned frame, else its
     /// live one (a floating window Ballast never placed).
     private func flashFrame(_ id: WindowID) -> CGRect? {
-        guard isOnActiveSpace(id), let w = engine.windows[id], !w.hidden, !w.minimized else { return nil }
+        guard isOnActiveSpace(id), let w = engine.windows[id], !w.hidden, !w.backgroundTab, !w.minimized else { return nil }
         return expected[id] ?? elements[id].flatMap(AX.frame)
     }
 
@@ -1259,7 +1323,7 @@ final class WindowManager: AppObserverDelegate {
         let space = engine.snapshot.activeSpace(ofDisplay: target.uuid)
         if let space, let id = engine.spaces[space]?.focus.entries.first(where: {
             guard let w = engine.windows[$0] else { return false }
-            return w.space == space && !w.hidden && !w.minimized
+            return w.space == space && !w.hidden && !w.backgroundTab && !w.minimized
         }) {
             focusWindow(id)
         } else if engine.config.cursorFollowsFocus {

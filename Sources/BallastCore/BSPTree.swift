@@ -167,6 +167,20 @@ extension BSPNode {
         return .success(mapLeaves { $0 == a ? b : ($0 == b ? a : $0) })
     }
 
+    /// Hands `old`'s leaf to `new`, so `new` fills exactly the region `old`
+    /// held. A leaf `new` already occupies is dropped first (its sibling
+    /// takes that parent's place).
+    public func substituting(_ new: WindowID, for old: WindowID) -> Result<BSPNode, BSPError> {
+        if old == new { return .failure(.sameWindow(old)) }
+        guard contains(old) else { return .failure(.notFound(old)) }
+        var base = self
+        if contains(new) {
+            guard case .success(.some(let pruned)) = removing(new) else { return .failure(.notFound(new)) }
+            base = pruned
+        }
+        return .success(base.replacingLeaf(old) { _ in .leaf(new) })
+    }
+
     /// Adjusts the split directly containing `id` so `id`'s side changes share
     /// by `delta` (positive = grow). Pins that split's ratio as a manual override.
     public func resizing(_ id: WindowID, by delta: Double, context: BSPLayoutContext) -> Result<BSPNode, BSPError> {

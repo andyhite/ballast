@@ -272,6 +272,7 @@ final class InspectorModel: ObservableObject {
         }
         if record.minimized { return "Minimized" }
         if record.hidden { return "Hidden (app hidden)" }
+        if record.backgroundTab { return "Background tab" }
         if !record.isManaged {
             return record.rule.ruleIndex.map { "Not managed — rule #\($0 + 1)" } ?? "Not managed"
         }

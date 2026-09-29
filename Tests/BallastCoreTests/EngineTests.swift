@@ -1131,6 +1131,70 @@ struct EngineTests {
         // Unknown Space: no-op, does not trap.
         engine.clearSettingOverrides(999, mode: true, masterRatio: true, masterCount: true)
     }
+
+    // MARK: - Native tabs
+
+    @Test("a tab switch hands the tile to the tab that comes forward; switching back returns it")
+    func tabSwitchKeepsArrangement() {
+        var config = Config()
+        config.rules = [AppRule(match: RuleMatch(appID: "term"), actions: RuleActions(weight: 10))]
+        var engine = Self.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "slack"), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "term"), space: 1)
+        _ = engine.addWindow(3, pid: 3, facts: WindowFacts(bundleID: "mail"), space: 1)
+        let before = engine.layout(space: 1, area: Self.area).frames[2]!
+        #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
+
+        // A new tab of window 2's group is tracked, then window 2 drops out of the app's window list.
+        _ = engine.addWindow(4, pid: 2, facts: WindowFacts(bundleID: "term"), space: 1)
+        _ = engine.swapTab(hiding: 2, showing: 4)
+        var order = engine.spacesForTesting[1]!.liveOrder
+        #expect(order.first == 4)
+        #expect(Set(order) == [1, 3, 4])
+        #expect(engine.layout(space: 1, area: Self.area).frames[4] == before)
+        #expect(engine.layout(space: 1, area: Self.area).frames[2] == nil)
+
+        // Back to the first tab: no window is added or dropped, only the tile changes hands.
+        _ = engine.swapTab(hiding: 4, showing: 2)
+        order = engine.spacesForTesting[1]!.liveOrder
+        #expect(order.first == 2)
+        #expect(Set(order) == [1, 2, 3])
+        #expect(engine.layout(space: 1, area: Self.area).frames[2] == before)
+    }
+
+    @Test("a tab keeps its slot in a manually arranged Space and its BSP tile")
+    func tabSwitchKeepsManualSlot() {
+        var engine = Self.makeEngine()
+        for id: WindowID in 1...4 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        _ = engine.swap(1, 3, on: 1) // manual: order now starts 3, ...
+        let order = engine.spacesForTesting[1]!.liveOrder
+        let slot = order.firstIndex(of: 2)!
+        let frame = engine.layout(space: 1, area: Self.area).frames[2]!
+
+        _ = engine.addWindow(5, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.swapTab(hiding: 2, showing: 5)
+
+        let after = engine.spacesForTesting[1]!.liveOrder
+        #expect(after.firstIndex(of: 5) == slot)
+        #expect(!after.contains(2))
+        #expect(after.filter { $0 != 5 } == order.filter { $0 != 2 })
+        #expect(engine.layout(space: 1, area: Self.area).frames[5] == frame)
+    }
+
+    @Test("a background tab holds no tile and is never a focus target; a lone tab change of an unpaired window still works")
+    func backgroundTabIsOutOfLayout() {
+        var engine = Self.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
+        _ = engine.focus(2)
+
+        _ = engine.setBackgroundTab(2, true)
+        #expect(engine.spacesForTesting[1]!.liveOrder == [1])
+        #expect(engine.layout(space: 1, area: Self.area).frames[2] == nil)
+
+        _ = engine.setBackgroundTab(2, false)
+        #expect(Set(engine.spacesForTesting[1]!.liveOrder) == [1, 2])
+    }
 }
 
 extension Engine {
