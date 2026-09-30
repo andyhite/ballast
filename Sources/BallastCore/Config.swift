@@ -167,15 +167,31 @@ public struct Config: Equatable, Sendable {
     /// Warp the cursor to the focused window's center when focus crosses displays.
     public var cursorFollowsFocus = true
     public var layout = LayoutSettings()
-    public var spaces: [SpaceKey: LayoutOverrides] = [:]
+    /// Per-desktop overrides, keyed by how the config file addresses the desktop.
+    public var spaces: [SpaceAddress: LayoutOverrides] = [:]
     public var rules: [AppRule] = []
     public var bindings: [KeyBinding] = []
 
     public init() {}
 
+    /// The `[[space]]` entry that applies to `key`: its Space UUID entry if
+    /// there is one, else its display + ordinal entry.
+    public func address(for key: SpaceKey) -> SpaceAddress? {
+        key.addresses.first { spaces[$0] != nil }
+    }
+
+    /// Where to read and write `key`'s overrides: the entry that already
+    /// applies, else the most stable address for a new one.
+    public func writeAddress(for key: SpaceKey) -> SpaceAddress {
+        address(for: key) ?? key.preferredAddress
+    }
+
+    public func overrides(for key: SpaceKey?) -> LayoutOverrides? {
+        key.flatMap { address(for: $0) }.flatMap { spaces[$0] }
+    }
+
     public func layoutSettings(for key: SpaceKey?) -> LayoutSettings {
-        guard let key, let overrides = spaces[key] else { return layout }
-        return overrides.applied(to: layout)
+        overrides(for: key)?.applied(to: layout) ?? layout
     }
 }
 
@@ -233,34 +249,50 @@ extension Config {
         }
 
         for (index, space) in top.tables("space").enumerated() {
-            let display = space.string("display")
-            let ordinal = space.int("ordinal")
-            if space.table["display"] == nil {
-                space.error("display", "every [[space]] needs `display` (UUID) and `ordinal`")
-            }
-            if space.table["ordinal"] == nil {
-                space.error("ordinal", "every [[space]] needs `display` (UUID) and `ordinal`")
-            }
-            if let display {
-                if UUID(uuidString: display) == nil {
-                    space.error("display", "must be a display UUID (see `ballast spaces`), got '\(display)'")
+            var address: SpaceAddress?
+            if space.table["uuid"] != nil {
+                let uuid = space.string("uuid")
+                if space.table["display"] != nil || space.table["ordinal"] != nil {
+                    space.error("uuid", "`uuid` already names the desktop; remove `display` and `ordinal`")
+                } else if let uuid {
+                    if UUID(uuidString: uuid) == nil {
+                        space.error("uuid", "must be a Space UUID (see `ballast spaces`), got '\(uuid)'")
+                    } else {
+                        address = .uuid(uuid.uppercased())
+                    }
                 }
-            }
-            if let ordinal, ordinal < 1 { space.error("ordinal", "must be ≥ 1") }
-            if let display, let ordinal {
-                let key = SpaceKey(display: display.uppercased(), ordinal: ordinal)
-                if config.spaces[key] != nil {
-                    space.error("", "duplicate [[space]] for display \(display) ordinal \(ordinal) (entry \(index + 1))")
-                }
-                let overrides = readLayout(space, allowPlacement: true)
-                if overrides.bspMinRatio != nil || overrides.bspMaxRatio != nil {
-                    let clampKey = overrides.bspMinRatio != nil ? "bsp_min_ratio" : "bsp_max_ratio"
-                    validateClamp(overrides.applied(to: config.layout), reader: space, key: clampKey)
-                }
-                config.spaces[key] = overrides
             } else {
-                _ = readLayout(space, allowPlacement: true)
+                let display = space.string("display")
+                let ordinal = space.int("ordinal")
+                if space.table["display"] == nil {
+                    space.error("display", "every [[space]] needs `uuid`, or `display` (UUID) and `ordinal`")
+                }
+                if space.table["ordinal"] == nil {
+                    space.error("ordinal", "every [[space]] needs `uuid`, or `display` (UUID) and `ordinal`")
+                }
+                if let display {
+                    if UUID(uuidString: display) == nil {
+                        space.error("display", "must be a display UUID (see `ballast spaces`), got '\(display)'")
+                    }
+                }
+                if let ordinal, ordinal < 1 { space.error("ordinal", "must be ≥ 1") }
+                if let display, let ordinal {
+                    address = .position(display: display.uppercased(), ordinal: ordinal)
+                }
             }
+            guard let address else {
+                _ = readLayout(space, allowPlacement: true)
+                continue
+            }
+            if config.spaces[address] != nil {
+                space.error("", "duplicate [[space]] for \(address) (entry \(index + 1))")
+            }
+            let overrides = readLayout(space, allowPlacement: true)
+            if overrides.bspMinRatio != nil || overrides.bspMaxRatio != nil {
+                let clampKey = overrides.bspMinRatio != nil ? "bsp_min_ratio" : "bsp_max_ratio"
+                validateClamp(overrides.applied(to: config.layout), reader: space, key: clampKey)
+            }
+            config.spaces[address] = overrides
         }
 
         for rule in top.tables("rule") {
@@ -305,7 +337,7 @@ extension Config {
     ]
 
     private static func readLayout(_ r: Reader, allowPlacement: Bool) -> LayoutOverrides {
-        r.allowOnly(allowPlacement ? layoutKeys.union(["display", "ordinal"]) : layoutKeys)
+        r.allowOnly(allowPlacement ? layoutKeys.union(["display", "ordinal", "uuid"]) : layoutKeys)
         var o = LayoutOverrides()
         o.mode = r.enumeration("mode")
         if let v = r.number("master_ratio") {

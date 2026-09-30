@@ -26,7 +26,7 @@ struct LayoutPane: View {
     /// `nil` for `.defaults` (defaults never have an override to inherit from).
     private var overrides: LayoutOverrides? {
         guard case .desktop(let key) = scope else { return nil }
-        return config.spaces[key]
+        return config.overrides(for: key)
     }
 
     private var effective: LayoutSettings {
@@ -188,13 +188,13 @@ struct LayoutPane: View {
             }
 
             if !staleSpaces.isEmpty {
-                Section("Disconnected Displays") {
-                    ForEach(staleSpaces, id: \.self) { key in
+                Section("Disconnected Desktops") {
+                    ForEach(staleSpaces, id: \.self) { address in
                         HStack {
-                            Text("Disconnected display \(shortUUID(key.display)) — Desktop \(key.ordinal)")
+                            Text(staleLabel(address))
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Button("Remove") { removeSpace(key) }
+                            Button("Remove") { removeSpace(address) }
                         }
                     }
                 }
@@ -263,9 +263,17 @@ struct LayoutPane: View {
 
     // MARK: - Derived data
 
-    private var staleSpaces: [SpaceKey] {
-        let connected = Set(model.desktops.map(\.key))
-        return config.spaces.keys.filter { !connected.contains($0) }.sorted { $0.description < $1.description }
+    /// Config entries that match none of the connected desktops.
+    private var staleSpaces: [SpaceAddress] {
+        let connected = Set(model.desktops.flatMap(\.key.addresses))
+        return config.spaces.keys.filter { !connected.contains($0) }.sorted()
+    }
+
+    private func staleLabel(_ address: SpaceAddress) -> String {
+        switch address {
+        case .uuid(let uuid): "Missing desktop \(shortUUID(uuid))"
+        case .position(let display, let ordinal): "Disconnected display \(shortUUID(display)) — Desktop \(ordinal)"
+        }
     }
 
     private var modeInherited: Bool { overrides?.mode == nil }
@@ -289,7 +297,7 @@ struct LayoutPane: View {
     /// `overrides?.split` on a `Axis??` field: `nil` at the outer level means
     /// "no override", `.some(nil)` means "overridden to auto".
     private var splitOverride: BallastCore.Axis?? {
-        guard case .desktop(let key) = scope, let o = config.spaces[key] else { return nil }
+        guard case .desktop(let key) = scope, let o = config.overrides(for: key) else { return nil }
         return o.split
     }
 
@@ -357,7 +365,8 @@ struct LayoutPane: View {
         case .defaults:
             setError(manager.editConfig { $0.set(key, value, in: .layout) })
         case .desktop(let spaceKey):
-            setError(manager.editConfig { $0.set(key, value, in: .space(spaceKey)) })
+            let address = config.writeAddress(for: spaceKey)
+            setError(manager.editConfig { $0.set(key, value, in: .space(address)) })
         }
     }
 
@@ -478,10 +487,10 @@ struct LayoutPane: View {
         if let space = spaceID(for: key) {
             _ = manager.setSpaceSetting("mode", nil, space: space)
         }
-        setError(manager.editConfig { $0.removeSpace(key) })
+        setError(manager.editConfig { $0.removeSpaces(for: key) })
     }
 
-    private func removeSpace(_ key: SpaceKey) {
-        setError(manager.editConfig { $0.removeSpace(key) })
+    private func removeSpace(_ address: SpaceAddress) {
+        setError(manager.editConfig { $0.removeSpace(address) })
     }
 }

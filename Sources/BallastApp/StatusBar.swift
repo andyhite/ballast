@@ -145,7 +145,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let engine = manager.engine
         let space = desktop.space
         let current = engine.mode(for: space)
-        let overrides = manager.config.spaces[desktop.key]
+        let overrides = manager.config.overrides(for: desktop.key)
         let live = engine.spaces[space]
 
         // Picking the default mode drops the override rather than pinning
@@ -191,7 +191,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
         menu.addItem(action("Remove Desktop Overrides", enabled: enabled) { [unowned self] in
             write(desktop, "mode", nil)
-            if let error = manager.editConfig({ $0.removeSpace(desktop.key) }) { writeError(error) }
+            if let error = manager.editConfig({ $0.removeSpaces(for: desktop.key) }) { writeError(error) }
         })
         menu.addItem(action("More in Settings…") { [unowned self] in
             PreferencesWindow.show(manager: manager, desktop: desktop.key)
@@ -432,7 +432,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     }
 
     private func gapItem(_ desktop: Desktop, title: String, isOuter: Bool, current: Double, enabled: Bool) -> NSMenuItem {
-        let overrides = manager.config.spaces[desktop.key]
+        let overrides = manager.config.overrides(for: desktop.key)
         let overrideValue = isOuter ? overrides?.gapsOuter : overrides?.gapsInner
         let defaultValue = isOuter ? defaults.gaps.outer : defaults.gaps.inner
         let options = [0, 4, 8, 12, 16, 24].map { pt -> SettingOption in
@@ -453,7 +453,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     }
 
     private func writePair(_ desktop: Desktop, _ a: (String, ConfigValue?), _ b: (String, ConfigValue?)) {
-        let section = ConfigSection.space(desktop.key)
+        let section = ConfigSection.space(manager.config.writeAddress(for: desktop.key))
         let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
             if case .failure(let e) = editor.set(a.0, a.1, in: section) { return .failure(e) }
             return editor.set(b.0, b.1, in: section)
@@ -464,7 +464,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     /// Sets (or, with `newValue == nil`, removes) one gap component, keeping
     /// the other component's override as is.
     private func writeGaps(_ desktop: Desktop, isOuter: Bool, newValue: Double?) {
-        let overrides = manager.config.spaces[desktop.key]
+        let overrides = manager.config.overrides(for: desktop.key)
         let inner = isOuter ? overrides?.gapsInner : newValue
         let outer = isOuter ? newValue : overrides?.gapsOuter
         var fields: [ConfigField] = []
@@ -535,7 +535,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     static let starterConfig = """
     # Ballast config. Full reference: docs/config.example.toml in the Ballast repo.
-    # `ballast spaces` lists display UUIDs and Space ordinals for [[space]] entries.
+    # `ballast spaces` lists display and Space UUIDs plus ordinals for [[space]] entries.
 
     [layout]
     # No `mode`: master_stack on a built-in display, master_grid on external ones.

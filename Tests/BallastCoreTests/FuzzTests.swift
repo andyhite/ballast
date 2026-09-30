@@ -79,12 +79,12 @@ struct EngineFuzzTests {
         var stack = LayoutOverrides()
         stack.mode = .masterStack
         stack.stackBothSides = true
-        config.spaces[SpaceKey(display: displayA, ordinal: 2)] = stack
+        config.spaces[.position(display: displayA, ordinal: 2)] = stack
         var unlimited = LayoutOverrides()
         unlimited.gridMax = 0
         unlimited.gridColumns = 3
         unlimited.stackBothSides = true
-        config.spaces[SpaceKey(display: displayB, ordinal: 1)] = unlimited
+        config.spaces[.position(display: displayB, ordinal: 1)] = unlimited
         config.rules = [
             AppRule(match: RuleMatch(appID: "com.ghostty.app"), actions: RuleActions(weight: 8)),
             AppRule(match: RuleMatch(appID: "com.tinyspeck.slackmacgap"), actions: RuleActions(weight: 0.5)),

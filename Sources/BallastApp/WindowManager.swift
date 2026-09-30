@@ -1261,17 +1261,18 @@ final class WindowManager: AppObserverDelegate {
         let snapshot = engine.snapshot
         for (space, change) in pending {
             guard let key = snapshot.key(for: space) else { continue }
+            let address = config.writeAddress(for: key)
             let error = editConfig { editor in
                 if let mode = change.mode {
                     let value: ConfigValue? = mode.map { .string($0.rawValue) }
-                    if case .failure(let e) = editor.set("mode", value, in: .space(key)) { return .failure(e) }
+                    if case .failure(let e) = editor.set("mode", value, in: .space(address)) { return .failure(e) }
                 }
                 if let ratio = change.masterRatio,
-                   case .failure(let e) = editor.set("master_ratio", .float(ratio), in: .space(key)) {
+                   case .failure(let e) = editor.set("master_ratio", .float(ratio), in: .space(address)) {
                     return .failure(e)
                 }
                 if let count = change.masterCount,
-                   case .failure(let e) = editor.set("master_count", .integer(count), in: .space(key)) {
+                   case .failure(let e) = editor.set("master_count", .integer(count), in: .space(address)) {
                     return .failure(e)
                 }
                 return .success(())
@@ -1438,7 +1439,7 @@ final class WindowManager: AppObserverDelegate {
             for info in entry.spaces where info.kind == .user {
                 ordinal += 1
                 result.append(DesktopInfo(
-                    key: SpaceKey(display: entry.displayUUID, ordinal: ordinal), space: info.id,
+                    key: SpaceKey(display: entry.displayUUID, ordinal: ordinal, uuid: info.uuid), space: info.id,
                     displayName: display.name, builtin: entry.builtin, isActive: entry.activeSpace == info.id))
             }
         }
@@ -1535,7 +1536,8 @@ final class WindowManager: AppObserverDelegate {
         guard let spaceKey = engine.snapshot.key(for: space) else {
             return ConfigEditError("This desktop has no stable config address (fullscreen or unknown).")
         }
-        if let error = editConfig({ $0.set(key, value, in: .space(spaceKey)) }) { return error }
+        let address = config.writeAddress(for: spaceKey)
+        if let error = editConfig({ $0.set(key, value, in: .space(address)) }) { return error }
         switch key {
         case "mode": engine.clearSettingOverrides(space, mode: true, masterRatio: false, masterCount: false)
         case "master_ratio": engine.clearSettingOverrides(space, mode: false, masterRatio: true, masterCount: false)
@@ -1564,6 +1566,7 @@ final class WindowManager: AppObserverDelegate {
                 "space_id": id,
                 "display": key?.display ?? NSNull(),
                 "ordinal": key?.ordinal ?? NSNull(),
+                "uuid": key?.uuid ?? NSNull(),
                 "active": engine.snapshot.isActive(id),
                 "mode": engine.mode(for: id).rawValue,
                 "mode_override": state.modeOverride?.rawValue ?? NSNull(),

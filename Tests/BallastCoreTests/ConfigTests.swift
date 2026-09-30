@@ -231,6 +231,48 @@ struct ConfigTests {
         #expect(resolved.gaps.outer == 8)
     }
 
+    @Test("a uuid-addressed [[space]] applies to the desktop with that Space UUID wherever it sits, and beats a positional entry")
+    func uuidOverrideResolves() {
+        let uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
+        let display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
+        let text = """
+        [[space]]
+        uuid = "\(uuid.lowercased())"
+        mode = "bsp"
+
+        [[space]]
+        display = "\(display)"
+        ordinal = 2
+        mode = "float"
+        """
+        guard case .success(let config) = Config.parse(text) else {
+            Issue.record("expected parse success")
+            return
+        }
+        // Same desktop at ordinal 1 or 2: the uuid entry follows it.
+        for ordinal in [1, 2] {
+            let key = SpaceKey(display: display, ordinal: ordinal, uuid: uuid)
+            #expect(config.layoutSettings(for: key).mode == .bsp)
+        }
+        // A different desktop at ordinal 2 falls back to the positional entry.
+        let other = SpaceKey(display: display, ordinal: 2, uuid: "14D29016-BD95-4F5B-BC31-42DE47A40144")
+        #expect(config.layoutSettings(for: other).mode == .float)
+        // A desktop with no uuid reported still resolves positionally.
+        #expect(config.layoutSettings(for: SpaceKey(display: display, ordinal: 2)).mode == .float)
+    }
+
+    @Test("[[space]] must use uuid alone or display + ordinal, and uuid must be well-formed and unique")
+    func uuidSpaceValidation() {
+        let uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
+        let display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
+        #expect(Self.messages("[[space]]\nuuid = \"\(uuid)\"\nmode = \"bsp\"").isEmpty)
+        #expect(!Self.messages("[[space]]\nuuid = \"\(uuid)\"\nordinal = 1\nmode = \"bsp\"").isEmpty)
+        #expect(!Self.messages("[[space]]\nuuid = \"\(uuid)\"\ndisplay = \"\(display)\"\nmode = \"bsp\"").isEmpty)
+        #expect(!Self.messages("[[space]]\nuuid = \"not-a-uuid\"\nmode = \"bsp\"").isEmpty)
+        #expect(!Self.messages("[[space]]\nuuid = \"\(uuid)\"\n\n[[space]]\nuuid = \"\(uuid.lowercased())\"").isEmpty)
+        #expect(!Self.messages("[[space]]\nmode = \"bsp\"").isEmpty)
+    }
+
     // MARK: - Boundary accept/reject pairs
 
     @Test("master_ratio accepts values strictly inside (0.05, 0.95)")

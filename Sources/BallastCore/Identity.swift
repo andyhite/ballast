@@ -3,21 +3,27 @@ import Foundation
 /// A `CGWindowID`. Stable for the lifetime of the window.
 public typealias WindowID = UInt32
 
-/// A SkyLight managed-space id. Stable for the login session only — never
-/// persisted, never used for config addressing.
+/// A SkyLight managed-space id (`id64` / `ManagedSpaceID`). Stable for the
+/// login session only and cheap to compare, so it is the runtime key for all
+/// live state. Never persisted: use `SpaceAddress` for anything on disk.
 public typealias SpaceID = UInt64
 
-/// Stable config address of a physical (display, macOS Space) pair:
-/// the display's persistent UUID plus the 1-based ordinal of the Space among
-/// that display's *user* desktops (native-fullscreen Spaces are not counted,
-/// so full-screening an app never shifts ordinals).
+/// Runtime identity of a user desktop: which display it is on, where it sits
+/// in Mission Control order, and its Space UUID (from `com.apple.spaces`).
+///
+/// The ordinal is the 1-based position among that display's *user* desktops
+/// (native-fullscreen Spaces are not counted, so full-screening an app never
+/// shifts ordinals). `uuid` is empty when SkyLight reports none. Equality
+/// covers all three fields; config lookups go through `addresses`.
 public struct SpaceKey: Hashable, Comparable, Sendable, CustomStringConvertible {
     public let display: String
     public let ordinal: Int
+    public let uuid: String
 
-    public init(display: String, ordinal: Int) {
+    public init(display: String, ordinal: Int, uuid: String = "") {
         self.display = display
         self.ordinal = ordinal
+        self.uuid = uuid
     }
 
     public static func < (a: SpaceKey, b: SpaceKey) -> Bool {
@@ -25,6 +31,35 @@ public struct SpaceKey: Hashable, Comparable, Sendable, CustomStringConvertible 
     }
 
     public var description: String { "\(display)#\(ordinal)" }
+
+    /// Config addresses that can refer to this desktop, most stable first:
+    /// its Space UUID (follows the desktop when Mission Control reorders),
+    /// then its display + ordinal.
+    public var addresses: [SpaceAddress] {
+        let position = SpaceAddress.position(display: display, ordinal: ordinal)
+        return uuid.isEmpty ? [position] : [.uuid(uuid), position]
+    }
+
+    /// The address new config entries are written under.
+    public var preferredAddress: SpaceAddress { addresses[0] }
+}
+
+/// How a `[[space]]` config entry names a desktop. Persisted, so it must not
+/// use a `SpaceID`.
+public enum SpaceAddress: Hashable, Comparable, Sendable, CustomStringConvertible {
+    /// The desktop's Space UUID; survives reordering and reboots.
+    case uuid(String)
+    /// The display's persistent UUID plus the desktop's 1-based ordinal.
+    case position(display: String, ordinal: Int)
+
+    public static func < (a: SpaceAddress, b: SpaceAddress) -> Bool { a.description < b.description }
+
+    public var description: String {
+        switch self {
+        case .uuid(let uuid): return uuid
+        case .position(let display, let ordinal): return "\(display)#\(ordinal)"
+        }
+    }
 }
 
 /// Kind of a macOS Space as reported by `SLSCopyManagedDisplaySpaces`
@@ -91,7 +126,7 @@ public struct SpaceSnapshot: Equatable, Sendable {
             for info in display.spaces where info.kind == .user {
                 ordinal += 1
                 if info.id == space {
-                    return SpaceKey(display: display.displayUUID, ordinal: ordinal)
+                    return SpaceKey(display: display.displayUUID, ordinal: ordinal, uuid: info.uuid)
                 }
             }
         }

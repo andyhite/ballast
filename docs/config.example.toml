@@ -68,12 +68,20 @@ bsp_max_ratio = 0.75               #   a BSP split, and at most 3x (75/25) the s
                                    #   in its master or stack area
 gaps = { inner = 8, outer = 8 }
 
-# Per-(display, Space) overrides, addressed by the display's persistent UUID
-# and the Space's 1-based ordinal among that display's desktops (fullscreen
-# Spaces are not counted). `ballast spaces` prints both.
+# Per-desktop overrides. A desktop is addressed one of two ways; `ballast
+# spaces` prints both:
+#   uuid = "..."                   the desktop's own macOS Space UUID. Follows the
+#                                  desktop when you reorder or delete others in
+#                                  Mission Control. Preferred, and what Ballast
+#                                  writes when you change a setting from the UI.
+#   display = "..." + ordinal = N  the display's persistent UUID and the desktop's
+#                                  1-based position among that display's desktops
+#                                  (fullscreen Spaces are not counted). Shifts when
+#                                  desktops are reordered. The only option if
+#                                  `ballast spaces` shows no uuid for a desktop.
+# If both kinds of entry match a desktop, the uuid one wins.
 [[space]]
-display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
-ordinal = 1
+uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
 mode = "bsp"
 gaps = { inner = 12 }
 

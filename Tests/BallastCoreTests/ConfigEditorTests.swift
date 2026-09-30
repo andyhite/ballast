@@ -205,7 +205,7 @@ struct ConfigEditorTests {
     @Test("set on a missing space creates its [[space]] block after the last one")
     func createsSpaceBlock() {
         var editor = ConfigEditor(text: Self.example)
-        let key = SpaceKey(display: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", ordinal: 5)
+        let key = SpaceAddress.position(display: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", ordinal: 5)
         expectSuccess(editor.set("mode", .string("float"), in: .space(key)))
         switch editor.validated() {
         case .success(let config):
@@ -218,7 +218,7 @@ struct ConfigEditorTests {
     @Test("removeSpace deletes the whole block and space reverts to layout defaults")
     func removeSpaceBlock() {
         var editor = ConfigEditor(text: Self.example)
-        let key = SpaceKey(display: "640D0BA8-EB6C-4108-AA7B-E641F7C1826E", ordinal: 1)
+        let key = SpaceAddress.position(display: "640D0BA8-EB6C-4108-AA7B-E641F7C1826E", ordinal: 1)
         expectSuccess(editor.removeSpace(key))
         switch editor.validated() {
         case .success(let config):
@@ -231,9 +231,56 @@ struct ConfigEditorTests {
     @Test("removeSpace on an absent space is a no-op")
     func removeAbsentSpace() {
         var editor = ConfigEditor(text: Self.example)
-        let key = SpaceKey(display: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", ordinal: 9)
+        let key = SpaceAddress.position(display: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF", ordinal: 9)
         expectSuccess(editor.removeSpace(key))
         #expect(editor.text == Self.example)
+    }
+
+    @Test("editing a uuid-addressed desktop creates and updates a uuid-only [[space]] block")
+    func uuidSpaceBlockRoundTrips() {
+        let uuid = SpaceAddress.uuid("06577405-6B31-4676-9725-A2F69D4232F4")
+        var editor = ConfigEditor(text: "[layout]\nmode = \"bsp\"\n")
+        expectSuccess(editor.set("mode", .string("float"), in: .space(uuid)))
+        expectSuccess(editor.set("master_ratio", .float(0.6), in: .space(uuid)))
+        #expect(editor.text.contains("uuid = \"06577405-6B31-4676-9725-A2F69D4232F4\""))
+        #expect(!editor.text.contains("ordinal"))
+        #expect(editor.text.components(separatedBy: "[[space]]").count == 2) // one block
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.spaces[uuid]?.mode == .float)
+            #expect(config.spaces[uuid]?.masterRatio == 0.6)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+    }
+
+    @Test("removeSpaces(for:) drops both the uuid and the positional entry of a desktop, and no other")
+    func removeSpacesForKeyDropsEveryAddress() {
+        let display = "11111111-1111-1111-1111-111111111111"
+        let uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
+        let text = """
+        [[space]]
+        uuid = "\(uuid)"
+        mode = "bsp"
+
+        [[space]]
+        display = "\(display)"
+        ordinal = 1
+        mode = "float"
+
+        [[space]]
+        display = "\(display)"
+        ordinal = 2
+        mode = "float"
+        """
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.removeSpaces(for: SpaceKey(display: display, ordinal: 1, uuid: uuid)))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(Set(config.spaces.keys) == [.position(display: display, ordinal: 2)])
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
     }
 
     // MARK: - Bindings
@@ -472,11 +519,11 @@ struct ConfigEditorTests {
         inner = 12
         """
         var editor = ConfigEditor(text: text)
-        let key2 = SpaceKey(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
+        let key2 = SpaceAddress.position(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
         expectSuccess(editor.set("mode", .string("float"), in: .space(key2)))
         switch editor.validated() {
         case .success(let config):
-            let key1 = SpaceKey(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
+            let key1 = SpaceAddress.position(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
             #expect(config.spaces[key1]?.gapsInner == 12)
             #expect(config.spaces[key2]?.mode == .float)
         case .failure(let e):
@@ -489,7 +536,7 @@ struct ConfigEditorTests {
     func removeMissingKeyFromAbsentSpaceIsNoOp() {
         let text = "[layout]\nmode = \"bsp\"\n"
         var editor = ConfigEditor(text: text)
-        let key = SpaceKey(display: "33333333-3333-3333-3333-333333333333", ordinal: 3)
+        let key = SpaceAddress.position(display: "33333333-3333-3333-3333-333333333333", ordinal: 3)
         expectSuccess(editor.set("mode", nil, in: .space(key)))
         #expect(editor.text == text)
         #expect(!editor.text.contains("[[space]]"))
@@ -513,8 +560,8 @@ struct ConfigEditorTests {
         inner = 20
         """
         var editor = ConfigEditor(text: text)
-        let removed = SpaceKey(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
-        let kept = SpaceKey(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
+        let removed = SpaceAddress.position(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
+        let kept = SpaceAddress.position(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
         expectSuccess(editor.removeSpace(removed))
         switch editor.validated() {
         case .success(let config):

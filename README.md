@@ -148,10 +148,14 @@ config file, Ballast uses built-in defaults and has **no hotkeys**. Choose
 master_ratio = 0.6
 gaps = { inner = 8, outer = 8 }
 
-[[space]]                    # override one desktop: `ballast spaces` prints UUIDs + ordinals
-display = "640D0BA8-EB6C-4108-AA7B-E641F7C1826E"
-ordinal = 1
+[[space]]                    # override one desktop by its Space UUID: `ballast spaces` prints UUIDs + ordinals
+uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
 mode = "bsp"
+
+[[space]]                    # or by display UUID + position (shifts if you reorder desktops)
+display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
+ordinal = 2
+mode = "master_grid"
 
 [[space]]                    # a one-window stack on an external desktop too
 display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
@@ -199,7 +203,7 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 ```text
 ballast [run]                       start the window manager (menu bar app)
 ballast doctor                      check permissions, Spaces settings, private API availability
-ballast spaces                      list display UUIDs and Space ordinals for [[space]] config
+ballast spaces                      list display UUIDs plus Space UUIDs and ordinals for [[space]] config
 ballast check-config [PATH]         validate a config file without applying it
 ballast send <command>              send a command to the running instance
 ballast login-item [on|off|status]  start at login; launchd restarts Ballast after a crash

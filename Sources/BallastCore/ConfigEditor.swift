@@ -28,7 +28,7 @@ public enum ConfigSection: Hashable, Sendable {
     case animation
     case focusFlash
     case layout
-    case space(SpaceKey)
+    case space(SpaceAddress)
     case rule(Int)
     case bindings
 }
@@ -199,17 +199,27 @@ public struct ConfigEditor: Sendable {
     }
 
     @discardableResult
-    public mutating func removeSpace(_ key: SpaceKey) -> Result<Void, ConfigEditError> {
+    public mutating func removeSpace(_ address: SpaceAddress) -> Result<Void, ConfigEditError> {
         var lines = splitLines(text)
         guard let blocks = try? parseBlocks(lines) else {
             return .failure(ConfigEditError("could not parse document"))
         }
-        guard let block = findSpaceBlock(key, blocks: blocks, lines: lines) else {
+        guard let block = findSpaceBlock(address, blocks: blocks, lines: lines) else {
             return .success(())
         }
         let (start, end) = entryRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
         removeLineRange(start...end, lines: &lines)
         text = joinLines(lines)
+        return .success(())
+    }
+
+    /// Removes every `[[space]]` entry that addresses `key`, whether by Space
+    /// UUID or by display + ordinal.
+    @discardableResult
+    public mutating func removeSpaces(for key: SpaceKey) -> Result<Void, ConfigEditError> {
+        for address in key.addresses {
+            if case .failure(let error) = removeSpace(address) { return .failure(error) }
+        }
         return .success(())
     }
 
@@ -372,8 +382,8 @@ public struct ConfigEditor: Sendable {
         case .bindings:
             return blocks.first { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false }
                 .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
-        case .space(let key):
-            guard let block = findSpaceBlock(key, blocks: blocks, lines: lines) else { return nil }
+        case .space(let address):
+            guard let block = findSpaceBlock(address, blocks: blocks, lines: lines) else { return nil }
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
         case .rule(let index):
             let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
@@ -383,20 +393,18 @@ public struct ConfigEditor: Sendable {
         }
     }
 
-    private func findSpaceBlock(_ key: SpaceKey, blocks: [Block], lines: [String]) -> Block? {
+    private func findSpaceBlock(_ address: SpaceAddress, blocks: [Block], lines: [String]) -> Block? {
         let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
         for block in spaceBlocks {
             let bodyText = lines[(block.bodyStart - 1)..<max(block.bodyStart - 1, min(block.bodyEnd, lines.count))].joined(separator: "\n")
             guard let t = try? TOML.parse(bodyText) else { continue }
-            guard case .string(let display)? = t["display"] else { continue }
-            let ordinal: Int?
-            switch t["ordinal"] {
-            case .integer(let i)?: ordinal = Int(i)
-            default: ordinal = nil
-            }
-            guard let ordinal else { continue }
-            if display.uppercased() == key.display.uppercased() && ordinal == key.ordinal {
+            switch address {
+            case .uuid(let uuid):
+                guard case .string(let value)? = t["uuid"], value.uppercased() == uuid.uppercased() else { continue }
                 return block
+            case .position(let display, let ordinal):
+                guard case .string(let value)? = t["display"], case .integer(let i)? = t["ordinal"] else { continue }
+                if value.uppercased() == display.uppercased() && Int(i) == ordinal { return block }
             }
         }
         return nil
@@ -440,10 +448,17 @@ public struct ConfigEditor: Sendable {
             newLines.append("[bindings]")
             insert(newLines, after: lines.count, lines: &lines)
             return .success(())
-        case .space(let key):
+        case .space(let address):
             guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
             let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
-            var body = ["[[space]]", "display = \(renderScalar(.string(key.display.uppercased())))", "ordinal = \(key.ordinal)"]
+            var body = ["[[space]]"]
+            switch address {
+            case .uuid(let uuid):
+                body.append("uuid = \(renderScalar(.string(uuid.uppercased())))")
+            case .position(let display, let ordinal):
+                body.append("display = \(renderScalar(.string(display.uppercased())))")
+                body.append("ordinal = \(ordinal)")
+            }
             if let last = spaceBlocks.last {
                 var newLines: [String] = ["", body.removeFirst()]
                 newLines.append(contentsOf: body)

@@ -221,7 +221,7 @@ struct EngineTests {
             var bsp = LayoutOverrides()
             bsp.mode = .bsp
             bsp.split = .some(split)
-            config.spaces[SpaceKey(display: Self.displayA, ordinal: 1)] = bsp
+            config.spaces[.position(display: Self.displayA, ordinal: 1)] = bsp
             return config
         }
         /// Frames of the two light windows sitting next to the heavy one.
@@ -255,7 +255,7 @@ struct EngineTests {
         var bsp = LayoutOverrides()
         bsp.mode = .bsp
         bsp.bspShape = .balanced
-        config.spaces[SpaceKey(display: Self.displayA, ordinal: 1)] = bsp
+        config.spaces[.position(display: Self.displayA, ordinal: 1)] = bsp
         var engine = Self.makeEngine(config: config)
         func quarters() -> Bool {
             let frames = engine.layout(space: 1, area: Self.area).frames
@@ -289,10 +289,10 @@ struct EngineTests {
         var config = Config()
         var bspOverride = LayoutOverrides()
         bspOverride.mode = .bsp
-        config.spaces[SpaceKey(display: Self.displayA, ordinal: 1)] = bspOverride
+        config.spaces[.position(display: Self.displayA, ordinal: 1)] = bspOverride
         var floatOverride = LayoutOverrides()
         floatOverride.mode = .float
-        config.spaces[SpaceKey(display: Self.displayA, ordinal: 2)] = floatOverride
+        config.spaces[.position(display: Self.displayA, ordinal: 2)] = floatOverride
 
         let engine = Self.makeEngine(config: config)
         #expect(engine.mode(for: 1) == .bsp) // A ordinal 1
@@ -304,7 +304,7 @@ struct EngineTests {
         var config = Config()
         var ordinal2Override = LayoutOverrides()
         ordinal2Override.mode = .bsp
-        config.spaces[SpaceKey(display: Self.displayA, ordinal: 2)] = ordinal2Override
+        config.spaces[.position(display: Self.displayA, ordinal: 2)] = ordinal2Override
         var engine = Self.makeEngine(config: config)
 
         // Space 2 is ordinal 2 (bsp by config). Add a window and manually promote.
@@ -338,6 +338,26 @@ struct EngineTests {
         // The deleted Space's (id 1) state is dropped, and its window no longer points at it.
         #expect(engine.spacesForTesting[1] == nil)
         #expect(engine.windowsForTesting[3]?.space == nil)
+    }
+
+    @Test("a uuid-addressed override stays with its Space when a sibling is deleted; a positional one does not")
+    func uuidOverrideFollowsSpaceAcrossOrdinalShift() {
+        var config = Config()
+        var bsp = LayoutOverrides()
+        bsp.mode = .bsp
+        config.spaces[.uuid("a2")] = bsp
+        config.spaces[.position(display: Self.displayB, ordinal: 2)] = bsp
+        var engine = Self.makeEngine(config: config)
+        #expect(engine.mode(for: 2) == .bsp) // A ordinal 2, by uuid
+        #expect(engine.mode(for: 5) == .bsp) // B ordinal 2, by position
+
+        // Delete A1 and B1: A2 becomes ordinal 1, B2 becomes ordinal 1.
+        let a = DisplaySpaces(displayUUID: Self.displayA, spaces: [SpaceInfo(id: 2, uuid: "a2", kind: .user)], activeSpace: 2)
+        let b = DisplaySpaces(displayUUID: Self.displayB, spaces: [SpaceInfo(id: 5, uuid: "b2", kind: .user)], activeSpace: 5)
+        _ = engine.updateSnapshot(SpaceSnapshot(displays: [a, b]))
+
+        #expect(engine.mode(for: 2) == .bsp) // still matched by uuid
+        #expect(engine.mode(for: 5) == .masterGrid) // positional entry now points at nothing
     }
 
     // MARK: - Focus-history fallback
@@ -638,7 +658,7 @@ struct EngineTests {
         // A desktop's own mode beats the display.
         var desktop = LayoutOverrides()
         desktop.mode = .masterGrid
-        config.spaces[SpaceKey(display: Self.displayA, ordinal: 2)] = desktop
+        config.spaces[.position(display: Self.displayA, ordinal: 2)] = desktop
         #expect(engine(config).mode(for: 2) == .masterGrid)
 
         // An explicit [layout] mode applies to every display.

@@ -114,9 +114,12 @@ public enum BallastCLI {
                 let active = space.id == display.activeSpace ? "*" : " "
                 if space.kind == .user {
                     ordinal += 1
-                    let key = SpaceKey(display: display.displayUUID, ordinal: ordinal)
-                    let mode = config.map { " mode=\($0.layoutSettings(for: key).mode(builtin: display.builtin).rawValue)\($0.spaces[key] != nil ? " (override)" : "")" } ?? ""
-                    print("  \(active) ordinal = \(ordinal)   space id \(space.id)\(mode)")
+                    let key = SpaceKey(display: display.displayUUID, ordinal: ordinal, uuid: space.uuid)
+                    let mode = config.map {
+                        " mode=\($0.layoutSettings(for: key).mode(builtin: display.builtin).rawValue)\($0.address(for: key) != nil ? " (override)" : "")"
+                    } ?? ""
+                    let uuid = space.uuid.isEmpty ? "" : "   uuid = \"\(space.uuid)\""
+                    print("  \(active) ordinal = \(ordinal)\(uuid)   space id \(space.id)\(mode)")
                 } else {
                     print("  \(active) (fullscreen/other Space, id \(space.id) — ignored)")
                 }
@@ -179,7 +182,7 @@ public enum BallastCLI {
         usage:
           ballast [run]                start the window manager (menu bar app)
           ballast doctor               check permissions, Spaces settings, private API availability
-          ballast spaces               list display UUIDs and Space ordinals for [[space]] config
+          ballast spaces               list display UUIDs plus Space UUIDs and ordinals for [[space]] config
           ballast check-config [PATH]  validate a config file without applying it
           ballast send <command>       send a command to the running instance
           ballast login-item [on|off|status]  start at login (launchd; restarts Ballast after a crash)
