@@ -183,10 +183,31 @@ extension BSPNode {
 
     /// Adjusts the split directly containing `id` so `id`'s side changes share
     /// by `delta` (positive = grow). Pins that split's ratio as a manual override.
-    public func resizing(_ id: WindowID, by delta: Double, context: BSPLayoutContext) -> Result<BSPNode, BSPError> {
+    /// Splits whose one side holds only `hidden` leaves (windows laid out
+    /// elsewhere, like a feature) are not drawn and are skipped.
+    public func resizing(_ id: WindowID, by delta: Double, context: BSPLayoutContext,
+                         hidden: Set<WindowID> = []) -> Result<BSPNode, BSPError> {
         guard contains(id) else { return .failure(.notFound(id)) }
         if case .leaf = self { return .failure(.isRoot(id)) }
-        return .success(resized(id, delta: delta, context: context))
+        return .success(resized(id, delta: delta, context: context, hidden: hidden))
+    }
+
+    /// The tree without the leaves in `ids`, each removed leaf's sibling
+    /// taking its parent's place; `nil` when nothing is left.
+    public func without(_ ids: Set<WindowID>) -> BSPNode? {
+        guard !ids.isEmpty else { return self }
+        switch self {
+        case .leaf(let id): return ids.contains(id) ? nil : self
+        case .split(var s):
+            switch (s.first.without(ids), s.second.without(ids)) {
+            case (nil, nil): return nil
+            case (let only?, nil), (nil, let only?): return only
+            case (let a?, let b?):
+                s.first = a
+                s.second = b
+                return .split(s)
+            }
+        }
     }
 
     /// Drops every manual ratio (back to weight-derived sizing).
@@ -214,16 +235,17 @@ extension BSPNode {
     }
 
     /// Pins every split's ratio to each side's leaf-count share, so the
-    /// resulting tiles have equal area regardless of window weights.
-    public func balanced() -> BSPNode {
+    /// resulting tiles have equal area regardless of window weights. Leaves
+    /// in `hidden` (laid out elsewhere) do not count.
+    public func balanced(hiding hidden: Set<WindowID> = []) -> BSPNode {
         switch self {
         case .leaf: return self
         case .split(var s):
-            s.first = s.first.balanced()
-            s.second = s.second.balanced()
-            let firstCount = s.first.leaves.count
-            let secondCount = s.second.leaves.count
-            s.ratio = Double(firstCount) / Double(firstCount + secondCount)
+            s.first = s.first.balanced(hiding: hidden)
+            s.second = s.second.balanced(hiding: hidden)
+            let firstCount = s.first.leaves.filter { !hidden.contains($0) }.count
+            let secondCount = s.second.leaves.filter { !hidden.contains($0) }.count
+            if firstCount + secondCount > 0 { s.ratio = Double(firstCount) / Double(firstCount + secondCount) }
             return .split(s)
         }
     }
@@ -396,8 +418,18 @@ extension BSPNode {
         }
     }
 
-    private func resized(_ id: WindowID, delta: Double, context: BSPLayoutContext) -> BSPNode {
+    private func resized(_ id: WindowID, delta: Double, context: BSPLayoutContext, hidden: Set<WindowID>) -> BSPNode {
         guard case .split(var s) = self else { return self }
+        if !hidden.isEmpty {
+            let firstGone = s.first.leaves.allSatisfy(hidden.contains)
+            let secondGone = s.second.leaves.allSatisfy(hidden.contains)
+            if firstGone || secondGone {
+                // Not drawn: only the side still showing matters.
+                if secondGone { s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden) }
+                else { s.second = s.second.resized(id, delta: delta, context: context, hidden: hidden) }
+                return .split(s)
+            }
+        }
         let current = Self.effectiveRatio(s, weight: context.weight, minRatio: context.minRatio, maxRatio: context.maxRatio)
         let lo = min(context.minRatio, context.maxRatio), hi = max(context.minRatio, context.maxRatio)
         if s.first == .leaf(id) {
@@ -405,9 +437,9 @@ extension BSPNode {
         } else if s.second == .leaf(id) {
             s.ratio = min(max(current - delta, lo), hi)
         } else if s.first.contains(id) {
-            s.first = s.first.resized(id, delta: delta, context: context)
+            s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden)
         } else {
-            s.second = s.second.resized(id, delta: delta, context: context)
+            s.second = s.second.resized(id, delta: delta, context: context, hidden: hidden)
         }
         return .split(s)
     }

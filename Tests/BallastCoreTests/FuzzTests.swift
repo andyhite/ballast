@@ -27,64 +27,73 @@ struct EngineFuzzTests {
         displayB: CGRect(x: 1600, y: 0, width: 1600, height: 1000),
     ]
 
-    static func snapshotFull() -> SpaceSnapshot {
+    static func snapshotFull(smallA: Bool = false, smallB: Bool = false) -> SpaceSnapshot {
         let a = DisplaySpaces(displayUUID: displayA, spaces: [
             SpaceInfo(id: 1, uuid: "a1", kind: .user),
             SpaceInfo(id: 2, uuid: "a2", kind: .user),
             SpaceInfo(id: 3, uuid: "a3", kind: .fullscreen),
-        ], activeSpace: 1)
+        ], activeSpace: 1, small: smallA)
         let b = DisplaySpaces(displayUUID: displayB, spaces: [
             SpaceInfo(id: 4, uuid: "b1", kind: .user),
             SpaceInfo(id: 5, uuid: "b2", kind: .user),
             SpaceInfo(id: 6, uuid: "b3", kind: .fullscreen),
-        ], activeSpace: 4)
+        ], activeSpace: 4, small: smallB)
         return SpaceSnapshot(displays: [a, b])
     }
 
     /// A Space is deleted (space 2 dropped) relative to `snapshotFull`.
-    static func snapshotSpaceDeleted() -> SpaceSnapshot {
+    static func snapshotSpaceDeleted(smallA: Bool = false, smallB: Bool = false) -> SpaceSnapshot {
         let a = DisplaySpaces(displayUUID: displayA, spaces: [
             SpaceInfo(id: 1, uuid: "a1", kind: .user),
             SpaceInfo(id: 3, uuid: "a3", kind: .fullscreen),
-        ], activeSpace: 1)
+        ], activeSpace: 1, small: smallA)
         let b = DisplaySpaces(displayUUID: displayB, spaces: [
             SpaceInfo(id: 4, uuid: "b1", kind: .user),
             SpaceInfo(id: 5, uuid: "b2", kind: .user),
             SpaceInfo(id: 6, uuid: "b3", kind: .fullscreen),
-        ], activeSpace: 4)
+        ], activeSpace: 4, small: smallB)
         return SpaceSnapshot(displays: [a, b])
     }
 
     /// Display B unplugged relative to `snapshotFull`.
-    static func snapshotDisplayUnplugged() -> SpaceSnapshot {
+    static func snapshotDisplayUnplugged(smallA: Bool = false) -> SpaceSnapshot {
         let a = DisplaySpaces(displayUUID: displayA, spaces: [
             SpaceInfo(id: 1, uuid: "a1", kind: .user),
             SpaceInfo(id: 2, uuid: "a2", kind: .user),
             SpaceInfo(id: 3, uuid: "a3", kind: .fullscreen),
-        ], activeSpace: 1)
+        ], activeSpace: 1, small: smallA)
         return SpaceSnapshot(displays: [a])
     }
 
     static let allSpaceIDs: [SpaceID] = [1, 2, 3, 4, 5, 6]
     static let knownAppIDs = ["com.a.app", "com.b.app", "com.ghostty.app", "com.tinyspeck.slackmacgap"]
 
-    /// Two-column master-grid scrolling past two windows per column by
-    /// default, one both-sides master-stack desktop and one unlimited
-    /// three-column both-sides grid, so every master layout shape runs.
+    /// Two-column fixed grid scrolling past two windows per column with a
+    /// left feature by default, a centered-feature 1×1 deck desktop, an
+    /// unlimited three-column centered-feature desktop, an adaptive desktop,
+    /// and a dwindle desktop, so every arrangement shape runs.
     static func configA() -> Config {
         var config = Config()
-        config.layout.gridMax = 2
-        config.layout.stackPeek = 24
-        config.layout.gridColumns = 2
-        var stack = LayoutOverrides()
-        stack.mode = .masterStack
-        stack.stackBothSides = true
-        config.spaces[.position(display: displayA, ordinal: 2)] = stack
+        config.layout.arrange = .fixed
+        config.layout.rows = 2
+        config.layout.deckPeek = 24
+        config.layout.columns = 2
+        config.layout.feature = .left
+        var deck = LayoutOverrides()
+        deck.feature = .center
+        deck.rows = 1
+        deck.columns = 1
+        config.spaces[.position(display: displayA, ordinal: 2)] = deck
         var unlimited = LayoutOverrides()
-        unlimited.gridMax = 0
-        unlimited.gridColumns = 3
-        unlimited.stackBothSides = true
+        unlimited.feature = .center
+        unlimited.rows = 0
+        unlimited.columns = 3
+        unlimited.featureCount = 2
         config.spaces[.position(display: displayB, ordinal: 1)] = unlimited
+        var adaptive = LayoutOverrides()
+        adaptive.arrange = .adaptive
+        adaptive.feature = .off
+        config.spaces[.position(display: displayB, ordinal: 2)] = adaptive
         config.rules = [
             AppRule(match: RuleMatch(appID: "com.ghostty.app"), actions: RuleActions(weight: 8)),
             AppRule(match: RuleMatch(appID: "com.tinyspeck.slackmacgap"), actions: RuleActions(weight: 0.5)),
@@ -92,9 +101,32 @@ struct EngineFuzzTests {
         return config
     }
 
-    static func configB() -> Config {
+    static let arrangements: [Arrangement] = [.fixed, .adaptive, .dwindle, .balanced, .float]
+    static let featureSides: [FeatureSide] = [.off, .left, .right, .top, .bottom, .center]
+
+    /// Random overrides: every key is set or left to the cascade, always
+    /// inside its config range.
+    static func randomOverrides(_ rng: inout SplitMix64) -> LayoutOverrides {
+        var o = LayoutOverrides()
+        if rng.next() % 3 != 0 { o.arrange = arrangements.randomElement(using: &rng) }
+        if rng.next() % 3 != 0 { o.feature = featureSides.randomElement(using: &rng) }
+        if rng.next() % 3 != 0 { o.columns = Int(rng.next() % 8) + 1 }
+        if rng.next() % 3 != 0 { o.rows = Int(rng.next() % 17) }
+        if rng.next() % 3 != 0 { o.featureCount = Int(rng.next() % 16) + 1 }
+        if rng.next() % 3 != 0 { o.featureSize = 0.06 + Double(rng.next() % 89) / 100 }
+        if rng.next() % 3 != 0 { o.deckPeek = Double(rng.next() % 201) }
+        return o
+    }
+
+    /// A config with random `[layout]` and `[[space]]` overrides.
+    static func randomConfig(_ rng: inout SplitMix64) -> Config {
         var config = Config()
-        config.layout.mode = .bsp
+        config.layout = randomOverrides(&rng)
+        for display in [displayA, displayB] {
+            for ordinal in 1...2 where rng.next() % 2 == 0 {
+                config.spaces[.position(display: display, ordinal: ordinal)] = randomOverrides(&rng)
+            }
+        }
         config.rules = [
             AppRule(match: RuleMatch(appID: "com.a.app"), actions: RuleActions(weight: 3)),
         ]
@@ -145,45 +177,70 @@ struct EngineFuzzTests {
     }
 
     static func randomCommand(_ rng: inout SplitMix64) -> Command {
-        let direction = [Direction.left, .right, .up, .down].randomElement(using: &rng)!
+        let direction = [Direction.left, .right, .up, .down].randomElement(using: &rng) ?? .left
         let cycle: Cycle = Bool.random(using: &rng) ? .next : .prev
-        switch rng.next() % 16 {
+        switch rng.next() % 21 {
         case 0: return .focus(direction)
         case 1: return .swap(direction)
         case 2: return .focusLast
         case 3: return .promote
         case 4: return .reset
-        case 5: return .layout([.set(.masterGrid), .set(.masterStack), .set(.bsp), .set(.float), .next, .previous, .configDefault].randomElement(using: &rng)!)
-        case 6: return .monocle
-        case 7: return .toggleFloat
-        case 8: return .resize(Double(Int(rng.next() % 21) - 10) / 20)
-        case 9: return .masterRatio(Double(Int(rng.next() % 21) - 10) / 20)
-        case 10: return .masterCount(Int(rng.next() % 7) - 3)
-        case 11: return .balance
-        case 12: return .sendToDisplay(cycle)
-        case 13: return .focusMaster
-        case 14: return .relayout
+        case 5: return .monocle
+        case 6: return .toggleFloat
+        case 7: return .resize(Double(Int(rng.next() % 21) - 10) / 20)
+        case 8: return .featureSize(Double(Int(rng.next() % 41) - 20) / 10)
+        case 9: return .featureCount(Int(rng.next() % 41) - 20)
+        case 10: return .balance
+        case 11: return .sendToDisplay(cycle)
+        case 12: return .focusFeature
+        case 13: return .relayout
+        case 14, 15: return .deck(direction)
+        case 16: return .undeck
+        case 17: return .monocle
+        case 18: return .focus(direction)
+        case 19: return .swap(direction)
         default: return .focusDisplay(cycle)
         }
     }
 
     /// Verifies every documented Engine invariant after a mutation.
     static func assertInvariants(_ engine: Engine, seed: UInt64, step: Int) {
+        // Effective settings stay inside the config ranges on every Space.
+        for spaceID in allSpaceIDs + [999] {
+            let s = engine.settings(for: spaceID)
+            #expect((1...8).contains(s.columns) && (0...16).contains(s.rows) && (1...16).contains(s.featureCount)
+                        && s.featureSize > 0.05 && s.featureSize < 0.95 && (0...200).contains(s.deckPeek),
+                    "seed \(seed) step \(step): settings out of range on space \(spaceID): \(s)")
+        }
+
         for (spaceID, state) in engine.spaces {
             // Members unique.
             #expect(Set(state.members).count == state.members.count, "seed \(seed) step \(step): duplicate members on space \(spaceID)")
 
-            // Tree leaves == members, leaves unique.
+            // Decks: two windows at least, the holder among them, only members, none in two decks.
+            var decked = Set<WindowID>()
+            for (holder, list) in state.decks {
+                #expect(list.count >= 2 && list.contains(holder) && Set(list).count == list.count,
+                        "seed \(seed) step \(step): malformed deck \(list) held by \(holder) on space \(spaceID)")
+                #expect(list.allSatisfy { state.members.contains($0) && decked.insert($0).inserted },
+                        "seed \(seed) step \(step): deck \(list) has a non-member or shares a window on space \(spaceID)")
+            }
+            #expect(state.tiles.count == state.members.count - decked.count + state.decks.count,
+                    "seed \(seed) step \(step): tile count off on space \(spaceID)")
+            #expect(state.tileCount == state.tiles.count)
+
+            // Tree leaves == tiles (a deck's holder stands for it), leaves unique.
             if let tree = state.tree {
                 let leaves = tree.leaves
                 #expect(Set(leaves).count == leaves.count, "seed \(seed) step \(step): duplicate tree leaves on space \(spaceID)")
-                #expect(Set(leaves) == Set(state.members), "seed \(seed) step \(step): tree leaves != members on space \(spaceID)")
+                #expect(Set(leaves) == Set(state.tiles), "seed \(seed) step \(step): tree leaves != tiles on space \(spaceID)")
             } else {
                 #expect(state.members.isEmpty, "seed \(seed) step \(step): nil tree but non-empty members on space \(spaceID)")
             }
 
-            // idealOrder set == members.
-            #expect(Set(state.idealOrder) == Set(state.members), "seed \(seed) step \(step): idealOrder != members on space \(spaceID)")
+            // idealOrder set == tiles.
+            #expect(Set(state.idealOrder) == Set(state.tiles) && state.idealOrder.count == state.tiles.count,
+                    "seed \(seed) step \(step): idealOrder != tiles on space \(spaceID)")
 
             // recentTiles ranks exactly the members; only windows of the
             // focused tile's app, joined since it took focus, rank ahead of it.
@@ -198,7 +255,7 @@ struct EngineFuzzTests {
             // manualOrder set == members, no dups, when manual.
             if state.manual {
                 #expect(Set(state.manualOrder).count == state.manualOrder.count, "seed \(seed) step \(step): duplicate manualOrder on space \(spaceID)")
-                #expect(Set(state.manualOrder) == Set(state.members), "seed \(seed) step \(step): manualOrder != members on space \(spaceID)")
+                #expect(Set(state.manualOrder) == Set(state.tiles), "seed \(seed) step \(step): manualOrder != tiles on space \(spaceID)")
             }
 
             // Every member's WindowRecord exists, space matches, isTiled true.
@@ -224,15 +281,44 @@ struct EngineFuzzTests {
             for area in areas {
                 let layout = engine.layout(space: spaceID, area: area)
                 let frames = layout.frames
-                if layout.mode != .float {
+                if layout.arrangement != .float {
                     #expect(Set(frames.keys) == Set(state.members),
-                            "seed \(seed) step \(step): layout \(layout.mode) frames \(Set(frames.keys)) != members \(Set(state.members)) on space \(spaceID) area \(area)")
+                            "seed \(seed) step \(step): layout \(layout.arrangement) frames \(Set(frames.keys)) != members \(Set(state.members)) on space \(spaceID) area \(area)")
                 }
                 for (id, frame) in frames {
                     #expect(state.members.contains(id), "seed \(seed) step \(step): layout frame for non-member \(id) on space \(spaceID)")
                     #expect(frame.width.isFinite && frame.height.isFinite && frame.minX.isFinite && frame.minY.isFinite,
                             "seed \(seed) step \(step): non-finite frame for \(id)")
                     #expect(frame.size.width >= 0 && frame.size.height >= 0, "seed \(seed) step \(step): negative frame size for \(id)")
+                }
+                // Monocle keeps every tiled window framed (above) and inside
+                // the area, unless a window refuses to shrink or adopted its
+                // own frame.
+                if layout.monocle && layout.arrangement != .float && state.frameOverrides.isEmpty
+                    && state.members.allSatisfy({ engine.windows[$0]?.minSize == .zero }) {
+                    let eps = 1e-6
+                    for (id, frame) in frames {
+                        #expect(frame.minX >= area.minX - eps && frame.minY >= area.minY - eps
+                                    && frame.maxX <= area.maxX + eps && frame.maxY <= area.maxY + eps,
+                                "seed \(seed) step \(step): monocle frame \(frame) for \(id) outside \(area) on space \(spaceID)")
+                    }
+                }
+                // The feature never shares room with the grid: no window of a
+                // featured tile in view overlaps one of another tile in view.
+                let settings = engine.settings(for: spaceID)
+                if !layout.monocle && settings.hasFeature && state.frameOverrides.isEmpty {
+                    let order = settings.arrange.isTree ? (state.tree?.leaves ?? []) : state.liveOrder
+                    let count = FeatureLayout.featuredCount(feature: settings.effectiveFeature, count: settings.featureCount, total: order.count)
+                    let featured = Set(order.prefix(count))
+                    let visible = frames.filter { layout.covered[$0.key] == nil && $0.value.width > 0 && $0.value.height > 0 }
+                    let inFeature = visible.filter { featured.contains(state.tile(of: $0.key)) }
+                    let inGrid = visible.filter { !featured.contains(state.tile(of: $0.key)) }
+                    for (f, featureFrame) in inFeature {
+                        for (g, gridFrame) in inGrid {
+                            #expect(!Self.overlaps(featureFrame, gridFrame),
+                                    "seed \(seed) step \(step): feature \(f) overlaps grid tile \(g) on space \(spaceID) area \(area)")
+                        }
+                    }
                 }
                 if !layout.monocle && state.frameOverrides.isEmpty {
                     // Tiles never overlap; a scrolling stack's tucked windows
@@ -259,7 +345,7 @@ struct EngineFuzzTests {
                 }
                 #expect(Set(layout.covered.keys).isSubset(of: Set(frames.keys)),
                         "seed \(seed) step \(step): covered windows without a frame on space \(spaceID)")
-                if layout.mode != .float && !layout.monocle {
+                if layout.arrangement != .float && !layout.monocle {
                     #expect(Set(layout.navigation.keys) == Set(frames.keys),
                             "seed \(seed) step \(step): navigation keys != frame keys on space \(spaceID)")
                 }
@@ -310,8 +396,8 @@ struct EngineFuzzTests {
     @Test("random operation sequences preserve Engine invariants", arguments: [UInt64(1), 2, 3, 4, 5])
     func randomOperations(seed: UInt64) {
         var rng = SplitMix64(seed: seed)
-        var engine = Engine(config: Self.configA())
-        _ = engine.updateSnapshot(Self.snapshotFull())
+        var engine = Engine(config: seed % 2 == 1 ? Self.configA() : Self.randomConfig(&rng))
+        _ = engine.updateSnapshot(Self.snapshotFull(smallA: rng.next() % 2 == 0, smallB: rng.next() % 2 == 0))
         var knownIDs: [WindowID] = []
 
         for step in 0..<3000 {
@@ -356,10 +442,16 @@ struct EngineFuzzTests {
                                     width: Double(rng.next() % 800), height: Double(rng.next() % 800))
                 _ = engine.adoptFrame(id, frame)
             case 9:
-                switch rng.next() % 3 {
+                switch rng.next() % 4 {
                 case 0: _ = engine.applyConfig(Self.configA())
-                case 1: _ = engine.applyConfig(Self.configB())
-                default: _ = engine.updateSnapshot([Self.snapshotFull(), Self.snapshotSpaceDeleted(), Self.snapshotDisplayUnplugged()].randomElement(using: &rng)!)
+                case 1, 2: _ = engine.applyConfig(Self.randomConfig(&rng))
+                default:
+                    let smallA = rng.next() % 2 == 0, smallB = rng.next() % 2 == 0
+                    _ = engine.updateSnapshot([
+                        Self.snapshotFull(smallA: smallA, smallB: smallB),
+                        Self.snapshotSpaceDeleted(smallA: smallA, smallB: smallB),
+                        Self.snapshotDisplayUnplugged(smallA: smallA),
+                    ].randomElement(using: &rng)!)
                 }
             case 10:
                 // Draw the command's Space from the focused window's Space
@@ -368,7 +460,15 @@ struct EngineFuzzTests {
                 // tiled member instead of missing on an unrelated Space.
                 let focusedSpace = engine.focused.flatMap { engine.windows[$0]?.space }
                 let space: SpaceID? = (focusedSpace != nil && rng.next() % 5 != 0) ? focusedSpace : Self.randomSpace(&rng)
-                _ = engine.perform(Self.randomCommand(&rng), space: space, areas: Self.displayAreas)
+                let outcome = engine.perform(Self.randomCommand(&rng), space: space, areas: Self.displayAreas)
+                if let change = outcome.settings {
+                    if let size = change.featureSize {
+                        #expect(size > 0.05 && size < 0.95, "seed \(seed) step \(step): SettingsChange featureSize \(size) out of range")
+                    }
+                    if let count = change.featureCount {
+                        #expect((1...16).contains(count), "seed \(seed) step \(step): SettingsChange featureCount \(count) out of range")
+                    }
+                }
             default: break
             }
             Self.assertInvariants(engine, seed: seed, step: step)

@@ -23,7 +23,7 @@ struct WindowManagerTests {
 
     private static let sampleConfig = """
     [layout]
-    mode = "bsp"
+    arrange = "dwindle"
 
     [[rule]]
     app_id = "com.example.app"
@@ -97,11 +97,11 @@ struct WindowManagerTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
 
         let error = wm.editConfig { editor in
-            editor.set("master_count", .integer(2), in: .layout)
+            editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(error == nil)
         #expect(FileManager.default.fileExists(atPath: url.path))
-        #expect(wm.config.layout.masterCount == 2)
+        #expect(wm.config.layout.featureCount == 2)
     }
 
     // MARK: audit-safety — a config load/edit on an unlaunched manager must
@@ -115,7 +115,7 @@ struct WindowManagerTests {
         #expect(wm.loadInitialConfig())
 
         let error = wm.editConfig { editor in
-            editor.set("master_count", .integer(2), in: .layout)
+            editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(error == nil)
         // `tryStart` would move past `.starting` (to `.needsAccessibility`,
@@ -140,7 +140,7 @@ struct WindowManagerTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
 
         let error = wm.editConfig { editor in
-            editor.set("master_count", .integer(2), in: .layout)
+            editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(error != nil)
         // Never recreated: no starter template written over the gap.
@@ -150,7 +150,7 @@ struct WindowManagerTests {
 
         // A second disappearance-then-edit behaves identically (repeated deletions).
         let secondError = wm.editConfig { editor in
-            editor.set("master_count", .integer(3), in: .layout)
+            editor.set("feature_count", .integer(3), in: .layout)
         }
         #expect(secondError != nil)
         #expect(!FileManager.default.fileExists(atPath: url.path))
@@ -159,7 +159,7 @@ struct WindowManagerTests {
         // The file reappears (e.g. dotfiles restore): edits resume normally.
         try Self.sampleConfig.write(to: url, atomically: true, encoding: .utf8)
         let restoredError = wm.editConfig { editor in
-            editor.set("master_count", .integer(2), in: .layout)
+            editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(restoredError == nil)
         #expect(FileManager.default.fileExists(atPath: url.path))
@@ -167,7 +167,7 @@ struct WindowManagerTests {
         let restoredConfig = try Config.parse(restoredText).get()
 
         var expectedConfig = liveConfig
-        expectedConfig.layout.masterCount = 2
+        expectedConfig.layout.featureCount = 2
         // The reload picked up the edit (semantic equality: layout, every
         // rule's match/actions, and every binding's hotkey/command), not
         // just "some rules/bindings exist" or a substring of the raw text.
@@ -198,7 +198,7 @@ struct WindowManagerTests {
         try FileManager.default.removeItem(at: real)
 
         let error = wm.editConfig { editor in
-            editor.set("master_count", .integer(2), in: .layout)
+            editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(error != nil)
         #expect(!FileManager.default.fileExists(atPath: real.path))

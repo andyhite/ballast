@@ -4,7 +4,7 @@ Ballast is a tiling window manager for macOS that lays out windows per
 **(display, native macOS Space)**. It is a *reactor*: macOS owns Spaces
 (creating them, switching between them, deciding which Space a window is on).
 Ballast watches those native changes and lays out whatever is on each
-(display, Space) using that pair's layout mode. It never writes Space state
+(display, Space) using that pair's arrangement settings. It never writes Space state
 and runs with SIP fully enabled.
 
 ## 1. Language and runtime: Swift + AppKit + AXUIElement
@@ -45,7 +45,7 @@ flowchart LR
     SL[SpaceProvider<br/>SkyLight, read-only]
   end
   subgraph Core [BallastCore — pure values, no I/O]
-    E[Engine<br/>windows, SpaceStates,<br/>rules, weights, BSP, MG/MS]
+    E[Engine<br/>windows, SpaceStates,<br/>rules, weights, BSP, grids, decks]
   end
   subgraph Mutation [per-app serial queues]
     FA[FrameApplier<br/>1 queue per pid]
@@ -96,7 +96,7 @@ flowchart LR
 
 ### 2.2 The Rift crash class, and why it can't happen here
 
-Rift's `promote_to_master` crash came from an event handler that observed a
+Rift's `promote_to_main` crash came from an event handler that observed a
 tree node in the middle of a mutation, detached but not yet re-attached, and
 then called `.unwrap()` on it. Ballast removes that class of bug by
 construction:
@@ -138,7 +138,7 @@ has no injected code in Dock or WindowServer to take down with it.
 | Purpose | Key | Why |
 |---|---|---|
 | Config addressing | `SpaceAddress`: `uuid` (the Space's UUID from `SLSCopyManagedDisplaySpaces`, as stored in `com.apple.spaces`), or `(display UUID, ordinal)` | The uuid entry follows the physical desktop through Mission Control reordering and deletion of siblings, and is what Ballast writes for new entries. The `(display, ordinal)` form is the fallback for Spaces that report no uuid, and shifts when desktops are reordered; it is stable across reboots **if** "Displays have separate Spaces" is ON and "Automatically rearrange Spaces" is OFF. Otherwise Ballast refuses to manage windows (`! SET` in the menu bar) and `ballast doctor` flags the setting. The ordinal counts only *user* desktops, so full-screening an app never shifts it. When both entries match a desktop, the uuid one wins (`Config.address(for:)`). |
-| Live state | `SpaceID` (SkyLight `id64` / `ManagedSpaceID`) | Stable for the session and follows the *physical* Space. If you delete Desktop 2, Desktop 3 becomes ordinal 2 but keeps its live state (manual arrangement, mode override). The dead Space's state is dropped (`Engine.updateSnapshot`). Never persisted: it is re-resolved from the persisted address on every snapshot via `SpaceKey`. |
+| Live state | `SpaceID` (SkyLight `id64` / `ManagedSpaceID`) | Stable for the session and follows the *physical* Space. If you delete Desktop 2, Desktop 3 becomes ordinal 2 but keeps its live state (manual arrangement, setting overrides). The dead Space's state is dropped (`Engine.updateSnapshot`). Never persisted: it is re-resolved from the persisted address on every snapshot via `SpaceKey`. |
 | Displays | `CGDisplayCreateUUIDFromDisplayID` | Persistent across reconnects. It matches SkyLight's "Display Identifier". Ordinals of displays are never used. |
 | Windows | `CGWindowID` (via `_AXUIElementGetWindow`) | Stable for the window's lifetime. |
 
@@ -150,21 +150,38 @@ Each `SpaceState` holds:
   *structural* change (a window joins or leaves, a weight changes, a config
   reload). Pure focus changes do not recompute it; otherwise two equal-weight
   windows would swap every time you clicked one.
-- `manual` + `manualOrder`: the live master order after a user
+- `manual` + `manualOrder`: the live tile order after a user
   swap/promote/drag/adopt, or a BSP resize/balance. While `manual` is set,
   the ideal keeps updating in the background but is **not applied**.
-  Newcomers join the stack at their weight rank and never displace a
-  manually placed master.
-- `tree`: the live BSP tree. It always exists, so switching modes never
+  Newcomers join after the feature tiles at their weight rank and never
+  displace a manually placed featured window.
+- Decks: manual decks (windows sharing one tile), keyed by the window holding
+  the tile (the deck's *holder*) and listing all its windows (two at least,
+  no window in two decks). `tree`, `idealOrder` and `manualOrder` hold one id
+  per tile — the holder stands for the deck — so every arrangement, weight
+  and minimum size sees tiles; `members` and `recentTiles` still hold every
+  window. After the arrangement runs, the deck renderer (§3.4) fills a deck's
+  tile rect, showing one or more windows at a time, the view chosen from
+  `recentTiles`, and fills `frames`, `covered`, `behind`, `scrolling` and
+  `navigation` the way an overflow deck does; a deck tucked in an overflow
+  deck tucks all its windows. A tile weighs its heaviest window and needs its
+  largest learned minimum size. `deck` and `undeck` mark the Space manual;
+  when the holder closes or leaves, the tile passes to the next window; a
+  deck that drops to one window dissolves; `reset` dissolves every manual
+  deck. A featured window can be in a deck. Focusing a decked window dirties
+  its Space (the view follows focus). Float ignores decks; monocle turns
+  every tiled window into one temporary deck (§3.3).
+- `tree`: the live BSP tree. It always exists, so switching arrangements never
   loses structure. New windows split the focused leaf. Split ratios come
   from weights unless a split carries a manual ratio (from resize or balance).
-  With `bsp_shape = "balanced"`, a Space that is not manual instead rebuilds
+  With `arrange = "balanced"`, a Space that is not manual instead rebuilds
   its tree as the balanced ideal on every structural change: the rank order
   is cut where the running weight sum is closest to half the total, each
   side recursively, giving an equal-area grid (four equal-weight windows are
-  quarters) whichever window had focus.
-- `modeOverride`, `monocle`, `masterRatioOverride`, `masterCountOverride`,
-  and `frameOverrides` (adopted frames). The three overrides are transient:
+  quarters) whichever window had focus. With a feature, the tree holds only
+  the non-featured tiles; the feature tiles are laid out separately.
+- `monocle`, transient feature-size and feature-count overrides,
+  and `frameOverrides` (adopted frames). The overrides are transient:
   a setting command applies one instantly, then the platform layer writes it
   to that desktop's `[[space]]` block in the config file (debounced ~300ms
   so a held grow/shrink key writes once, not per step) and clears the
@@ -173,7 +190,7 @@ Each `SpaceState` holds:
   as the effective, unsaved value and the user is notified.
 - `focus`: this Space's focus history (MRU).
 - `recentTiles`: the tiles by when each last took focus or joined the
-  Space, most recent first. It picks what a scrolling stack shows (§3.4)
+  Space, most recent first. It picks what a deck shows (§3.4)
   and monocle's front window, so a window that just opened shows before
   focus reaches it, or if focus never does. A window of another app than a
   focused tile on its Space joins right behind that tile instead: nothing
@@ -181,11 +198,9 @@ Each `SpaceState` holds:
 
 `reset` discards order, tree shape, and adopted frames — the *arrangement*
 only. It rebuilds the BSP tree as the ideal tree in rank order: dwindle
-by default (the heaviest window gets the largest, top-left tile), or the
-balanced grid for `bsp_shape = "balanced"`. It **keeps** the layout mode,
-monocle, master ratio and master count, because those are now config
-settings, not arrangement (`layout default` still drops the mode override
-by writing `mode` out of the config).
+(the heaviest window gets the largest, top-left tile), or the
+balanced grid for `arrange = "balanced"`. It **keeps** `arrange`, the feature
+settings, and monocle, because those are config settings, not arrangement.
 
 `applyConfig` re-resolves rules and recomputes ideals. It never touches the
 overrides listed above. This is the direct fix for Rift's
@@ -197,13 +212,13 @@ a `reset`; manually arranged Spaces keep their split directions until `reset`.
 ### 3.2.1 Config write-back
 
 Nothing is runtime-only: every setting the user changes from the menu bar, a
-setting command (`layout …`, `master-ratio`, `master-count`, master
+setting command (`feature-size`, `feature-count`, feature
 `grow`/`shrink`/`balance`), or the Preferences window is written to
 `~/.config/ballast/config.toml` so it survives restarts. Sources:
 
 - **Menu bar / Preferences**: call `WindowManager.editConfig` or
   `setSpaceSetting` directly, synchronously, on the edit.
-- **Setting commands** (hotkeys, `ballast send …`, the menu's own layout
+- **Setting commands** (hotkeys, `ballast send …`, the menu's own arrangement
   items — all funnel through `Engine.perform`): `CommandOutcome.settings`
   carries what changed; `WindowManager` merges it per-Space and flushes
   after a ~300ms debounce.
@@ -215,7 +230,10 @@ file), reads the current text, applies the requested change with
 formatting and moves, removes, or skips a `[[rule]]`/`[[space]]` entry's
 owned child tables (`[rule.size]`, `[space.gaps]`, ...) as a unit with it,
 never orphaning or miscounting them as siblings — validates the result with
-`Config.parse`, and only then writes it atomically and reloads. Removing a
+`Config.parse`, and only then writes it atomically and reloads. A key
+written as a table of its own (`[layout.gaps]`, `[space.gaps]`) is
+replaced as a whole: setting it drops that table and writes the value
+inline, and removing it drops the table. Removing a
 key from a section that doesn't exist yet (clearing an already-absent
 setting) is a no-op: it never creates a phantom section or override just to
 leave it empty. If the file is missing, `editConfig` falls back to the
@@ -231,15 +249,17 @@ stays the effective value until the next successful edit. The write informs
 fire a second, redundant reload.
 
 **Surfaces.** The menu bar covers only what's in front of you: the current
-desktop (an Adjust Desktop submenu with the layout mode and only the current
-mode's settings; each has a default entry that removes the desktop's
+desktop (an Adjust Desktop submenu with the arrangement and feature settings;
+each has a default entry that removes the desktop's
 override, and **More in Settings…** opens the Layout tab on that desktop),
-monocle, reset, and the `weight`/`manage`/`float` keys of the focused app's
+monocle (**Exit Monocle** while it is on, with its bound hotkey, e.g. `Exit Monocle (⌥M)`), reset, and the `weight`/`manage`/`float` keys of the focused app's
 `app_id` rule (removing the rule is Settings-only).
 Global settings and the `[layout]` defaults live only in the Settings window
 (`Preferences/`, SwiftUI in an `NSWindow`), which covers everything:
 General, Layout (defaults and every connected desktop, where a
-checked setting is a per-desktop override), Rules (ordered list plus a full
+checked setting is a per-desktop override; in the defaults scope a key
+`[layout]` does not set shows the built-in default of each screen class, and
+setting it applies to every screen), Rules (ordered list plus a full
 editor), and Keyboard (a hotkey recorder that captures key codes, so
 recording doesn't depend on the keyboard layout). Text fields commit on
 Return or when focus leaves, and only when the text changed; the Gaps
@@ -254,18 +274,43 @@ still conflict) is rejected with an inline error naming the conflicting
 command: neither binding is written, and the editor stays open so the user
 can pick a different key.
 
-### 3.3 Master-grid and master-stack
+### 3.2.2 Screen-size defaults and float cascade
+
+A display is **small** when its visible frame is narrower than 1800 pt (every
+MacBook default resolution), else **large**. The platform layer computes the
+flag and puts it in the snapshot's display info next to `builtin`, so the
+engine resolves settings from the snapshot like everything else. Any key not
+set in `[layout]` or the desktop's `[[space]]` falls back to a built-in
+default that depends on the flag:
+
+- small: `arrange = "fixed"`, `columns = 1`, `rows = 1`, `feature = "none"` —
+  one full-screen deck.
+- large: `arrange = "fixed"`, `columns = 1`, `rows = 2`, `feature = "left"`,
+  `feature_size = 0.6`, `feature_count = 1`.
+
+A key set in `[layout]` applies to every screen; `[[space]]` overrides per
+desktop. Precedence: runtime override, `[[space]]`, `[layout]`, built-in
+default.
+
+`float_placement = "cascade"` (default) makes `WindowManager` pass a window
+that has just opened on a float Space (never at discovery, never under
+Stage Manager) through `Cascade.frame`: slot k sits at the area origin plus the
+outer gap plus k × 28 pt; it takes the smallest k no other window of the Space
+sits at (1.5 pt tolerance), wrapping to slot 0 when the slot would push the
+window out of the area; the size is clamped to the area inside the gap.
+
+### 3.3 Arrangements, the feature area, and monocle
 
 The ideal order is stable. Opening, closing, and focusing windows never
 reorders the windows already on a Space:
 
-- **A window joins** at the top of the stack: right after the masters and
-  any heavier windows. A window heavier than a master takes the master
-  slot instead. On a manual Space it goes right after the masters whatever
-  its weight, so a manually placed master is never displaced. A scrolling
-  stack brings it into view (§3.4) without waiting for its focus.
-- **A window leaves** and the rest close up; when a master leaves, the top
-  of the stack takes its slot.
+- **A window joins** at the top of the grid: right after the feature tiles and
+  any heavier windows. A window heavier than a featured one takes the feature
+  slot instead. On a manual Space it goes right after the feature tiles
+  whatever its weight, so a manually placed featured window is never
+  displaced. A deck brings it into view (§3.4) without waiting for its focus.
+- **A window leaves** and the rest close up; when a featured window leaves,
+  the first grid tile takes its slot.
 - **Weights change** (a config reload or a rule matching a new title): the
   order is re-sorted by weight alone, so equal-weight windows keep their
   relative places.
@@ -275,102 +320,112 @@ join by `WeightResolver.rank`: weight descending, then focus recency on that
 Space (focused windows before never-focused ones), then creation order, then
 window id, so the result is deterministic.
 
-- **Master-grid and master-stack**: masters are `liveOrder.prefix(masterCount)`.
-  When the Space isn't manual, a weight-10 window launching next to a
-  weight-1 master takes the master slot on the same layout pass.
-  `master_ratio` divides the area between the master region and the
-  stack region(s); inside each region, windows share its length in
-  proportion to weight (a weight-2 stack window is twice as tall as a
-  weight-1 one). With `stack_both_sides` off (the default), there is one
-  stack region on `stack_side`. With it on, both modes put a stack on
-  each side of the master along `stack_side`'s axis (left+right for
-  `right`/`left`, top+bottom for `bottom`/`top`); the master keeps
-  `master_ratio` of the space and the two stacks split the remainder
-  evenly. The stack order is split in two: the first half (rounded up)
-  goes to `stack_side`'s stack, the rest to the opposite side; with a
-  single stack window, only `stack_side`'s stack is used and the layout
-  matches the single-stack case exactly. The Weight
-  Share Limit applies per region: no weight counts for more than
-  `bsp_max_ratio / bsp_min_ratio` times the lightest (3× by default), so two
-  windows split a region at most 75/25, like the two sides of a BSP split.
-  Capping relative to the lightest keeps the lighter windows' proportions
-  (10:2:1 counts as 3:2:1). A window whose share is below its learned AX
-  minimum size gets that minimum, and the others re-share the rest by
-  weight. `master_stack` always shows a one-window stack per side (§3.4);
-  `master_grid` splits each stack into `grid_columns` (`LayoutSettings.
-  stackColumns(in:)`) side-by-side columns, filled column-major nearest the
-  master first — earlier columns take the extra when the count doesn't
-  divide evenly — and tiles every window in a column unless that side grows
-  past `grid_columns * grid_max`, at which point every column but the
-  outermost caps at `grid_max` and the outermost column scrolls the same way
-  as `master_stack` (§3.4). `grid_columns` is ignored (treated as 1) outside
-  `master_grid`.
-- **BSP**: each split's ratio is `sum(first subtree weights) / sum(both)`,
-  clamped to `[bsp_min_ratio, bsp_max_ratio]` (the Weight Share Limit). A
-  manual ratio wins. Learned AX minimum sizes are honored on top of this
-  (see §4).
-  Grow/shrink and `master-ratio <±d>` clamp the master region strictly
-  between 0.05 and 0.95 — the same bound `master_ratio` validation enforces
+- **Feature area**: the feature tiles are `liveOrder.prefix(feature_count)`
+  in every arrangement except `float`; the rest go to the arrangement in the
+  remaining area. `feature` picks the side (`left`, `right`, `top`,
+  `bottom`) or `center`. `feature_size` divides the area between the feature
+  and the grid; featured windows share the feature area's length in
+  proportion to weight. With `center`, the feature sits in the middle and
+  the grid is split into a right and a left half: the right half gets the
+  first half of the tiles (rounded up), so one tile goes to the right only;
+  the feature keeps `feature_size` of the space and the two halves split the
+  remainder evenly. `feature = "none"` uses the whole area for the grid. When
+  a Space isn't manual, a weight-10 window launching next to a weight-1
+  featured window takes the feature slot on the same layout pass.
+- **fixed**: `columns` × `rows`. Columns are always vertical lines side by
+  side and rows always stack top to bottom within a column, whatever side
+  the feature is on (under a `top` or `bottom` feature the grid region is the
+  strip below or above it, and `columns = 1`, `rows = 2` stacks two tiles
+  there). The grid area is split into `columns` columns, filled column-major
+  starting from the column nearest the feature (the leftmost for `top` and
+  `bottom`) —
+  earlier columns take the extra when the count doesn't divide evenly — and
+  every tile in a column is shown unless tiles outnumber `columns * rows`,
+  at which point every column but the last caps at `rows` and the last
+  column becomes an overflow deck that scrolls with `rows` tiles in view
+  (§3.4). `rows = 0` means no cap: nothing decks, and the columns divide the
+  windows evenly. 1×1 is one full-area deck. Windows in a column share its
+  length in proportion to weight (a weight-2 window is twice as tall as a
+  weight-1 one). The Weight Share Limit applies per column: no weight counts
+  for more than `weight_share_max / weight_share_min` times the lightest
+  (3× by default), like the two sides of a BSP split. Capping relative to
+  the lightest keeps the lighter windows' proportions (10:2:1 counts as
+  3:2:1). A window whose share is below its learned AX minimum size gets
+  that minimum, and the others re-share the rest by weight.
+- **adaptive**: no size weights. The adaptive planner puts every grid window
+  of `liveOrder` in an equal cell: in a landscape area (width ≥ height)
+  `ceil(sqrt(n))` columns and as many rows as they need, in a portrait one
+  `ceil(sqrt(n))` rows and as many columns. Windows fill the rows left to
+  right, top to bottom; an incomplete last row's windows split that row's
+  full width. Rows and cells are `gaps.inner` apart and honor learned
+  minimum sizes through `tileLinear`/`distribute` like the other
+  arrangements. Navigation follows the frames and nothing scrolls.
+- **dwindle / balanced**: each split's ratio is
+  `sum(first subtree weights) / sum(both)`, clamped to
+  `[weight_share_min, weight_share_max]` (the Weight Share Limit). A manual
+  ratio wins. Learned AX minimum sizes are honored on top of this (see §4).
+  With a feature, the tree lays out only the non-featured tiles, in the
+  area left after the feature; resize, balance and swap stay total.
+- **Resizing**: `grow`, `shrink` and `balance` change `feature_size` in
+  `fixed` and `adaptive` when a feature is on, and BSP split ratios in
+  `dwindle` and `balanced`; when neither applies they do nothing and say so.
+  Grow/shrink and `feature-size <±d>` clamp the feature region strictly
+  between 0.05 and 0.95 — the same bound `feature_size` validation enforces
   on the config file, one Double `nextUp`/`nextDown` step inside it so the
   clamped, persisted value always parses back — and never reverse direction:
   a delta that would cross a bound instead lands the full requested delta
   short of it, so shrinking near 0.05 or growing near 0.95 keeps moving the
-  same way it started.
-- **Which mode a desktop gets**: a runtime override (the menu, `layout …`)
-  wins until it is written back, then the desktop's `[[space]]` mode, then
-  `[layout]` mode. With neither set, `LayoutSettings.mode` stays `nil` and
-  `mode(builtin:)` picks `master_stack` for a built-in display, whose small
-  screen fits only one stack window, and `master_grid` for an external one.
-  The SkyLight provider marks each display in the snapshot `builtin` through
-  the public `CGDisplayIsBuiltin`, so the engine resolves it from the
-  snapshot like everything else.
+  same way it started. `promote` swaps the focused tile into the first
+  feature slot; `focus-feature` toggles to and from it.
+- **float**: the WM never touches the Space (passthrough), apart from
+  Stage Manager passthrough and the cascade below.
+- **Monocle** is a toggle that keeps the arrangement and renders as a
+  temporary full-area 1×1 deck of every tiled window, through the deck
+  renderer (§3.4): peeks apply and focus scrolls. The menu-bar title shows
+  the desktop's own layout glyph followed by `⤢` while it is on, and the
+  menu item reads "Exit Monocle", so it is never mistaken for a permanent
+  1×1 grid. Layout glyphs: `F·` prefix when a feature is on, then `C×R` for
+  `fixed` (`R` is `∞` when `rows = 0`), `A` adaptive, `D` dwindle, `B`
+  balanced, `⋯` float — for example `F·1×2`, `1×1`, `D`, `⋯`.
 
-### 3.4 Scrolling stack
+### 3.4 Decks
 
-Each stack region (one, or two when `stack_both_sides` is on) is evaluated
-independently. `master_stack` never has more than one column and scrolls
-once it holds more than 1 window. `master_grid` splits a region into
-`stackColumns(in: mode)` (`grid_columns`) columns; a region scrolls once it
-holds more than `grid_columns * grid_max` windows (`grid_max > 0`), at which
-point columns fill column-major, nearest the master first, each fixed at
-`grid_max` windows except the outermost, which takes the remainder and
-scrolls exactly like a single `master_stack` stack. With `grid_columns == 1`
-and `stack_both_sides` off, this degenerates to the original single-stack
-behavior. `grid_max == 0` means no limit: a region never scrolls, and its
-columns just divide the windows evenly (earlier columns get the extra).
-`MasterLayout.plan`/`stackPlan` (`MasterLayout.swift`) computes the
-geometry for the scrolling (outermost) column:
+A **deck** is layered windows in one cell, rendered by the deck renderer.
+Manual decks (`deck`/`undeck`), overflow decks (the last `fixed` column past
+`columns * rows`), 1×1 grids and monocle all use it. Each overflow deck is
+evaluated independently. In a `fixed` grid a column scrolls once it holds more
+than `rows` tiles. With `rows = 0` nothing scrolls. The deck planner in
+`MainLayout.swift` computes the geometry for a deck:
 
-- **Deck with peeks.** `grid_max` (or `stackLimit` for `master_stack`)
-  equal-size slots fill the scrolling column/region.
-  The stack window just before the view is shifted `stack_peek` toward the
+- **Deck with peeks.** `rows` equal-size slots (one for a manual deck or
+  monocle) fill the deck's area.
+  The window just before the view is shifted `deck_peek` toward the
   start, so its far edge (title bar, for a window above) shows past the
-  view; the one just after is shifted `stack_peek` toward the end the same
-  way. The slots give up `stack_peek` only at an end with a window beyond
-  it, so a view holding the first or last stack window reaches that edge of
-  the region instead of leaving an empty strip. Every other stack window is
+  view; the one just after is shifted `deck_peek` toward the end the same
+  way. The slots give up `deck_peek` only at an end with a window beyond
+  it, so a view holding the first or last window reaches that edge of
+  the area instead of leaving an empty strip. Every other window is
   tucked exactly behind the first or last slot, fully hidden. Slots ignore
   weights, so a window's size changes only when the view reaches or leaves
-  an end of the stack.
+  an end of the deck.
 - **Which windows are in view.** `viewStart` is a pure function of
-  `(order, shown, recent)`: the view holds `recent`'s first stack window,
+  `(order, shown, recent)`: the view holds `recent`'s first deck window,
   and among the starting positions that do, the one that also keeps the
   next most recent one in view wins, and so on; a remaining tie goes to the
-  position nearest the start of the stack. `recent` is the Space's
+  position nearest the start of the deck. `recent` is the Space's
   `recentTiles` (§3.2): its tiles by when each last took focus or joined.
   A window that opens scrolls into view at once, though a pass can run
   before its focus reaches Ballast and some windows open without taking
-  focus; focusing the master afterwards leaves the stack where it is. There
+  focus; focusing the feature afterwards leaves the deck where it is. There
   is no separate scroll-offset state to keep in sync — the view is derived
   fresh every layout pass.
 - **Navigation.** `SpaceLayout.navigation` gives directional focus/swap a
   virtual strip that continues past both ends of the view, so `focus
-  down`/`focus up` (or `left`/`right` when `stack_side` is `top`/`bottom`)
-  walk into the tucked windows one at a time. `Engine.focus` dirties a Space
-  whose stack scrolls, so the next layout pass pulls the newly focused window
-  into view.
+  down`/`focus up` walk into the tucked windows one at a time. `Engine.focus`
+  dirties a Space whose deck scrolls, so the next layout pass pulls the newly
+  focused window into view.
 - **`SpaceLayout.covered`.** Windows tucked behind a view slot are recorded
-  with the strip of themselves still showing (zero length along the stack
+  with the strip of themselves still showing (zero length along the deck
   when fully hidden). The drag hit test and the drop preview try the tiles in
   view first, then these strips, so dragging over the peeking title bar of a
   tucked window targets that window, not the one in front of it.
@@ -384,7 +439,7 @@ geometry for the scrolling (outermost) column:
   pass on an active Space reads the on-screen order
   (`CGWindowListCopyWindowInfo`, window numbers only) and raises just the
   tiles `tilesToRaise(frontToBack:)` finds covered, so a floating window
-  over the stack stays put unless the deck is out of order. Two rules bound
+  over a deck stays put unless the deck is out of order. Two rules bound
   every raise: nothing goes over a focused floating or unmanaged window on
   that Space (monocle's guard), and no window of the focused window's app
   is raised but the focused window itself. `AXRaise` makes a window its
@@ -431,8 +486,8 @@ geometry for the scrolling (outermost) column:
 
 **Chosen: (a).** Only the **focused** window on an **active** Space
 interpolates its AX frame on its app's worker, plus, when a pass keeps the
-Space's windows unchanged, every window of a scrolling stack column, so
-moving focus through the stack slides it instead of jumping. Those windows
+Space's windows unchanged, every window of a deck, so
+moving focus through the deck slides it instead of jumping. Those windows
 mostly keep their size as the view scrolls, so a frame is
 usually one position write. Frames are paced by deadline at
 the display refresh interval, so a slow AX round-trip drops frames instead of
@@ -441,7 +496,7 @@ Each animation frame is scheduled separately on the serial queue rather than
 sleeping on it. Sibling-window requests and focus operations can run between
 frames.
 
-When focus scrolls the stack and the previously focused window slides off
+When focus scrolls a deck and the previously focused window slides off
 the newly focused one, the newly focused window's activation and raise (and
 the deck re-ordering) wait until that slide ends. The sliding window
 uncovers the new one instead of being covered by it. A newer focus cancels
@@ -464,7 +519,7 @@ Animation is skipped in each of these cases:
   is re-read whenever the system reports a display-options change.
 - `animation.enabled = false`, or `duration_ms = 0`.
 - The window is on an inactive Space or display.
-- The Space is in monocle mode.
+- Monocle is on for the Space.
 
 A newer request for the same window cancels an in-flight animation at its
 next frame (per-window generation counter).
@@ -496,7 +551,7 @@ next frame (per-window generation counter).
 | Situation | Handling |
 |---|---|
 | Space switch (swipe, `ctrl+N`, Mission Control) | `activeSpaceDidChange` triggers a full resync: new snapshot, discovery of windows that just became visible, and membership reconciliation. Newly active Spaces are laid out. |
-| Window dragged to another Space in Mission Control | Dock posts `AXExposeExit` when Mission Control closes. Ballast then runs a full resync: a fresh snapshot (which also picks up desktops added, removed or reordered in Mission Control) and membership reconciliation (`SLSCopyWindowsWithOptionsAndTags` per Space). Both Spaces are reflowed, and the arrival is laid out using its new Space's mode. The Dock observer is re-attached whenever Dock relaunches. |
+| Window dragged to another Space in Mission Control | Dock posts `AXExposeExit` when Mission Control closes. Ballast then runs a full resync: a fresh snapshot (which also picks up desktops added, removed or reordered in Mission Control) and membership reconciliation (`SLSCopyWindowsWithOptionsAndTags` per Space). Both Spaces are reflowed, and the arrival is laid out using its new Space's arrangement. The Dock observer is re-attached whenever Dock relaunches. |
 | Dock "Assign To Desktop" | When an app launches, its `com.apple.spaces` `app-bindings` entry is resolved to a `SpaceID`. The app's first windows are assigned there immediately, so their layout is computed for the Space macOS will put them on, not reflowed afterwards. |
 | Space deleted | The snapshot no longer contains it, so its state is dropped. macOS moves the orphaned windows to an adjacent Space, and reconciliation reflows that Space. |
 | Display unplugged or replugged, sleep/wake | `didChangeScreenParameters` / `didWake` trigger a full resync. Config overrides for the returning display re-apply by UUID. |
@@ -528,7 +583,7 @@ tracks.
   excluded from focus targets without being marked minimized. Unhiding an
   application restores its eligible windows to their Spaces.
 - **Monocle and floating windows.** Focusing a floating window does not
-  raise a tiled monocle window over it.
+  raise a tiled monocle deck window over it.
 - **Cursor warp.** Only for WM-initiated focus that crosses a display
   (`cursor_follows_focus`). A user's own click never warps the cursor.
 - **Focus flash.** When a command changes `engine.focused`, a
@@ -543,7 +598,7 @@ tracks.
   close fallback) never flashes. The
   overlay is one AppKit window at the floating level, so the app raise that
   follows a focus change can't cover it. It is sized to the window's planned
-  frame and follows that frame when a later pass scrolls the stack. It hides
+  frame and follows that frame when a later pass scrolls the deck. It hides
   on a Space change or when the window closes.
 - **Focus follows mouse (optional).** A mouse-moved global monitor, throttled
   to about 16 Hz, hit-tests the AX window under the cursor on a background
@@ -648,10 +703,10 @@ same path as every other config edit (§3.2.1).
 - config validation
 - weight resolution and tiebreaks
 - BSP subtree-weight ratios and clamping
-- master-grid/master-stack geometry, including scrolling-stack deck geometry and view selection
+- fixed/adaptive/dwindle/balanced geometry, the feature area, deck geometry and view selection, and monocle
 - default-floating heuristics (`WindowFacts.floatReason` precedence)
 - engine behavior:
-  - continuous weight-driven master
+  - continuous weight-driven feature slot
   - manual override persistence and reset
   - reload keeps live state
   - focus fallback on close

@@ -1,35 +1,5 @@
 import Foundation
 
-public enum LayoutMode: String, CaseIterable, Equatable, Sendable {
-    /// Masters beside a stack tiled in `grid_columns` columns (up to `grid_max` per column, then scrolls).
-    case masterGrid = "master_grid"
-    /// Masters beside a stack that shows one window at a time and scrolls.
-    case masterStack = "master_stack"
-    case bsp
-    case float
-
-    /// Compact menu-bar glyph.
-    public var glyph: String {
-        switch self {
-        case .masterGrid: return "MG"
-        case .masterStack: return "MS"
-        case .bsp: return "BSP"
-        case .float: return "⋯"
-        }
-    }
-
-    /// Whether the layout has a master region and a stack (master-grid or master-stack).
-    public var hasMaster: Bool { self == .masterGrid || self == .masterStack }
-}
-
-public enum LayoutChange: Equatable, Sendable {
-    case set(LayoutMode)
-    case next
-    case previous
-    /// Drop the manual mode override; follow the config again.
-    case configDefault
-}
-
 public enum Cycle: String, Equatable, Sendable {
     case next
     case prev
@@ -41,21 +11,25 @@ public enum Command: Equatable, Sendable {
     case focus(Direction)
     case swap(Direction)
     case focusLast
-    /// Focus the master (first tile); from the master, return to the window
+    /// Focus the feature (first tile); from the feature, return to the window
     /// focused before it.
-    case focusMaster
+    case focusFeature
     case promote
+    /// The focused window joins the tile of its neighbor that way, which
+    /// becomes a deck (windows layered in one tile) if it was not one.
+    case deck(Direction)
+    /// The focused window leaves its deck into its own tile after the deck.
+    case undeck
     case reset
     /// Re-read the desktop's windows, forget the minimum sizes learned from
     /// refused frames, and re-send every tile's frame. Keeps the arrangement.
     case relayout
-    case layout(LayoutChange)
     case monocle
     case toggleFloat
     /// Grow (positive) or shrink (negative) the focused tile's share.
     case resize(Double)
-    case masterRatio(Double)
-    case masterCount(Int)
+    case featureSize(Double)
+    case featureCount(Int)
     case balance
     case sendToDisplay(Cycle)
     case focusDisplay(Cycle)
@@ -63,9 +37,10 @@ public enum Command: Equatable, Sendable {
     case dumpState
 
     public static let reference: [String] = [
-        "focus left|right|up|down", "focus-last", "focus-master", "swap left|right|up|down",
-        "promote", "reset", "relayout", "layout master_grid|master_stack|bsp|float|next|prev|default", "monocle", "float",
-        "grow [amount]", "shrink [amount]", "master-ratio <+/-delta>", "master-count <+/-delta>",
+        "focus left|right|up|down", "focus-last", "focus-feature", "swap left|right|up|down",
+        "deck left|right|up|down", "undeck",
+        "promote", "reset", "relayout", "monocle", "float",
+        "grow [amount]", "shrink [amount]", "feature-size <+/-delta>", "feature-count <+/-delta>",
         "balance", "send-to-display next|prev", "focus-display next|prev", "reload", "dump-state",
     ]
 
@@ -107,42 +82,36 @@ public enum Command: Equatable, Sendable {
         switch verb {
         case "focus":
             if arg == "last", args.count == 1 { return .success(.focusLast) }
-            if arg == "master", args.count == 1 { return .success(.focusMaster) }
+            if arg == "feature", args.count == 1 { return .success(.focusFeature) }
+            if let arg, args.count == 1, let message = LegacyNames.commandMessage("focus \(arg)") {
+                return .failure(.init(message))
+            }
             return direction().map(Command.focus)
         case "focus-last": return noArgs(.focusLast)
-        case "focus-master": return noArgs(.focusMaster)
+        case "focus-feature": return noArgs(.focusFeature)
         case "swap", "move": return direction().map(Command.swap)
         case "promote": return noArgs(.promote)
+        case "deck": return direction().map(Command.deck)
+        case "undeck": return noArgs(.undeck)
         case "reset": return noArgs(.reset)
         case "relayout", "re-layout": return noArgs(.relayout)
-        case "layout":
-            guard args.count == 1, let arg else { return .failure(.init("'layout' expects a mode, next, prev or default")) }
-            switch arg {
-            case "next": return .success(.layout(.next))
-            case "prev", "previous": return .success(.layout(.previous))
-            case "default": return .success(.layout(.configDefault))
-            default:
-                guard let mode = LayoutMode(rawValue: arg) else {
-                    return .failure(.init("unknown layout '\(arg)' (master_grid|master_stack|bsp|float)"))
-                }
-                return .success(.layout(.set(mode)))
-            }
         case "monocle", "zoom": return noArgs(.monocle)
         case "float": return noArgs(.toggleFloat)
         case "grow": return number(default: 0.05).map { .resize(abs($0)) }
         case "shrink": return number(default: 0.05).map { .resize(-abs($0)) }
-        case "master-ratio": return number(default: nil).map(Command.masterRatio)
-        case "master-count":
+        case "feature-size": return number(default: nil).map(Command.featureSize)
+        case "feature-count":
             return number(default: nil).flatMap { v in
-                guard v == v.rounded(), abs(v) <= 16 else { return .failure(.init("'master-count' expects an integer delta within -16…16")) }
-                return .success(.masterCount(Int(v)))
+                guard v == v.rounded(), abs(v) <= 16 else { return .failure(.init("'feature-count' expects an integer delta within -16…16")) }
+                return .success(.featureCount(Int(v)))
             }
         case "balance": return noArgs(.balance)
         case "send-to-display": return cycle().map(Command.sendToDisplay)
         case "focus-display": return cycle().map(Command.focusDisplay)
         case "reload": return noArgs(.reload)
         case "dump-state": return noArgs(.dumpState)
-        default: return .failure(.init("unknown command '\(verb)'"))
+        default:
+            return .failure(.init(LegacyNames.commandMessage(verb) ?? "unknown command '\(verb)'"))
         }
     }
 }

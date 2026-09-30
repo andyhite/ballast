@@ -38,11 +38,11 @@ restore_config() {
   [ -n "$CONFIG_BACKUP" ] && [ -f "$CONFIG_BACKUP" ] || return 0
   # Wait for any in-flight ~0.3s settings persistence to land before we
   # overwrite the config, instead of guessing a fixed delay: poll dump-state
-  # until every Space's transient mode_override has cleared, capped so a
-  # stuck/dead Ballast can't hang the restore.
+  # until every Space's transient feature_size/feature_count override has
+  # cleared, capped so a stuck/dead Ballast can't hang the restore.
   local waited=0
   while [ "$waited" -lt 20 ]; do
-    dump 2>/dev/null | jq -e '[.spaces[]? | select(.mode_override != null)] | length == 0' >/dev/null 2>&1 && break
+    dump 2>/dev/null | jq -e '[.spaces[]? | select(.feature_size_override != null or .feature_count_override != null)] | length == 0' >/dev/null 2>&1 && break
     sleep 0.05
     waited=$((waited + 1))
   done
@@ -84,78 +84,78 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-step "1. Two Spaces on two displays keep independent modes across a config reload"
+step "1. Two Spaces on two displays keep independent layouts across a config reload"
 before=$(active_spaces)
 count=$(jq 'length' <<<"$before")
 displays=$(jq '[.[].display] | unique | length' <<<"$before")
 if [ "$count" -ge 2 ] && [ "$displays" -ge 2 ]; then ok "active Spaces on $displays displays"; else bad "need active Spaces on two displays (got $count on $displays)"; fi
-modes=$(jq -r '[.[].mode] | unique | length' <<<"$before")
-[ "$modes" -ge 2 ] && ok "active Spaces use different modes: $(jq -r '[.[] | "\(.ordinal)@\(.display[0:8])=\(.mode)"] | join(", ")' <<<"$before")" \
-                  || bad "active Spaces share one mode; add the [[space]] overrides from docs/SMOKE_TEST.md"
+layouts=$(jq -r '[.[].layout] | unique | length' <<<"$before")
+[ "$layouts" -ge 2 ] && ok "active Spaces use different layouts: $(jq -r '[.[] | "\(.ordinal)@\(.display[0:8])=\(.layout)"] | join(", ")' <<<"$before")" \
+                    || bad "active Spaces share one layout; add the [[space]] overrides from docs/SMOKE_TEST.md"
 
 first_display=$(jq -r '.[0].display' <<<"$before")
 first_name=$(jq -r --arg d "$first_display" '[.displays[] | select((.uuid | ascii_upcase) == ($d | ascii_upcase)) | .name][0] // $d' "$STATE")
 pause "Focus a window on display '$first_name' (its active Space needs 2+ tiled windows)"
-default_mode=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].mode' <<<"$before")
-override_mode="bsp"; [ "$default_mode" = "bsp" ] && override_mode="master_grid"
-"$BALLAST" send layout "$override_mode"; sleep 0.3
+# A feature-size change is the one runtime setting a command can make; it must
+# be persisted to the desktop's [[space]] block and its transient override cleared.
+"$BALLAST" send feature-size 0.05; sleep 0.6
 "$BALLAST" send promote; sleep 0.3
 pre=$(active_spaces)
 target_id=$(jq -r --arg d "$first_display" '[.[] | select(.display == $d)][0].space_id' <<<"$pre")
 target_manual=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].manual' <<<"$pre")
-target_mode=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].mode' <<<"$pre")
-target_override=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].mode_override' <<<"$pre")
-if [ "$target_manual" = "true" ] && [ "$target_mode" = "$override_mode" ] && { [ -z "$target_override" ] || [ "$target_override" = "null" ]; }; then
-  ok "Space $target_id is manual, effective mode persisted as $override_mode, and the transient override cleared"
+target_layout=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].layout' <<<"$pre")
+target_override=$(jq -r --argjson id "$target_id" '[.[] | select(.space_id == $id)][0].feature_size_override' <<<"$pre")
+if [ "$target_manual" = "true" ] && { [ -z "$target_override" ] || [ "$target_override" = "null" ]; }; then
+  ok "Space $target_id ($target_layout) is manual, feature_size was persisted, and the transient override cleared"
 
   printf '\n# smoke-test touch %s\n' "$(date +%s)" >> "$CONFIG"
   sleep 1.0
   post=$(active_spaces)
 
   target_same=$(jq -n --argjson a "$pre" --argjson b "$post" --argjson id "$target_id" \
-    '(($a[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]}) ==
-     (($b[] | select(.space_id == $id)) | {mode, mode_override, manual, order: [.live_order[].id]})')
-  modes_same=$(jq -n --argjson a "$pre" --argjson b "$post" \
-    '[$a[] | {space_id, mode, mode_override}] == [$b[] | {space_id, mode, mode_override}]')
-  if [ "$target_same" = "true" ] && [ "$modes_same" = "true" ]; then
-    ok "modes/overrides unchanged and the manual arrangement on Space $target_id is preserved by reload"
+    '(($a[] | select(.space_id == $id)) | {arrange, layout, feature, feature_size_override, manual, order: [.live_order[].id]}) ==
+     (($b[] | select(.space_id == $id)) | {arrange, layout, feature, feature_size_override, manual, order: [.live_order[].id]})')
+  layouts_same=$(jq -n --argjson a "$pre" --argjson b "$post" \
+    '[$a[] | {space_id, arrange, layout, feature_size_override}] == [$b[] | {space_id, arrange, layout, feature_size_override}]')
+  if [ "$target_same" = "true" ] && [ "$layouts_same" = "true" ]; then
+    ok "layouts/overrides unchanged and the manual arrangement on Space $target_id is preserved by reload"
   else
     bad "state changed across reload"; diff <(jq -S . <<<"$pre") <(jq -S . <<<"$post")
   fi
   dump | jq -e '.config_error == null' >/dev/null && ok "reload accepted (no config error)" || bad "config error: $(jq -r .config_error "$STATE")"
 else
-  bad "Space $target_id never reached manual mode $override_mode with the transient override cleared (layout $override_mode + promote); skipping reload check without further mutating the config"
+  bad "Space $target_id never reached manual with feature_size persisted and its transient override cleared (feature-size + promote); skipping reload check without further mutating the config (is a feature on this Space?)"
 fi
-"$BALLAST" send layout "$default_mode"; "$BALLAST" send reset; sleep 0.3   # put the Space back to the mode it had before this step's override (the config file itself is restored to its exact original bytes by the EXIT/INT/TERM trap, not by this line)
+"$BALLAST" send reset; sleep 0.3   # put the Space back to its weight-default arrangement (the config file itself is restored to its exact original bytes by the EXIT/INT/TERM trap, not by this line)
 
 # ---------------------------------------------------------------------------
-step "2. Weight-based master reassignment when a heavier app launches"
-pause "Focus a window on a master_grid Space, quit $HEAVY if it is running, then press enter"
+step "2. Weight-based feature reassignment when a heavier app launches"
+pause "Focus a window on a fixed or adaptive Space with a feature, quit $HEAVY if it is running, then press enter"
 "$BALLAST" send reset
 open -b "$LIGHT"; sleep 1.5
-space=$(dump | jq -c --arg b "$LIGHT" '[.spaces[] | select(.active and .mode == "master_grid" and any(.live_order[]; .bundle == $b))][0]')
-if [ "$space" = "null" ]; then bad "$LIGHT did not land on an active master_grid Space"; else
+space=$(dump | jq -c --arg b "$LIGHT" '[.spaces[] | select(.active and (.arrange == "fixed" or .arrange == "adaptive") and .feature != "none" and any(.live_order[]; .bundle == $b))][0]')
+if [ "$space" = "null" ]; then bad "$LIGHT did not land on an active fixed/adaptive Space with a feature"; else
   sid=$(jq '.space_id' <<<"$space")
-  ok "$LIGHT tiled on Space $sid (master: $(jq -r '.live_order[0].app' <<<"$space"))"
+  ok "$LIGHT tiled on Space $sid (feature: $(jq -r '.live_order[0].app' <<<"$space"))"
   open -b "$HEAVY"; sleep 2
   after=$(dump | jq -c --argjson s "$sid" '.spaces[] | select(.space_id == $s)')
-  master=$(jq -r '.live_order[0].bundle' <<<"$after")
-  [ "$master" = "$HEAVY" ] && ok "$HEAVY (weight $(jq '.live_order[0].weight' <<<"$after")) became master without any command" \
-                            || bad "master is $master, expected $HEAVY (is its rule weight > the others?)"
+  featured=$(jq -r '.live_order[0].bundle' <<<"$after")
+  [ "$featured" = "$HEAVY" ] && ok "$HEAVY (weight $(jq '.live_order[0].weight' <<<"$after")) took the feature slot without any command" \
+                            || bad "feature is $featured, expected $HEAVY (is its rule weight > the others?)"
   jq -e '.manual == false' <<<"$after" >/dev/null && ok "Space is not in manual mode (pure weight placement)" || bad "Space unexpectedly manual"
 fi
 
 # ---------------------------------------------------------------------------
-step "3. Window dragged to another Space in Mission Control adopts that Space's mode"
+step "3. Window dragged to another Space in Mission Control adopts that Space's layout"
 snapshot=$(dump)
-pause "Open Mission Control, drag one tiled window onto a DIFFERENT desktop thumbnail of the same display whose mode differs (e.g. a bsp Space), exit Mission Control, switch to that desktop, then press enter"
+pause "Open Mission Control, drag one tiled window onto a DIFFERENT desktop thumbnail of the same display whose layout differs (e.g. a dwindle Space), exit Mission Control, switch to that desktop, then press enter"
 sleep 0.5
 moved=$(dump | jq -c --argjson old "$snapshot" '
-  [.spaces[] as $s | $s.live_order[] | {id, app, space: $s.space_id, mode: $s.mode}] as $now
+  [.spaces[] as $s | $s.live_order[] | {id, app, space: $s.space_id, layout: $s.layout}] as $now
   | [$old.spaces[] as $s | $s.live_order[] | {id, space: $s.space_id}] as $was
   | [$now[] | . as $n | select(any($was[]; .id == $n.id and .space != $n.space))]')
 if [ "$(jq 'length' <<<"$moved")" -ge 1 ]; then
-  jq -r '.[] | "  ✓ \(.app) (\(.id)) now on Space \(.space) laid out as \(.mode)"' <<<"$moved"; pass=$((pass + 1))
+  jq -r '.[] | "  ✓ \(.app) (\(.id)) now on Space \(.space) laid out as \(.layout)"' <<<"$moved"; pass=$((pass + 1))
   sid=$(jq '.[0].space' <<<"$moved"); wid=$(jq '.[0].id' <<<"$moved")
   dump | jq -e --argjson s "$sid" --argjson w "$wid" '.spaces[] | select(.space_id == $s) | any(.frames[]; .window.id == $w)' >/dev/null \
     && ok "arrived window has a computed frame on its new Space" || bad "arrived window has no frame on its new Space"
@@ -171,8 +171,10 @@ before=$(dump | jq -c '[.spaces[] | select(.active)]')
 mono=$(dump | jq -c '[.spaces[] | select(.active and .monocle)][0]')
 if [ "$mono" != "null" ]; then
   ok "monocle on for Space $(jq '.space_id' <<<"$mono")"
-  jq -e '[.frames[] | [.x, .y, .w, .h]] | unique | length == 1' <<<"$mono" >/dev/null && ok "every tiled window shares the full-Space frame" || bad "monocle frames differ"
-  pause "Menu bar should show a trailing Z. Check it, then press enter"
+  jq -e '[.frames[] | [.w, .h]] | unique | length == 1' <<<"$mono" >/dev/null && ok "every tiled window has the one deck slot size" || bad "monocle deck frames differ in size"
+  jq -e --argjson s "$(jq '.space_id' <<<"$mono")" --argjson b "$before" '.layout == ($b[] | select(.space_id == $s) | .layout)' <<<"$mono" >/dev/null \
+    && ok "monocle keeps the desktop's layout" || bad "monocle changed the layout"
+  pause "Menu bar should show the layout glyph followed by ⤢, and the menu should read Exit Monocle. Check it, then press enter"
   "$BALLAST" send monocle; sleep 0.5
   sid=$(jq '.space_id' <<<"$mono")
   restored=$(jq -n --argjson a "$before" --argjson b "$(dump | jq -c '[.spaces[] | select(.active)]')" --argjson s "$sid" \

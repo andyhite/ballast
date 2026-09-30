@@ -69,6 +69,18 @@ public struct Hotkey: Hashable, Sendable, CustomStringConvertible {
         return parts.joined(separator: "+")
     }
 
+    /// macOS-style symbols for menus, e.g. `⌥M` or `⌃⌥←`.
+    public var symbols: String {
+        var text = ""
+        if modifiers.contains(.control) { text += "⌃" }
+        if modifiers.contains(.option) { text += "⌥" }
+        if modifiers.contains(.shift) { text += "⇧" }
+        if modifiers.contains(.command) { text += "⌘" }
+        let named = ["left": "←", "right": "→", "up": "↑", "down": "↓", "return": "↩", "tab": "⇥", "escape": "⎋",
+                     "delete": "⌫", "space": "Space"]
+        return text + (named[keyName] ?? keyName.uppercased())
+    }
+
     /// Parses a hotkey spec such as `"ctrl+alt+h"` or `"hyper+space"`.
     public static func parse(_ spec: String) -> Result<Hotkey, HotkeyParseError> {
         let trimmedSpec = spec.trimmingCharacters(in: .whitespacesAndNewlines)

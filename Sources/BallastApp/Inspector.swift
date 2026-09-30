@@ -288,7 +288,7 @@ final class InspectorModel: ObservableObject {
         guard let space = record.space, manager.engine.isTiled(record.id) else {
             return record.space == nil ? "Not tiled — not on a desktop Ballast knows" : "Not tiled — full-screen Space"
         }
-        if manager.engine.mode(for: space) == .float { return "Not tiled — desktop in float mode" }
+        if manager.engine.arrangement(for: space) == .float { return "Not tiled — desktop in float layout" }
         guard let reason else { return "Tiled" }
         return record.floatOverride == false
             ? "Tiled — toggled with `float` (default: \(reason.description))"
@@ -316,53 +316,60 @@ final class InspectorModel: ObservableObject {
             return [.init(label: "Position", value: "—")]
         }
         let engine = manager.engine
-        let mode = engine.mode(for: space)
         let state = engine.spaces[space]
         return [
-            .init(label: "Mode", value: modeDescription(space: space, mode: mode)),
+            .init(label: "Layout", value: engine.layoutDescription(for: space)),
             .init(label: "Monocle", value: (state?.monocle ?? false) ? "yes" : "no"),
             .init(label: "Manual", value: (state?.manual ?? false) ? "yes" : "no"),
-            .init(label: "Position", value: positionDescription(space: space, windowID: record.id, mode: mode, state: state)),
+            .init(label: "Position", value: positionDescription(space: space, windowID: record.id, state: state)),
         ]
     }
 
-    /// Notes when the mode comes from the display (no override, no config
-    /// `mode` for this desktop or in `[layout]`).
-    private func modeDescription(space: SpaceID, mode: LayoutMode) -> String {
-        let engine = manager.engine
-        guard !engine.passthrough, engine.spaces[space]?.modeOverride == nil, let key = engine.snapshot.key(for: space),
-              manager.config.layoutSettings(for: key).mode == nil else { return mode.rawValue }
-        return "\(mode.rawValue) (automatic: \(engine.snapshot.isBuiltin(display: key.display) ? "built-in" : "external") display)"
+    /// Where the window's tile sits, then which window of its deck it is, if it is in one.
+    private func positionDescription(space: SpaceID, windowID: WindowID, state: SpaceState?) -> String {
+        guard let state, state.isDecked(windowID) else {
+            return tilePosition(space: space, windowID: windowID, state: state, viewState: true)
+        }
+        let tile = state.tile(of: windowID)
+        let members = state.windows(ofTile: tile)
+        let place = tilePosition(space: space, windowID: tile, state: state, viewState: false)
+        let index = (members.firstIndex(of: windowID) ?? 0) + 1
+        var text = "\(place) — deck window \(index) of \(members.count)"
+        if let display = displayInfo(for: space), manager.engine.arrangement(for: space) != .float, !state.monocle {
+            let covered = manager.engine.layout(space: space, area: display.visibleFrame).covered[windowID]
+            text += covered.map { $0.width > 0 && $0.height > 0 ? ", peeking" : ", tucked away" } ?? ", in view"
+        }
+        return text
     }
 
-    private func positionDescription(space: SpaceID, windowID: WindowID, mode: LayoutMode, state: SpaceState?) -> String {
-        if mode == .bsp { return "BSP tile" }
-        guard mode.hasMaster, let state else { return "—" }
-        let order = state.liveOrder
-        guard let index = order.firstIndex(of: windowID) else { return "—" }
+    private func tilePosition(space: SpaceID, windowID: WindowID, state: SpaceState?,
+                              viewState showViewState: Bool) -> String {
         let settings = manager.engine.settings(for: space)
-        let masterCount = max(1, state.masterCountOverride ?? settings.masterCount)
-        if index < masterCount { return "master" }
-        let stackIndex = index - masterCount
-        let stackCount = order.count - masterCount
-        let slot = MasterLayout.slot(ofStackIndex: stackIndex, stackCount: stackCount,
-                                     columns: settings.stackColumns(in: mode), limit: settings.stackLimit(in: mode),
-                                     bothSides: settings.stackBothSides)
-        var place: [String] = []
-        if slot.sides > 1 { place.append("\((slot.side == 0 ? settings.stackSide : settings.stackSide.opposite).rawValue) side") }
-        if slot.columns > 1 { place.append("column \(slot.column + 1) of \(slot.columns)") }
-        let sideNote = place.isEmpty ? "" : " (\(place.joined(separator: ", ")))"
-        guard let display = displayInfo(for: space) else {
-            return "stack \(stackIndex + 1) of \(stackCount)\(sideNote)"
+        guard settings.arrange != .float, let state else { return "—" }
+        let order = settings.arrange.isTree ? (state.tree?.leaves ?? []) : state.liveOrder
+        guard let index = order.firstIndex(of: windowID) else { return "—" }
+        let featureCount = FeatureLayout.featuredCount(feature: settings.effectiveFeature, count: settings.featureCount,
+                                                       total: order.count)
+        if index < featureCount { return "feature" }
+        let gridIndex = index - featureCount
+        let gridCount = order.count - featureCount
+        var text = "tile \(gridIndex + 1) of \(gridCount)"
+        if settings.arrange == .fixed {
+            let slot = FeatureLayout.slot(ofGridIndex: gridIndex, gridCount: gridCount, columns: settings.gridColumns,
+                                          limit: settings.deckLimit, center: settings.effectiveFeature == .center)
+            var place: [String] = []
+            if slot.halves > 1 { place.append(slot.half == 0 ? "right half" : "left half") }
+            if slot.columns > 1 { place.append("column \(slot.column + 1) of \(slot.columns)") }
+            if !place.isEmpty { text += " (\(place.joined(separator: ", ")))" }
         }
+        guard showViewState, let display = displayInfo(for: space) else { return text }
         let layout = manager.engine.layout(space: space, area: display.visibleFrame)
-        let viewState: String
         if let strip = layout.covered[windowID] {
-            viewState = strip.width > 0 && strip.height > 0 ? "peeking" : "tucked away"
-        } else {
-            viewState = "in view"
+            text += strip.width > 0 && strip.height > 0 ? " — peeking" : " — tucked away"
+        } else if settings.arrange == .fixed, state.tileCount - featureCount > 1 {
+            text += " — in view"
         }
-        return "stack \(stackIndex + 1) of \(stackCount)\(sideNote) — \(viewState)"
+        return text
     }
 
     private func resolveSpace(record: WindowRecord?, windowID: WindowID?) -> SpaceResolution {

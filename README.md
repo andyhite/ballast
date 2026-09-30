@@ -17,28 +17,51 @@
 
 macOS keeps owning your desktops: it creates them, switches them, and decides which
 Space each window lives on. Ballast watches those changes and tiles whatever is on
-each **(display, Space)** pair using that pair's layout mode.
+each **(display, Space)** pair using that pair's arrangement settings.
 
-- **Per-desktop layouts.** Each desktop on each display has its own mode:
-  `master_grid` (masters beside one or two stacks, each split into
-  `grid_columns` side-by-side columns that fill column-major and hold up to
-  `grid_max` windows per column before the outermost column scrolls),
-  `master_stack` (masters beside a stack that shows one window at a time, its
-  neighbors' edges peeking, and scrolls with `focus up/down` — built for
-  laptop screens), `bsp`, or `float`, where Ballast leaves the desktop alone.
-  Either mode can put a stack on both sides of the master with
-  `stack_both_sides`, and a window you open joins the top of the stack, in
-  view. Until you pick a mode, a laptop's built-in display gets
-  `master_stack` and external displays get `master_grid`.
+- **Per-desktop layouts.** Every desktop is a **grid** of **tiles**, plus an
+  optional **feature** area: a large region, on the side or in the middle,
+  that holds the first windows in the order (*featured* windows). Each tile
+  holds one window, or a **deck** of layered windows. You choose the grid
+  with `arrange`:
+  `fixed` (`columns` × `rows`: each column tiles up to `rows` windows, and
+  past `columns * rows` the last column becomes a deck that scrolls with
+  `rows` in view; `rows = 0` means no cap), `adaptive` (equal cells, about √n
+  per side, the last row stretching), `dwindle` (a BSP spiral where new
+  windows split the focused tile), `balanced` (a BSP equal-area grid), or
+  `float`, where Ballast leaves the desktop alone. `feature` puts the
+  feature area on the `left`, `right`, `top`, `bottom`, in the `center`
+  (the grid splits into a right and a left half), or `none`;
+  `feature_size` and `feature_count` size it. A window you open joins the
+  top of the grid, in view.
+- **Defaults follow the screen.** A display narrower than 1800 pt (every
+  MacBook default resolution) is *small*, any other is *large*. Keys you
+  don't set use these defaults: on a small display, `fixed` 1×1 with no
+  feature (one full-screen deck); on a large one, `fixed` with `columns = 1`,
+  `rows = 2`, `feature = "left"`, `feature_size = 0.6`, `feature_count = 1`.
+  A key set in `[layout]` applies to every screen, and a `[[space]]`
+  overrides it per desktop.
+- **Floating desktops cascade.** On a `float` desktop (not under Stage
+  Manager), a window that opens and would otherwise tile is moved once to the
+  next free cascade slot, 28 pt down and right of the last; `float_placement =
+  "none"` leaves it where the app put it.
 - **Dialogs float by default.** A window that isn't a standard resizable
   window — a settings pane, an update prompt, a confirmation sheet, an Open
   or Save panel, anything modal, fixed-size, or without a full-screen
   button — floats over the window it belongs to instead of tiling. Set
   `float = false` on a rule, or use the Window Inspector's rule buttons, for
   the exceptions.
-- **Weighted windows.** Rules give apps a weight. Heavier windows take the master
-  slot and get more room, a taller stack slot or a bigger BSP tile, the moment
-  they open.
+- **Weighted windows.** Rules give apps a weight. Heavier windows take the
+  feature slot and get more room, a taller column slot or a bigger BSP tile,
+  the moment they open.
+- **Decks.** `deck left` (or right, up, down) puts the focused window in its
+  neighbor's tile, and the tile becomes a deck of windows: the focused one
+  fills it, the others peek out at the edges (`deck_peek` sets the strip).
+  Every arrangement treats a deck as one tile; it weighs as much as its
+  heaviest window. A featured window can be in a deck.
+- **Monocle.** `monocle` turns every tiled window into one temporary
+  full-area deck and keeps your arrangement; toggle it again to get the
+  arrangement back.
 - **Your arrangement stays put.** Once you swap, promote, or resize by hand,
   Ballast keeps that arrangement until you `reset`. Config reloads never undo it.
 - **See where focus lands.** When a Ballast command moves focus, a border in
@@ -105,16 +128,20 @@ and the Accessibility entry stay in place.
 
 ## Using it
 
-The menu bar shows the current desktop and its mode, for example `2 · MS`,
-`1 · BSP`, or `3 · ⋯`. A `Z` suffix means monocle is on. Red `! …` text means
+The menu bar shows the current desktop and its layout glyph, for example
+`2 · F·1×2`, `1 · D`, or `3 · ⋯`. An `F·` prefix means the desktop has a
+feature area; then `C×R` is a `fixed` grid (`R` is `∞` when `rows = 0`),
+`A` is `adaptive`, `D` is `dwindle`, `B` is `balanced`, and `⋯` is `float`.
+A `⤢` after the glyph means monocle is on. Red `! …` text means
 something needs your attention; open the menu to see what.
 
 The menu, top to bottom:
 
-1. **Adjust Desktop ▸**: the layout mode (Master-Grid, Master-Stack, BSP,
-   Floating; the default one says so), this desktop's settings for that
-   mode, gaps, **Remove Desktop Overrides**, and **More in Settings…**.
-2. **Monocle**, **Reset Arrangement**, and **Re-layout Desktop**.
+1. **Adjust Desktop ▸**: this desktop's arrangement (Fixed, Adaptive, Dwindle,
+   Balanced, Float; the default one says so), feature, and their settings,
+   gaps, **Remove Desktop Overrides**, and **More in Settings…**.
+2. **Monocle** (**Exit Monocle** while it is on), **Reset Arrangement**, and
+   **Re-layout Desktop**.
 3. **The focused app ▸**: Weight (1, 2, 3, 5, 8, 13), Manage (Always or
    Never), Float (Automatic, Always, or Never), and **Inspect Window…**.
    Picking a `(default)` entry removes that key from the app's rule. This
@@ -144,32 +171,38 @@ config file, Ballast uses built-in defaults and has **no hotkeys**. Choose
 **Open Config File** in the menu to create a starter file.
 
 ```toml
-[layout]                     # no `mode`: master_stack on the built-in display, master_grid on external ones
-master_ratio = 0.6
+[layout]                     # unset keys follow the screen: one full-screen deck on small displays, feature left on large ones
+feature_size = 0.6
 gaps = { inner = 8, outer = 8 }
 
 [[space]]                    # override one desktop by its Space UUID: `ballast spaces` prints UUIDs + ordinals
 uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
-mode = "bsp"
+arrange = "dwindle"
 
 [[space]]                    # or by display UUID + position (shifts if you reorder desktops)
 display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
 ordinal = 2
-mode = "master_grid"
+arrange = "fixed"
+columns = 2
+rows = 3
+feature = "right"
 
-[[space]]                    # a one-window stack on an external desktop too
+[[space]]                    # a one-window deck on an external desktop too
 display = "6D147BFB-7E3C-4CCD-9825-F1A5A059052D"
 ordinal = 1
-mode = "master_stack"
+arrange = "fixed"
+columns = 1
+rows = 1
+feature = "none"
 
-[[rule]]                     # Ghostty takes the master slot from anything lighter
+[[rule]]                     # Ghostty takes the feature slot from anything lighter
 app_id = "com.mitchellh.ghostty"
 weight = 10
 
 [bindings]
 "alt+h" = "focus left"
 "alt+return" = "promote"
-"alt+space" = "layout next"
+"alt+m" = "monocle"
 ```
 
 Ballast reloads the file when you save it. If the new file is invalid,
@@ -187,14 +220,14 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 
 | Command | Effect |
 |---|---|
-| `focus left\|right\|up\|down`, `focus-last`, `focus-master` | Move focus; at a display edge, continue onto the nearest display in that direction |
-| `swap left\|right\|up\|down`, `promote` | Rearrange tiles (makes the desktop manual) |
+| `focus left\|right\|up\|down`, `focus-last`, `focus-feature` | Move focus; at a display edge, continue onto the nearest display in that direction. `focus-feature` toggles focus to and from the feature |
+| `swap left\|right\|up\|down`, `promote` | Rearrange tiles (makes the desktop manual). `promote` swaps the focused tile into the first feature slot |
+| `deck left\|right\|up\|down`, `undeck` | Put the focused window in the tile of its neighbor that way (a *deck*: windows sharing one tile, shown like an overflow deck with the neighbors peeking; `deck_peek` sets the strip), or take it out into its own tile right after the deck. Makes the desktop manual. `focus up`/`down` move through a deck's windows. A deck left with one window dissolves; `reset` dissolves them all; float ignores them |
 | `reset` | Drop the manual arrangement; re-rank by weight |
 | `relayout` | Fix a garbled desktop: re-read its windows, forget learned minimum sizes, re-send every frame. Keeps the arrangement |
-| `layout master_grid\|master_stack\|bsp\|float\|next\|prev\|default` | Change this desktop's mode |
-| `monocle`, `float` | Toggle full-tile monocle / float the focused window |
-| `grow [n]`, `shrink [n]`, `balance` | Resize the focused tile / even out splits |
-| `master-ratio <±d>`, `master-count <±d>` | Adjust the master region (ratio clamped strictly between 5% and 95%, never reversing direction near a bound) |
+| `monocle`, `float` | Toggle monocle (a temporary full-area deck of every tiled window) / float the focused window |
+| `grow [n]`, `shrink [n]`, `balance` | Resize: the feature size in `fixed` and `adaptive` when a feature is on, BSP split ratios in `dwindle` and `balanced`. Does nothing, and says so, when neither applies |
+| `feature-size <±d>`, `feature-count <±d>` | Adjust the feature area (size clamped strictly between 5% and 95%, never reversing direction near a bound) |
 | `send-to-display next\|prev`, `focus-display next\|prev` | Move a window or focus to the next/previous display |
 | `reload`, `dump-state` | Reload config / write state to `~/Library/Caches/dev.ballast/state.json` |
 
@@ -234,7 +267,7 @@ scripts/smoke-test.sh                     # live-desktop checks; see docs/SMOKE_
 
 | Target | Role |
 |---|---|
-| `BallastCore` | Config, rules, weights, BSP, master-grid/master-stack layouts, and the engine state machine. Pure values with no I/O, so it can be unit-tested and fuzzed. |
+| `BallastCore` | Config, rules, weights, BSP, the fixed/adaptive grids, decks, feature area, and the engine state machine. Pure values with no I/O, so it can be unit-tested and fuzzed. |
 | `BallastApp` | macOS glue: Accessibility, read-only SkyLight, menu bar, hotkeys, and Preferences. |
 | `ballast` | A single binary that serves as both the app and the CLI. |
 

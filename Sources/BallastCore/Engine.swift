@@ -35,19 +35,23 @@ public struct WindowRecord: Equatable, Sendable {
 /// `SpaceKey`.
 public struct SpaceState: Equatable, Sendable {
     public let id: SpaceID
-    /// Mode chosen at runtime; transient until the platform persists it to
-    /// the config file and calls `clearSettingOverrides`. Survives config
-    /// reloads in the meantime. `nil` = config default.
-    public var modeOverride: LayoutMode?
     public var monocle = false
-    /// Transient until persisted to the config file (see `modeOverride`).
-    public var masterRatioOverride: Double?
-    /// Transient until persisted to the config file (see `modeOverride`).
-    public var masterCountOverride: Int?
+    /// Runtime feature size, transient until the platform persists it to
+    /// the config file and calls `clearSettingOverrides`. Survives config
+    /// reloads in the meantime. `nil` = config value.
+    public var featureSizeOverride: Double?
+    /// Transient until persisted to the config file (see `featureSizeOverride`).
+    public var featureCountOverride: Int?
     /// Tiled windows on this Space, in join order.
     public internal(set) var members: [WindowID] = []
+    /// Number of tiles the layout arranges (a deck counts once).
+    public var tileCount: Int { tiles.count }
+    /// Decks: windows layered in one tile, keyed by the window holding that
+    /// tile — the only one of them the tree and the orders list — each with
+    /// all its windows. Never fewer than two windows, no window in two decks.
+    public internal(set) var decks: [WindowID: [WindowID]] = [:]
     /// `members` by when each last took focus or joined the Space, most
-    /// recent first. The view follows it — a scrolling stack keeps the first
+    /// recent first. The view follows it — a scrolling deck keeps the first
     /// in view, monocle puts it in front — so a window that just opened shows
     /// before focus reaches it, or if focus never does. A window of another
     /// app than a focused tile here joins right behind that tile instead:
@@ -58,9 +62,9 @@ public struct SpaceState: Equatable, Sendable {
     /// True once the user rearranged manually; the ideal is then not applied
     /// until `reset`.
     public internal(set) var manual = false
-    /// Live master-stack order while `manual`.
+    /// Live tile order while `manual`.
     public internal(set) var manualOrder: [WindowID] = []
-    /// Live BSP tree (always maintained, rendered in BSP mode).
+    /// Live BSP tree (always maintained, rendered by dwindle and balanced).
     public internal(set) var tree: BSPNode?
     /// Frames adopted from windows that moved themselves (`on_self_move = adopt`).
     public internal(set) var frameOverrides: [WindowID: CGRect] = [:]
@@ -68,32 +72,32 @@ public struct SpaceState: Equatable, Sendable {
 
     public init(id: SpaceID) { self.id = id }
 
-    /// Live master-stack order.
+    /// Live tile order.
     public var liveOrder: [WindowID] { manual ? manualOrder : idealOrder }
 }
 
 public struct SpaceLayout: Equatable, Sendable {
-    public var mode: LayoutMode
+    public var arrangement: Arrangement
     public var monocle: Bool
     public var frames: [WindowID: CGRect]
     /// Window to raise above its siblings: the front window (see
-    /// `SpaceState.recentTiles`) of monocle, or of a scrolling stack while
+    /// `SpaceState.recentTiles`) of monocle, or of a scrolling deck while
     /// it is in view. Never a window of the focused window's app but the
     /// focused window itself: raising a window makes it its app's focused
     /// window, which steals focus from an active app.
     public var raise: WindowID?
-    /// Stack windows tucked behind a tile while the stack scrolls, each with
+    /// Deck windows tucked behind a tile while the deck scrolls, each with
     /// the strip of it left showing (zero-length when fully hidden).
     public var covered: [WindowID: CGRect] = [:]
-    /// Tiles in view that keep a scrolling stack's deck in order, each with
+    /// Tiles in view that keep a scrolling deck in order, each with
     /// the scrolled-out windows that belong behind it. Leaves out `raise`,
     /// which is raised anyway, and every tile `raise`'s rules forbid.
     public var behind: [WindowID: [WindowID]] = [:]
-    /// Windows of a scrolling stack column, minus any at a frame of their
+    /// Windows of a scrolling deck, minus any at a frame of their
     /// own: moving focus through the column slides these along it.
     public var scrolling: Set<WindowID> = []
     /// Positions directional focus and swap move between: `frames`, except
-    /// that a scrolling stack's windows continue past either end of the view.
+    /// that a scrolling deck's windows continue past either end of the view.
     var navigation: [WindowID: CGRect] = [:]
 
     /// Tiles in `behind` that a window belonging behind them is in front of,
@@ -126,16 +130,13 @@ public enum PlatformAction: Equatable, Sendable {
 /// truth again instead of the transient runtime override.
 public struct SettingsChange: Equatable, Sendable {
     public var space: SpaceID
-    /// `nil` = unchanged; `.some(nil)` = remove `mode` (inherit `[layout]`).
-    public var mode: LayoutMode??
-    public var masterRatio: Double?
-    public var masterCount: Int?
+    public var featureSize: Double?
+    public var featureCount: Int?
 
-    public init(space: SpaceID, mode: LayoutMode?? = nil, masterRatio: Double? = nil, masterCount: Int? = nil) {
+    public init(space: SpaceID, featureSize: Double? = nil, featureCount: Int? = nil) {
         self.space = space
-        self.mode = mode
-        self.masterRatio = masterRatio
-        self.masterCount = masterCount
+        self.featureSize = featureSize
+        self.featureCount = featureCount
     }
 }
 
@@ -146,7 +147,7 @@ public struct CommandOutcome: Equatable, Sendable {
     /// User-facing note when the command could not apply.
     public var message: String?
     /// Set when the command changed a setting that should be written back
-    /// to the config file (layout mode, master ratio, master count).
+    /// to the config file (feature size, feature count).
     public var settings: SettingsChange?
 
     public init() {}
@@ -183,16 +184,28 @@ public struct Engine: Sendable {
 
     // MARK: Queries
 
+    /// Effective settings for `space`: built-in defaults for its display's
+    /// screen size, `[layout]`, its `[[space]]`, then the runtime feature
+    /// size and count a command set but the config file does not hold yet.
+    /// Stage Manager passthrough makes every Space `float`.
     public func settings(for space: SpaceID) -> LayoutSettings {
-        config.layoutSettings(for: snapshot.key(for: space))
+        let key = snapshot.key(for: space)
+        var s = config.layoutSettings(for: key, small: key.map { snapshot.isSmall(display: $0.display) } ?? false)
+        if let featureSize = spaces[space]?.featureSizeOverride { s.featureSize = featureSize }
+        if let featureCount = spaces[space]?.featureCountOverride { s.featureCount = featureCount }
+        if passthrough { s.arrange = .float }
+        return s
     }
 
-    public func mode(for space: SpaceID) -> LayoutMode {
-        if passthrough { return .float }
-        if let override = spaces[space]?.modeOverride { return override }
-        let key = snapshot.key(for: space)
-        return config.layoutSettings(for: key).mode(builtin: key.map { snapshot.isBuiltin(display: $0.display) } ?? false)
-    }
+    public func arrangement(for space: SpaceID) -> Arrangement { settings(for: space).arrange }
+
+    /// The menu-bar glyph of `space`'s layout (without the monocle mark).
+    public func glyph(for space: SpaceID) -> String { settings(for: space).glyph }
+
+    /// Human description of `space`'s layout, e.g. "Fixed 1×2 with left feature".
+    public func layoutDescription(for space: SpaceID) -> String { settings(for: space).summary }
+
+    public func isMonocle(_ space: SpaceID) -> Bool { spaces[space]?.monocle ?? false }
 
     public func isTiled(_ id: WindowID) -> Bool {
         guard let w = windows[id], let space = w.space else { return false }
@@ -200,14 +213,13 @@ public struct Engine: Sendable {
     }
 
     public func layout(space: SpaceID, area: CGRect) -> SpaceLayout {
-        let mode = mode(for: space)
-        guard let state = spaces[space], mode != .float else {
-            return SpaceLayout(mode: mode, monocle: spaces[space]?.monocle ?? false, frames: [:], raise: nil)
-        }
         let s = settings(for: space)
+        guard let state = spaces[space], s.arrange != .float else {
+            return SpaceLayout(arrangement: s.arrange, monocle: spaces[space]?.monocle ?? false, frames: [:], raise: nil)
+        }
         let inner = area.insetClamped(by: s.gaps.outer)
-        let minSize: (WindowID) -> CGSize = { windows[$0]?.minSize ?? .zero }
-        let weight: (WindowID) -> Double = { windows[$0]?.rule.weight ?? 1 }
+        let windowMinSize: (WindowID) -> CGSize = { windows[$0]?.minSize ?? .zero }
+        let windowWeight: (WindowID) -> Double = { windows[$0]?.rule.weight ?? 1 }
         // No tiled member may be raised over a focused window that isn't
         // itself a member of this Space (floating, unmanaged, or shared
         // across every Space), even when the layout is recomputed for an
@@ -223,31 +235,26 @@ public struct Engine: Sendable {
             return windows[id]?.pid != pid
         }
         let front = state.recentTiles.first
-        var result = SpaceLayout(mode: mode, monocle: state.monocle, frames: [:], raise: nil)
-        var deck: [WindowID: [WindowID]] = [:]
+        var result = SpaceLayout(arrangement: s.arrange, monocle: state.monocle, frames: [:], raise: nil)
+        var plan: TilePlan
         if state.monocle {
-            result.frames = Dictionary(state.members.map { ($0, inner) }, uniquingKeysWith: { a, _ in a })
-            if let front, raisable(front) { result.raise = front }
-        } else if mode == .bsp {
-            result.frames = state.tree?.layout(in: inner, context: bspContext(s)) ?? [:]
-            result.navigation = result.frames
+            // One full-area deck of every tiled window.
+            plan = DeckLayout.column(state.expanding(tileOrder(state)), in: inner, axis: .vertical, gap: s.gaps.inner,
+                                     limit: 1, peek: s.deckPeek, recent: state.recentTiles, weight: windowWeight,
+                                     maxWeightRatio: .infinity, minSize: windowMinSize)
         } else {
-            let plan = MasterLayout.plan(
-                order: state.liveOrder, in: inner,
-                masterCount: state.masterCountOverride ?? s.masterCount,
-                ratio: state.masterRatioOverride ?? s.masterRatio,
-                side: s.stackSide, gap: s.gaps.inner, stackLimit: s.stackLimit(in: mode),
-                columns: s.stackColumns(in: mode), bothSides: s.stackBothSides, peek: s.stackPeek,
-                recent: state.recentTiles, weight: weight, maxWeightRatio: s.maxWeightRatio, minSize: minSize)
-            result.frames = plan.frames
-            result.covered = plan.covered
-            result.navigation = plan.navigation
-            deck = plan.behind
-            result.scrolling = plan.scrolling
-            // Keep the front window in view on top of the ones tucked behind it.
-            if !plan.covered.isEmpty, let front, plan.inView.contains(front), raisable(front) {
-                result.raise = front
-            }
+            plan = tilePlan(state, s, in: inner)
+            plan = DeckLayout.expand(plan, decks: state.decks, recent: state.recentTiles, gap: s.gaps.inner,
+                                     peek: s.deckPeek, weight: windowWeight, minSize: windowMinSize)
+        }
+        result.frames = plan.frames
+        result.covered = plan.covered
+        result.navigation = plan.navigation
+        let tucked = plan.behind
+        result.scrolling = plan.scrolling
+        // Keep the front window in view on top of the ones tucked behind it.
+        if !plan.covered.isEmpty, let front, plan.inView.contains(front), raisable(front) {
+            result.raise = front
         }
         var pinned = Set<WindowID>()
         if !state.monocle {
@@ -260,11 +267,37 @@ public struct Engine: Sendable {
             }
         }
         // A window at a frame of its own is no part of the deck.
-        for (tile, hidden) in deck where tile != result.raise && !pinned.contains(tile) && raisable(tile) {
+        for (tile, hidden) in tucked where tile != result.raise && !pinned.contains(tile) && raisable(tile) {
             let kept = hidden.filter { !pinned.contains($0) }
             if !kept.isEmpty { result.behind[tile] = kept }
         }
         return result
+    }
+
+    /// The feature and grid of a non-monocle Space, one tile per deck (the
+    /// layouts see the heaviest and biggest-minimum window of each deck).
+    private func tilePlan(_ state: SpaceState, _ s: LayoutSettings, in inner: CGRect) -> TilePlan {
+        let order = tileOrder(state)
+        let feature = s.effectiveFeature
+        let grid: GridKind
+        switch s.arrange {
+        case .fixed, .float: grid = .fixed(columns: s.gridColumns, limit: s.deckLimit)
+        case .adaptive: grid = .adaptive
+        case .dwindle, .balanced:
+            // The tree lays out the tiles the feature does not take.
+            let featured = Set(order.prefix(FeatureLayout.featuredCount(feature: feature, count: s.featureCount, total: order.count)))
+            let tree = state.tree?.without(featured)
+            let context = bspContext(s, decks: state.decks)
+            grid = .custom { rect in
+                let frames = tree?.layout(in: rect, context: context) ?? [:]
+                return TilePlan(frames: frames, navigation: frames)
+            }
+        }
+        return FeatureLayout.plan(
+            order: order, in: inner, feature: feature, featureCount: s.featureCount, size: s.featureSize,
+            grid: grid, gap: s.gaps.inner, peek: s.deckPeek, recent: state.recentTileHolders,
+            weight: tileWeight(decks: state.decks), maxWeightRatio: s.maxWeightRatio,
+            minSize: tileMinSize(decks: state.decks))
     }
 
     /// One-shot frame for a newly floating window with a `placement`/`size` rule.
@@ -307,7 +340,8 @@ public struct Engine: Sendable {
         for (id, w) in windows where w.space.map({ !alive.contains($0) && !new.isFullscreen($0) }) ?? false {
             windows[id]?.space = nil
         }
-        for id in spaces.keys where old.key(for: id) != new.key(for: id) { dirty.insert(id) }
+        let small = { (snapshot: SpaceSnapshot, id: SpaceID) in snapshot.key(for: id).map { snapshot.isSmall(display: $0.display) } }
+        for id in spaces.keys where old.key(for: id) != new.key(for: id) || small(old, id) != small(new, id) { dirty.insert(id) }
         // Windows now on a fullscreen Space stop tiling.
         for (id, w) in windows {
             if let space = w.space, new.isFullscreen(space) { dirty.formUnion(detach(id, from: space)) }
@@ -316,13 +350,16 @@ public struct Engine: Sendable {
     }
 
     public mutating func applyConfig(_ new: Config) -> Set<SpaceID> {
-        let oldSplit = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0).split) })
+        let oldSettings = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0)) })
         config = new
         // A changed `split` takes effect on Spaces still in their weight-default
         // arrangement; manually arranged Spaces keep theirs until `reset`.
-        for (id, old) in oldSplit where settings(for: id).split != old {
+        var reshaped = Set<SpaceID>()
+        for (id, old) in oldSettings {
+            let now = settings(for: id)
             guard var s = spaces[id], !s.manual else { continue }
-            s.tree = s.tree?.withAxis(settings(for: id).split)
+            if now.split != old.split { s.tree = s.tree?.withAxis(now.split) }
+            if now.arrange.isTree, old.arrange != now.arrange { reshaped.insert(id) }
             spaces[id] = s
         }
         for id in windows.keys.sorted() {
@@ -332,6 +369,12 @@ public struct Engine: Sendable {
             syncMembership(id)
         }
         for id in Array(spaces.keys) { recomputeIdeal(id) }
+        // Dwindle and balanced differ in their weight-default tree.
+        for id in reshaped.sorted() {
+            guard var s = spaces[id], !s.manual else { continue }
+            s.tree = idealTree(s.idealOrder, on: id, decks: s.decks)
+            spaces[id] = s
+        }
         return Set(spaces.keys)
     }
 
@@ -426,6 +469,8 @@ public struct Engine: Sendable {
               var s = spaces[space], s.members.contains(hidden) else {
             return syncMembership(hidden).union(syncMembership(shown))
         }
+        // A tab already in a deck leaves it: it takes `hidden`'s place.
+        if s.isDecked(shown) { leaveTile(shown, in: &s, space: space) }
         func inherit(_ ids: inout [WindowID]) {
             ids.removeAll { $0 == shown }
             if let i = ids.firstIndex(of: hidden) { ids[i] = shown }
@@ -434,10 +479,16 @@ public struct Engine: Sendable {
         inherit(&s.recentTiles)
         inherit(&s.idealOrder)
         inherit(&s.manualOrder)
+        for (key, list) in s.decks {
+            var list = list
+            inherit(&list)
+            s.decks[key] = nil
+            s.decks[key == hidden ? shown : key] = list
+        }
         if let tree = s.tree {
             switch tree.substituting(shown, for: hidden) {
             case .success(let next): s.tree = next
-            case .failure: s.tree = idealTree(s.members, on: space)
+            case .failure: s.tree = idealTree(s.tiles, on: space, decks: s.decks)
             }
         }
         if let frame = s.frameOverrides.removeValue(forKey: hidden) { s.frameOverrides[shown] = frame }
@@ -447,7 +498,7 @@ public struct Engine: Sendable {
     }
 
     /// Records focus. Only dirties a Space whose rendering depends on focus:
-    /// monocle, or a stack that scrolls to keep the focused window in view.
+    /// monocle, or a deck that scrolls to keep the focused window in view.
     @discardableResult
     public mutating func focus(_ id: WindowID?) -> Set<SpaceID> {
         guard let id, let w = windows[id] else {
@@ -469,7 +520,7 @@ public struct Engine: Sendable {
             state.recentTiles.insert(id, at: 0)
             spaces[space] = state
         }
-        return state.monocle || stackScrolls(state) ? [space] : []
+        return state.monocle || deckScrolls(state) || state.isDecked(id) ? [space] : []
     }
 
     /// A window refused a size: never lay it out smaller than `size` again.
@@ -516,6 +567,7 @@ public struct Engine: Sendable {
         guard let space else { out.message = "no active Space"; return out }
         let area = snapshot.key(for: space).flatMap { areas[$0.display] }
 
+        let s = settings(for: space)
         switch command {
         case .focus(let direction):
             let step = neighbor(of: focusedHere, direction, space: space, area: area)
@@ -527,22 +579,49 @@ public struct Engine: Sendable {
         case .focusLast:
             guard let current = focusedHere ?? spaces[space]?.focus.mostRecent else { return out }
             out.focus = spaces[space]?.focus.fallback(excluding: current) { eligibleForFocus($0, on: space) }
-        case .focusMaster:
-            guard mode(for: space) != .float else { out.message = "no master in float layout"; return out }
-            guard let state = spaces[space], let master = tileOrder(state).first else { return out }
-            // Toggle: from the master, go back to the window that had focus
+        case .focusFeature:
+            guard s.hasFeature else { out.message = "no feature area in this layout"; return out }
+            guard let state = spaces[space], let feature = tileOrder(state).first else { return out }
+            // Toggle: from the feature, go back to the window that had focus
             // right before it (recorded predecessor in the focus history).
-            out.focus = focusedHere == master
-                ? state.focus.fallback(excluding: master) { eligibleForFocus($0, on: space) }
-                : master
+            let onFeature = focusedHere.map { state.tile(of: $0) == feature } ?? false
+            out.focus = onFeature
+                ? state.focus.fallback(excluding: focusedHere ?? feature) { state.tile(of: $0) != feature && eligibleForFocus($0, on: space) }
+                : state.frontWindow(ofTile: feature)
         case .promote:
             guard let f = focusedHere, let state = spaces[space], state.members.contains(f) else {
                 out.message = "focused window is not tiled"
                 return out
             }
             let order = tileOrder(state)
-            let target = order.first == f ? order.dropFirst().first : order.first
+            let fTile = state.tile(of: f)
+            let target = order.first == fTile ? order.dropFirst().first : order.first
             if let target, swap(f, target, on: space) { out.dirty = [space] }
+        case .deck(let direction):
+            guard let f = focusedHere, let state = spaces[space], state.members.contains(f) else {
+                out.message = "focused window is not tiled"
+                return out
+            }
+            guard s.arrange != .float, !state.monocle else { out.message = "no tiles to deck in this layout"; return out }
+            guard let area else { return out }
+            let plan = layout(space: space, area: area)
+            let frames = plan.navigation
+            let own = state.windows(ofTile: state.tile(of: f))
+            // Where the focused tile sits: its window showing.
+            let showing = own.first { plan.covered[$0] == nil } ?? f
+            let origin = frames[showing]
+            let others = frames.filter { !own.contains($0.key) }
+            guard let origin, let target = Self.nearest(from: origin, direction, among: others) else {
+                out.message = "no tile to deck with that way"
+                return out
+            }
+            if joinDeck(f, withTileOf: target, on: space) { out.dirty = [space] }
+        case .undeck:
+            guard let f = focusedHere, spaces[space]?.isDecked(f) == true else {
+                out.message = "focused window is not in a deck"
+                return out
+            }
+            if leaveDeck(f, on: space) { out.dirty = [space] }
         case .reset:
             reset(space)
             out.dirty = [space]
@@ -550,27 +629,6 @@ public struct Engine: Sendable {
             forgetMinSizes(on: space)
             out.dirty = [space]
             out.action = .relayout(space)
-        case .layout(let change):
-            let current = mode(for: space)
-            let all = LayoutMode.allCases
-            let index = all.firstIndex(of: current) ?? 0
-            switch change {
-            case .set(let m):
-                spaces[space, default: SpaceState(id: space)].modeOverride = m
-                out.settings = SettingsChange(space: space, mode: .some(m))
-            case .next:
-                let next = all[(index + 1) % all.count]
-                spaces[space, default: SpaceState(id: space)].modeOverride = next
-                out.settings = SettingsChange(space: space, mode: .some(next))
-            case .previous:
-                let previous = all[(index + all.count - 1) % all.count]
-                spaces[space, default: SpaceState(id: space)].modeOverride = previous
-                out.settings = SettingsChange(space: space, mode: .some(previous))
-            case .configDefault:
-                spaces[space]?.modeOverride = nil
-                out.settings = SettingsChange(space: space, mode: .some(nil))
-            }
-            out.dirty = [space]
         case .monocle:
             spaces[space, default: SpaceState(id: space)].monocle.toggle()
             out.dirty = [space]
@@ -580,36 +638,59 @@ public struct Engine: Sendable {
             out.dirty = syncMembership(f).union([space])
         case .resize(let delta):
             guard let f = focusedHere, let state = spaces[space], state.members.contains(f) else { return out }
-            if mode(for: space) == .bsp {
-                guard case .success(let tree)? = state.tree?.resizing(f, by: delta, context: bspContext(settings(for: space))) else { return out }
-                beginManual(space)
-                spaces[space]?.tree = tree
-            } else {
-                let masters = max(state.masterCountOverride ?? settings(for: space).masterCount, 1)
-                let isMaster = state.liveOrder.prefix(masters).contains(f)
-                let applied = adjustMasterRatio(space, by: isMaster ? delta : -delta)
-                out.settings = SettingsChange(space: space, masterRatio: applied)
+            let tile = state.tile(of: f)
+            let featured = featuredTiles(state, s)
+            switch s.arrange {
+            case .float:
+                out.message = "nothing to resize in float layout"
+                return out
+            case .dwindle, .balanced:
+                if featured.contains(tile) {
+                    out.settings = SettingsChange(space: space, featureSize: adjustFeatureSize(space, by: delta))
+                } else {
+                    let context = bspContext(s, decks: state.decks)
+                    guard case .success(let tree)? = state.tree?.resizing(tile, by: delta, context: context,
+                                                                          hidden: Set(featured)) else { return out }
+                    beginManual(space)
+                    spaces[space]?.tree = tree
+                }
+            case .fixed, .adaptive:
+                guard s.hasFeature else {
+                    out.message = "no feature area to resize in this layout"
+                    return out
+                }
+                let applied = adjustFeatureSize(space, by: featured.contains(tile) ? delta : -delta)
+                out.settings = SettingsChange(space: space, featureSize: applied)
             }
             out.dirty = [space]
-        case .masterRatio(let delta):
-            let applied = adjustMasterRatio(space, by: delta)
-            out.settings = SettingsChange(space: space, masterRatio: applied)
+        case .featureSize(let delta):
+            let applied = adjustFeatureSize(space, by: delta)
+            out.settings = SettingsChange(space: space, featureSize: applied)
             out.dirty = [space]
-        case .masterCount(let delta):
-            let current = min(max(spaces[space]?.masterCountOverride ?? settings(for: space).masterCount, 1), 16)
+        case .featureCount(let delta):
+            let current = min(max(s.featureCount, 1), 16)
             let clampedDelta = min(max(delta, -16), 16)
             let applied = min(max(current + clampedDelta, 1), 16)
-            spaces[space, default: SpaceState(id: space)].masterCountOverride = applied
-            out.settings = SettingsChange(space: space, masterCount: applied)
+            spaces[space, default: SpaceState(id: space)].featureCountOverride = applied
+            out.settings = SettingsChange(space: space, featureCount: applied)
             out.dirty = [space]
         case .balance:
-            if mode(for: space) == .bsp {
+            switch s.arrange {
+            case .float:
+                out.message = "nothing to balance in float layout"
+                return out
+            case .dwindle, .balanced:
                 beginManual(space)
-                let balanced = spaces[space]?.tree?.balanced()
+                let hidden = spaces[space].map { Set(featuredTiles($0, s)) } ?? []
+                let balanced = spaces[space]?.tree?.balanced(hiding: hidden)
                 spaces[space]?.tree = balanced
-            } else {
-                spaces[space, default: SpaceState(id: space)].masterRatioOverride = 0.5
-                out.settings = SettingsChange(space: space, masterRatio: 0.5)
+            case .fixed, .adaptive:
+                guard s.hasFeature else {
+                    out.message = "nothing to balance: no feature area in this layout"
+                    return out
+                }
+                spaces[space, default: SpaceState(id: space)].featureSizeOverride = 0.5
+                out.settings = SettingsChange(space: space, featureSize: 0.5)
             }
             out.dirty = [space]
         case .reload, .dumpState, .focusDisplay, .sendToDisplay:
@@ -618,21 +699,75 @@ public struct Engine: Sendable {
         return out
     }
 
-    /// Swaps two tiled windows on `space` (drag-swap, directional swap, promote).
+    /// Swaps the tiles of two tiled windows on `space` (drag-swap, directional
+    /// swap, promote); two windows of one deck trade places inside it.
     /// Pins the Space's arrangement as manual.
     @discardableResult
     public mutating func swap(_ a: WindowID, _ b: WindowID, on space: SpaceID) -> Bool {
         guard a != b, let state = spaces[space], state.members.contains(a), state.members.contains(b) else { return false }
         beginManual(space)
         guard var s = spaces[space] else { return false }
-        if let i = s.manualOrder.firstIndex(of: a), let j = s.manualOrder.firstIndex(of: b) {
+        let (tileA, tileB) = (s.tile(of: a), s.tile(of: b))
+        if tileA == tileB {
+            if var list = s.decks[tileA], let i = list.firstIndex(of: a), let j = list.firstIndex(of: b) {
+                list.swapAt(i, j)
+                s.decks[tileA] = list
+            }
+            spaces[space] = s
+            return true
+        }
+        if let i = s.manualOrder.firstIndex(of: tileA), let j = s.manualOrder.firstIndex(of: tileB) {
             s.manualOrder.swapAt(i, j)
         }
-        if case .success(let tree)? = s.tree?.swapping(a, b) { s.tree = tree }
+        if case .success(let tree)? = s.tree?.swapping(tileA, tileB) { s.tree = tree }
         // Adopted frames are position-bound; a swap discards them.
-        s.frameOverrides[a] = nil
-        s.frameOverrides[b] = nil
+        for id in [a, b, tileA, tileB] { s.frameOverrides[id] = nil }
         spaces[space] = s
+        return true
+    }
+
+    /// `id` joins the deck of the tile `target` sits in (which becomes a
+    /// deck if it was none), leaving its own tile, which closes up. The
+    /// joiner shows first. Pins the Space's arrangement as manual.
+    private mutating func joinDeck(_ id: WindowID, withTileOf target: WindowID, on space: SpaceID) -> Bool {
+        guard let state = spaces[space], state.members.contains(id), state.members.contains(target),
+              state.tile(of: id) != state.tile(of: target) else { return false }
+        beginManual(space)
+        guard var s = spaces[space] else { return false }
+        let holder = s.tile(of: target)
+        leaveTile(id, in: &s, space: space)
+        s.decks[holder] = (s.decks[holder] ?? [holder]) + [id]
+        s.frameOverrides[id] = nil
+        s.frameOverrides[holder] = nil
+        s.recentTiles.removeAll { $0 == id }
+        s.recentTiles.insert(id, at: 0)
+        spaces[space] = s
+        recomputeIdeal(space)
+        return true
+    }
+
+    /// `id` leaves its deck for a tile of its own right after the deck's:
+    /// BSP splits the deck's leaf, order-based layouts insert it after the
+    /// deck. Pins the Space's arrangement as manual.
+    private mutating func leaveDeck(_ id: WindowID, on space: SpaceID) -> Bool {
+        guard spaces[space]?.isDecked(id) == true else { return false }
+        beginManual(space)
+        guard var s = spaces[space], let anchor = leaveTile(id, in: &s, space: space) else { return false }
+        if let tree = s.tree {
+            if case .success(let next) = tree.inserting(id, nextTo: anchor, axis: settings(for: space).split) { s.tree = next }
+        } else {
+            s.tree = .leaf(id)
+        }
+        func insertAfterDeck(_ ids: inout [WindowID]) {
+            ids.removeAll { $0 == id }
+            ids.insert(id, at: ids.firstIndex(of: anchor).map { $0 + 1 } ?? ids.count)
+        }
+        insertAfterDeck(&s.manualOrder)
+        insertAfterDeck(&s.idealOrder)
+        s.frameOverrides[id] = nil
+        s.frameOverrides[anchor] = nil
+        spaces[space] = s
+        recomputeIdeal(space)
         return true
     }
 
@@ -641,20 +776,25 @@ public struct Engine: Sendable {
     /// Touches nothing else; manual Spaces are left alone.
     public mutating func adoptIdealTree(_ space: SpaceID) {
         guard var s = spaces[space], !s.manual else { return }
-        s.tree = idealTree(s.idealOrder, on: space)
+        s.tree = idealTree(s.idealOrder, on: space, decks: s.decks)
         spaces[space] = s
     }
 
     /// Discards every manual override on `space`: order, tree shape, ratios,
-    /// adopted frames. Mode and monocle are kept (they are not arrangement).
+    /// adopted frames. Arrangement settings and monocle are kept.
     public mutating func reset(_ space: SpaceID) {
         guard var s = spaces[space] else { return }
         s.manual = false
         s.manualOrder = []
         s.frameOverrides = [:]
-        s.masterRatioOverride = nil
-        s.masterCountOverride = nil
-        s.tree = idealTree(s.idealOrder, on: space)
+        s.featureSizeOverride = nil
+        s.featureCountOverride = nil
+        // Decks are arrangement: every window is a tile of its own again.
+        s.decks = [:]
+        spaces[space] = s
+        recomputeIdeal(space)
+        guard var s = spaces[space] else { return }
+        s.tree = idealTree(s.idealOrder, on: space, decks: s.decks)
         spaces[space] = s
     }
 
@@ -671,47 +811,69 @@ public struct Engine: Sendable {
     /// persisted them to the config file, so the config becomes the source
     /// of truth again instead of the transient in-memory override. Safe to
     /// call for an unknown or since-removed Space (no-op).
-    public mutating func clearSettingOverrides(_ space: SpaceID, mode: Bool, masterRatio: Bool, masterCount: Bool) {
+    public mutating func clearSettingOverrides(_ space: SpaceID, featureSize: Bool, featureCount: Bool) {
         guard var s = spaces[space] else { return }
-        if mode { s.modeOverride = nil }
-        if masterRatio { s.masterRatioOverride = nil }
-        if masterCount { s.masterCountOverride = nil }
+        if featureSize { s.featureSizeOverride = nil }
+        if featureCount { s.featureCountOverride = nil }
         spaces[space] = s
     }
 
     // MARK: Internals
 
-    private func bspContext(_ s: LayoutSettings) -> BSPLayoutContext {
-        let windows = self.windows
-        return BSPLayoutContext(
-            weight: { windows[$0]?.rule.weight ?? 1 },
-            minRatio: s.bspMinRatio, maxRatio: s.bspMaxRatio, gap: s.gaps.inner,
-            minSize: { windows[$0]?.minSize ?? .zero })
+    /// Layout context for the BSP tree, whose leaves are tiles.
+    private func bspContext(_ s: LayoutSettings, decks: [WindowID: [WindowID]]) -> BSPLayoutContext {
+        BSPLayoutContext(
+            weight: tileWeight(decks: decks),
+            minRatio: s.weightShareMin, maxRatio: s.weightShareMax, gap: s.gaps.inner,
+            minSize: tileMinSize(decks: decks))
     }
 
-    /// The weight-default BSP tree for `order` in `space`'s configured shape.
-    private func idealTree(_ order: [WindowID], on space: SpaceID) -> BSPNode? {
-        let s = settings(for: space)
-        switch s.bspShape {
-        case .dwindle: return BSPNode.ideal(order, axis: s.split)
-        case .balanced:
-            let windows = self.windows
-            return BSPNode.balanced(order, axis: s.split) { windows[$0]?.rule.weight ?? 1 }
+    /// A tile's weight: its heaviest window's.
+    private func tileWeight(decks: [WindowID: [WindowID]]) -> (WindowID) -> Double {
+        let windows = self.windows
+        return { id in (decks[id] ?? [id]).map { windows[$0]?.rule.weight ?? 1 }.max() ?? 1 }
+    }
+
+    /// A tile's minimum size: the largest of its windows'.
+    private func tileMinSize(decks: [WindowID: [WindowID]]) -> (WindowID) -> CGSize {
+        let windows = self.windows
+        return { id in
+            (decks[id] ?? [id]).reduce(CGSize.zero) { size, member in
+                let own = windows[member]?.minSize ?? .zero
+                return CGSize(width: max(size.width, own.width), height: max(size.height, own.height))
+            }
         }
     }
 
-    /// Tiles on a Space in layout order; the head is the master.
-    private func tileOrder(_ state: SpaceState) -> [WindowID] {
-        mode(for: state.id) == .bsp ? (state.tree?.leaves ?? []) : state.liveOrder
+    /// The weight-default BSP tree for the tiles `order` in `space`'s arrangement.
+    private func idealTree(_ order: [WindowID], on space: SpaceID, decks: [WindowID: [WindowID]]) -> BSPNode? {
+        let s = settings(for: space)
+        switch s.arrange {
+        case .balanced: return BSPNode.balanced(order, axis: s.split, weight: tileWeight(decks: decks))
+        case .dwindle, .fixed, .adaptive, .float: return BSPNode.ideal(order, axis: s.split)
+        }
     }
 
-    /// Whether a column of `state`'s stack holds more windows than its layout
-    /// shows at once, so that moving focus scrolls it.
-    private func stackScrolls(_ state: SpaceState) -> Bool {
-        let s = settings(for: state.id), mode = mode(for: state.id)
-        let masters = max(state.masterCountOverride ?? s.masterCount, 1)
-        return MasterLayout.scrolls(stackCount: state.members.count - masters, columns: s.stackColumns(in: mode),
-                                    limit: s.stackLimit(in: mode), bothSides: s.stackBothSides)
+    /// Tiles on a Space in layout order; the head is the feature.
+    private func tileOrder(_ state: SpaceState) -> [WindowID] {
+        arrangement(for: state.id).isTree ? (state.tree?.leaves ?? []) : state.liveOrder
+    }
+
+    /// The tiles the feature area holds: the first `feature_count` in layout order.
+    private func featuredTiles(_ state: SpaceState, _ s: LayoutSettings) -> [WindowID] {
+        let order = tileOrder(state)
+        return Array(order.prefix(FeatureLayout.featuredCount(feature: s.effectiveFeature, count: s.featureCount,
+                                                              total: order.count)))
+    }
+
+    /// Whether a column of `state`'s grid holds more tiles than it shows at
+    /// once, so that moving focus scrolls its deck.
+    private func deckScrolls(_ state: SpaceState) -> Bool {
+        let s = settings(for: state.id)
+        guard s.arrange == .fixed else { return false }
+        let featured = FeatureLayout.featuredCount(feature: s.effectiveFeature, count: s.featureCount, total: state.tileCount)
+        return FeatureLayout.scrolls(gridCount: state.tileCount - featured, columns: s.gridColumns,
+                                     limit: s.deckLimit, center: s.effectiveFeature == .center)
     }
 
     private func eligibleForFocus(_ id: WindowID, on space: SpaceID) -> Bool {
@@ -719,7 +881,7 @@ public struct Engine: Sendable {
         return w.space == space && w.isManaged && !w.minimized && !w.hidden && !w.backgroundTab
     }
 
-    /// Bounds must stay strictly inside Config's `master_ratio` validation
+    /// Bounds must stay strictly inside Config's `feature_size` validation
     /// (0.05…0.95, exclusive): landing exactly on 0.05 or 0.95 renders as a
     /// value the config parser then rejects, so the persisted override fails
     /// `Config.validated` and the caller surfaces that error instead of
@@ -732,9 +894,9 @@ public struct Engine: Sendable {
     /// the full requested delta, so growing near 0.95 or shrinking near 0.05
     /// is never reversed into the opposite direction.
     @discardableResult
-    private mutating func adjustMasterRatio(_ space: SpaceID, by delta: Double) -> Double {
-        guard delta.isFinite else { return spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio }
-        let current = spaces[space]?.masterRatioOverride ?? settings(for: space).masterRatio
+    private mutating func adjustFeatureSize(_ space: SpaceID, by delta: Double) -> Double {
+        let current = settings(for: space).featureSize
+        guard delta.isFinite else { return current }
         let lowerBound = 0.05, upperBound = 0.95
         let target = current + delta
         let clamped: Double
@@ -745,7 +907,7 @@ public struct Engine: Sendable {
         } else {
             clamped = target
         }
-        spaces[space, default: SpaceState(id: space)].masterRatioOverride = clamped
+        spaces[space, default: SpaceState(id: space)].featureSizeOverride = clamped
         return clamped
     }
 
@@ -782,8 +944,9 @@ public struct Engine: Sendable {
             rank = index + 1
         }
         s.recentTiles.insert(id, at: rank)
-        let anchor = focused.flatMap { s.tree?.contains($0) == true ? $0 : nil }
-            ?? s.focus.entries.first { s.tree?.contains($0) == true }
+        let inTree = { (id: WindowID) in s.tree?.contains(id) == true }
+        let anchor = focused.map { s.tile(of: $0) }.flatMap { inTree($0) ? $0 : nil }
+            ?? s.focus.entries.map { s.tile(of: $0) }.first(where: inTree)
         let axis = settings(for: space).split
         if let tree = s.tree {
             if case .success(let next) = tree.inserting(id, nextTo: anchor, axis: axis) { s.tree = next }
@@ -797,25 +960,60 @@ public struct Engine: Sendable {
     @discardableResult
     private mutating func detach(_ id: WindowID, from space: SpaceID) -> Set<SpaceID> {
         guard var s = spaces[space], s.members.contains(id) else { return [] }
+        leaveTile(id, in: &s, space: space)
         s.members.removeAll { $0 == id }
         s.recentTiles.removeAll { $0 == id }
-        s.manualOrder.removeAll { $0 == id }
         s.frameOverrides[id] = nil
-        if let tree = s.tree {
-            switch tree.removing(id) {
-            case .success(let next): s.tree = next
-            case .failure: s.tree = idealTree(s.members, on: space)
-            }
-        }
         spaces[space] = s
         recomputeIdeal(space)
         return [space]
     }
 
+    /// Takes `id` out of the tile arrangement (tree, orders, decks) but not
+    /// out of the Space's membership. A deck's window just leaves its
+    /// deck, and the deck's tile goes to the next member when `id` held
+    /// it; a deck left with one window dissolves. A tile of its own closes
+    /// up. Returns the tile of the deck `id` left, if it was in one.
+    @discardableResult
+    private func leaveTile(_ id: WindowID, in s: inout SpaceState, space: SpaceID) -> WindowID? {
+        guard let holder = s.decks.first(where: { $0.value.contains(id) })?.key else {
+            s.idealOrder.removeAll { $0 == id }
+            s.manualOrder.removeAll { $0 == id }
+            if let tree = s.tree {
+                switch tree.removing(id) {
+                case .success(let next): s.tree = next
+                case .failure: s.tree = idealTree(s.tiles.filter { $0 != id }, on: space, decks: s.decks)
+                }
+            }
+            return nil
+        }
+        let list = s.decks[holder] ?? []
+        let index = list.firstIndex(of: id) ?? 0
+        let rest = list.filter { $0 != id }
+        var tile = holder
+        if id == holder, !rest.isEmpty {
+            // The tile passes to the member that followed.
+            tile = rest[min(index, rest.count - 1)]
+            func pass(_ ids: inout [WindowID]) { if let i = ids.firstIndex(of: id) { ids[i] = tile } }
+            pass(&s.idealOrder)
+            pass(&s.manualOrder)
+            if let frame = s.frameOverrides.removeValue(forKey: id), s.frameOverrides[tile] == nil { s.frameOverrides[tile] = frame }
+            if let tree = s.tree {
+                switch tree.substituting(tile, for: id) {
+                case .success(let next): s.tree = next
+                case .failure: s.tree = idealTree(s.tiles.map { $0 == id ? tile : $0 }, on: space, decks: s.decks)
+                }
+            }
+        }
+        s.decks[holder] = nil
+        if rest.count >= 2 { s.decks[tile] = rest }
+        return tile
+    }
+
     /// Keeps the ideal order stable: windows keep their places, a window
     /// that left is dropped, and the order is re-sorted by weight only (so a
     /// weight change moves just that window). `newcomer`, a window just
-    /// attached, goes to the top of the stack.
+    /// attached, goes to the top of the grid.
     private mutating func recomputeIdeal(_ space: SpaceID, newcomer: WindowID? = nil) {
         guard var s = spaces[space] else { return }
         // Heal any drift between members and the tree (defensive; should not happen).
@@ -824,18 +1022,21 @@ public struct Engine: Sendable {
             s.members = members
             s.recentTiles.removeAll { windows[$0] == nil }
         }
-        if Set(s.tree?.leaves ?? []) != Set(members) || (s.tree?.leaves.count ?? 0) != members.count {
-            s.tree = idealTree(members, on: space)
+        s.decks = s.healedDecks { windows[$0] != nil }
+        let tiles = s.tiles
+        if Set(s.tree?.leaves ?? []) != Set(tiles) || (s.tree?.leaves.count ?? 0) != tiles.count {
+            s.tree = idealTree(tiles, on: space, decks: s.decks)
         }
+        let tileWeight = self.tileWeight(decks: s.decks)
         func weight(_ id: WindowID) -> Double {
-            let w = windows[id]?.rule.weight ?? 1
+            let w = tileWeight(id)
             return w.isFinite ? w : 0
         }
-        let memberSet = Set(members)
-        let kept = s.idealOrder.filter { memberSet.contains($0) && $0 != newcomer }
+        let tileSet = Set(tiles)
+        let kept = s.idealOrder.filter { tileSet.contains($0) && $0 != newcomer }
         let keptSet = Set(kept)
         // Only after drift or a first sighting: members with no place yet join by rank.
-        let unplaced = members.filter { !keptSet.contains($0) && $0 != newcomer }.map { id in
+        let unplaced = tiles.filter { !keptSet.contains($0) && $0 != newcomer }.map { id in
             WeightResolver.Candidate(id: id, weight: weight(id),
                                      focusRank: s.focus.rank(of: id), creation: windows[id]?.creation ?? 0)
         }
@@ -844,50 +1045,51 @@ public struct Engine: Sendable {
         s.idealOrder = base.sorted { a, b in
             weight(a) != weight(b) ? weight(a) > weight(b) : (position[a] ?? 0) < (position[b] ?? 0)
         }
-        let masters = max(s.masterCountOverride ?? settings(for: space).masterCount, 1)
+        let featureSettings = settings(for: space)
+        let featureWindows = featureSettings.hasFeature ? max(featureSettings.featureCount, 1) : 0
         if let newcomer {
-            s.idealOrder = placingAtStackTop(newcomer, in: s.idealOrder, masters: masters)
+            s.idealOrder = placingAtGridTop(newcomer, in: s.idealOrder, featureWindows: featureWindows)
         }
         // A balanced Space follows its ideal grid until arranged manually.
-        if !s.manual, settings(for: space).bspShape == .balanced {
-            s.tree = idealTree(s.idealOrder, on: space)
+        if !s.manual, featureSettings.arrange == .balanced {
+            s.tree = idealTree(s.idealOrder, on: space, decks: s.decks)
         }
         if s.manual {
-            let kept = s.manualOrder.filter { members.contains($0) }
-            let missing = members.filter { !kept.contains($0) }
+            let kept = s.manualOrder.filter { tileSet.contains($0) }
+            let missing = tiles.filter { !kept.contains($0) }
             s.manualOrder = kept + missing
-            // Right after the masters: a manually placed master is never displaced.
+            // Right after the feature windows: a manually placed feature is never displaced.
             if let newcomer {
                 s.manualOrder.removeAll { $0 == newcomer }
-                s.manualOrder.insert(newcomer, at: min(masters, s.manualOrder.count))
+                s.manualOrder.insert(newcomer, at: min(featureWindows, s.manualOrder.count))
             }
         }
         spaces[space] = s
     }
 
     /// Weight-ranked `order` with `id` moved to the top of its weight tier in
-    /// the stack: right after the masters and every heavier window. A window
-    /// heavier than a master still takes that master's slot.
-    private func placingAtStackTop(_ id: WindowID, in order: [WindowID], masters: Int) -> [WindowID] {
+    /// the grid: right after the feature windows and every heavier window. A window
+    /// heavier than a feature window still takes that window's slot.
+    private func placingAtGridTop(_ id: WindowID, in order: [WindowID], featureWindows: Int) -> [WindowID] {
         var order = order
         order.removeAll { $0 == id }
         func weight(_ w: WindowID) -> Double { windows[w]?.rule.weight ?? 1 }
         let own = weight(id)
         let heavier = order.prefix { weight($0) > own }.count
-        let takesMaster = heavier < min(masters, order.count) && weight(order[heavier]) < own
-        order.insert(id, at: min(takesMaster ? heavier : max(masters, heavier), order.count))
+        let takesFeature = heavier < min(featureWindows, order.count) && weight(order[heavier]) < own
+        order.insert(id, at: min(takesFeature ? heavier : max(featureWindows, heavier), order.count))
         return order
     }
 
     /// Nearest tiled window from `from` in `direction` on `space`, along the
-    /// scrolling strip when the stack scrolls. Monocle Spaces cycle through
+    /// scrolling strip when the deck scrolls. Monocle Spaces cycle through
     /// the live order instead. `origin` is the tile the step starts at, when
     /// `from` has one to step from.
     private func neighbor(of from: WindowID?, _ direction: Direction, space: SpaceID,
                           area: CGRect?) -> (target: WindowID?, origin: CGRect?) {
         guard let state = spaces[space] else { return (nil, nil) }
-        let order = tileOrder(state)
-        guard let from, state.members.contains(from) else { return (order.first, nil) }
+        let order = state.monocle ? state.expanding(tileOrder(state)) : tileOrder(state)
+        guard let from, state.members.contains(from) else { return (order.first.map { state.frontWindow(ofTile: $0) }, nil) }
         if state.monocle {
             guard let i = order.firstIndex(of: from), !order.isEmpty else { return (nil, nil) }
             let step = direction.isForward ? 1 : order.count - 1

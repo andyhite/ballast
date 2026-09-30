@@ -54,8 +54,20 @@ public struct ConfigEditor: Sendable {
     @discardableResult
     public mutating func set(_ key: String, _ value: ConfigValue?, in section: ConfigSection) -> Result<Void, ConfigEditError> {
         var lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines) else {
+        guard var blocks = try? parseBlocks(lines) else {
             return .failure(ConfigEditError("could not parse document"))
+        }
+        // A key written as its own child table (`[layout.gaps]`,
+        // `[space.gaps]`) is replaced as a whole: drop that table, then
+        // write the key inline like any other (or leave it removed).
+        let droppedChild = childTable(key, of: section, blocks: blocks, lines: lines)
+        if let child = droppedChild {
+            let range = blockRangeWithLeadingComment(child, allBlocks: blocks, lines: lines)
+            removeLineRange(range.start...range.end, lines: &lines)
+            guard let reparsed = try? parseBlocks(lines) else {
+                return .failure(ConfigEditError("could not parse document"))
+            }
+            blocks = reparsed
         }
         guard let target = resolveSectionRange(section, blocks: blocks, lines: lines) else {
             switch section {
@@ -68,6 +80,7 @@ public struct ConfigEditor: Sendable {
                 // Removing a key from a section that doesn't exist yet is a
                 // no-op; creating it just to leave it empty would be a
                 // phantom section, not byte-identical with "nothing to do".
+                if droppedChild != nil { text = joinLines(lines) }
                 return .success(())
             }
             // Section missing: create it, then retry the set inside it.
@@ -390,6 +403,32 @@ public struct ConfigEditor: Sendable {
             guard index >= 0, index < ruleBlocks.count else { return nil }
             let block = ruleBlocks[index]
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
+        }
+    }
+
+    /// The non-array table that spells `key` of `section` as a table of its
+    /// own (`[layout.gaps]`, or a `[[space]]` entry's `[space.gaps]`).
+    private func childTable(_ key: String, of section: ConfigSection, blocks: [Block], lines: [String]) -> Block? {
+        func table(_ path: [String], in candidates: [Block]) -> Block? {
+            candidates.first { $0.header?.isArrayTable == false && $0.header?.path == path }
+        }
+        func owned(by entry: Block) -> [Block] {
+            let end = ownedBodyEnd(for: entry, allBlocks: blocks)
+            return blocks.filter { $0.headerLine > entry.headerLine && $0.headerLine <= end }
+        }
+        switch section {
+        case .settings: return table(["settings", key], in: blocks)
+        case .animation: return table(["settings", "animation", key], in: blocks)
+        case .focusFlash: return table(["settings", "focus_flash", key], in: blocks)
+        case .layout: return table(["layout", key], in: blocks)
+        case .bindings: return table(["bindings", key], in: blocks)
+        case .space(let address):
+            guard let entry = findSpaceBlock(address, blocks: blocks, lines: lines) else { return nil }
+            return table(["space", key], in: owned(by: entry))
+        case .rule(let index):
+            let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+            guard index >= 0, index < ruleBlocks.count else { return nil }
+            return table(["rule", key], in: owned(by: ruleBlocks[index]))
         }
     }
 

@@ -41,9 +41,9 @@ final class StatusBar: NSObject, NSMenuDelegate {
         guard let display = manager.currentDisplay,
               let space = engine.snapshot.activeSpace(ofDisplay: display.uuid) else { return ("–", manager.configError != nil) }
         let ordinal = engine.snapshot.key(for: space).map { String($0.ordinal) } ?? "FS"
-        let monocle = engine.spaces[space]?.monocle == true ? " Z" : ""
+        let monocle = engine.spaces[space]?.monocle == true ? " ⤢" : ""
         let prefix = manager.configError != nil ? "! " : ""
-        return ("\(prefix)\(ordinal) · \(engine.mode(for: space).glyph)\(monocle)", manager.configError != nil)
+        return ("\(prefix)\(ordinal) · \(engine.glyph(for: space))\(monocle)", manager.configError != nil)
     }
 
 
@@ -102,15 +102,6 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let key: SpaceKey
     }
 
-    private func modeLabel(_ mode: LayoutMode) -> String {
-        switch mode {
-        case .masterGrid: return "Master-Grid"
-        case .masterStack: return "Master-Stack"
-        case .bsp: return "BSP"
-        case .float: return "Floating"
-        }
-    }
-
     private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 0.005 }
 
     private func addDesktopSection(to menu: NSMenu, space: SpaceID, enabled: Bool) {
@@ -125,7 +116,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
             menu.addItem(adjustDesktopMenuItem(Desktop(space: space, key: key), enabled: enabled))
         }
 
-        menu.addItem(choiceItem("Monocle", checked: engine.spaces[space]?.monocle == true) { [unowned self] in
+        let monocleOn = engine.spaces[space]?.monocle == true
+        let monocleKey = manager.config.bindings.first { $0.command == .monocle }?.hotkey.symbols
+        let monocleTitle = (monocleOn ? "Exit Monocle" : "Monocle") + (monocleKey.map { " (\($0))" } ?? "")
+        menu.addItem(action(monocleTitle) { [unowned self] in
             manager.perform(.monocle)
         })
         let manual = engine.spaces[space]?.manual == true
@@ -137,60 +131,49 @@ final class StatusBar: NSObject, NSMenuDelegate {
         })
     }
 
-    /// The layout mode, then only the settings that mode uses, then a way
-    /// back to the defaults and a deep link to this desktop in the Settings
-    /// window.
+    /// The arrangement and feature, then only the settings they use, then a
+    /// way back to the defaults and a deep link to this desktop in the
+    /// Settings window.
     private func adjustDesktopMenuItem(_ desktop: Desktop, enabled: Bool) -> NSMenuItem {
         let menu = NSMenu(title: "Adjust Desktop")
         let engine = manager.engine
         let space = desktop.space
-        let current = engine.mode(for: space)
         let overrides = manager.config.overrides(for: desktop.key)
         let live = engine.spaces[space]
+        let effective = engine.settings(for: space)
 
-        // Picking the default mode drops the override rather than pinning
-        // the desktop to today's default.
-        let defaultMode = manager.config.layout.mode(builtin: engine.snapshot.isBuiltin(display: desktop.key.display))
-        for mode in LayoutMode.allCases {
-            let isDefault = mode == defaultMode
-            let label = isDefault ? "\(modeLabel(mode)) (default)" : modeLabel(mode)
-            menu.addItem(choiceItem(label, checked: current == mode, enabled: enabled) { [unowned self] in
-                manager.perform(.layout(isDefault ? .configDefault : .set(mode)))
-            })
-        }
+        menu.addItem(arrangementItem(desktop, effective: effective, isInherited: overrides?.arrange == nil, enabled: enabled))
+        menu.addItem(featureSideItem(desktop, effective: effective, isInherited: overrides?.feature == nil, enabled: enabled))
         menu.addItem(.separator())
 
-        let effective = engine.settings(for: space)
-        if current == .bsp {
-            menu.addItem(bspArrangementItem(desktop, effective: effective, isInherited: overrides?.bspShape == nil, enabled: enabled))
-            menu.addItem(splitDirectionItem(desktop, effective: effective, override: overrides?.split, enabled: enabled))
-        } else if current.hasMaster {
-            let ratioOverridden = overrides?.masterRatio != nil || live?.masterRatioOverride != nil
-            let countOverridden = overrides?.masterCount != nil || live?.masterCountOverride != nil
-            let ratioValue = live?.masterRatioOverride ?? effective.masterRatio
-            let countValue = live?.masterCountOverride ?? effective.masterCount
-            menu.addItem(masterSizeItem(desktop, current: ratioValue, isInherited: !ratioOverridden, enabled: enabled))
-            menu.addItem(masterCountItem(desktop, current: countValue, isInherited: !countOverridden, enabled: enabled))
-            menu.addItem(stackSideItem(desktop, effective: effective, isInherited: overrides?.stackSide == nil, enabled: enabled))
-            menu.addItem(stackBothSidesItem(desktop, current: effective.stackBothSides, isInherited: overrides?.stackBothSides == nil, enabled: enabled))
-            if current == .masterGrid {
-                menu.addItem(gridMaxItem(desktop, current: effective.gridMax, isInherited: overrides?.gridMax == nil, enabled: enabled))
-                menu.addItem(gridColumnsItem(desktop, current: effective.gridColumns, isInherited: overrides?.gridColumns == nil, enabled: enabled))
-            }
-            if current == .masterStack || effective.gridMax > 0 {
-                menu.addItem(stackPeekItem(desktop, current: effective.stackPeek, isInherited: overrides?.stackPeek == nil, enabled: enabled))
-            }
+        if effective.hasFeature {
+            let sizeOverridden = overrides?.featureSize != nil || live?.featureSizeOverride != nil
+            let countOverridden = overrides?.featureCount != nil || live?.featureCountOverride != nil
+            menu.addItem(featureSizeItem(desktop, current: effective.featureSize, isInherited: !sizeOverridden, enabled: enabled))
+            menu.addItem(featureCountItem(desktop, current: effective.featureCount, isInherited: !countOverridden, enabled: enabled))
         }
-        if current != .float {
+        if effective.arrange == .fixed {
+            menu.addItem(columnsItem(desktop, current: effective.columns, isInherited: overrides?.columns == nil, enabled: enabled))
+            menu.addItem(rowsItem(desktop, current: effective.rows, isInherited: overrides?.rows == nil, enabled: enabled))
+        }
+        if effective.arrange != .float {
+            // Decks exist in every tiled arrangement: manual ones, fixed-grid overflow, and monocle.
+            menu.addItem(deckPeekItem(desktop, current: effective.deckPeek, isInherited: overrides?.deckPeek == nil, enabled: enabled))
+        }
+        if effective.arrange.isTree {
+            menu.addItem(splitDirectionItem(desktop, effective: effective, override: overrides?.split, enabled: enabled))
+        }
+        if effective.arrange != .float {
             menu.addItem(weightShareLimitItem(desktop, effective: effective,
-                isInherited: overrides?.bspMaxRatio == nil && overrides?.bspMinRatio == nil, enabled: enabled))
+                isInherited: overrides?.weightShareMax == nil && overrides?.weightShareMin == nil, enabled: enabled))
+        } else {
+            menu.addItem(floatPlacementItem(desktop, effective: effective, isInherited: overrides?.floatPlacement == nil, enabled: enabled))
         }
         menu.addItem(gapItem(desktop, title: "Inner Gap", isOuter: false, current: effective.gaps.inner, enabled: enabled))
         menu.addItem(gapItem(desktop, title: "Outer Gap", isOuter: true, current: effective.gaps.outer, enabled: enabled))
         menu.addItem(.separator())
 
         menu.addItem(action("Remove Desktop Overrides", enabled: enabled) { [unowned self] in
-            write(desktop, "mode", nil)
             if let error = manager.editConfig({ $0.removeSpaces(for: desktop.key) }) { writeError(error) }
         })
         menu.addItem(action("More in Settings…") { [unowned self] in
@@ -290,8 +273,13 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let checked: Bool
     }
 
-    /// `[layout]`: what a desktop setting falls back to without an override.
-    private var defaults: LayoutSettings { manager.config.layout }
+    /// What a desktop setting falls back to without an override: built-in
+    /// defaults for the current desktop's screen size under `[layout]`.
+    private var defaults: LayoutSettings {
+        let snapshot = manager.engine.snapshot
+        let small = manager.currentSpace.flatMap { snapshot.key(for: $0) }.map { snapshot.isSmall(display: $0.display) } ?? false
+        return manager.config.layoutDefaults(small: small)
+    }
 
     private func choiceItem(_ title: String, checked: Bool, enabled: Bool = true, _ handler: @escaping () -> Void) -> NSMenuItem {
         let item = action(title, enabled: enabled, handler)
@@ -338,70 +326,68 @@ final class StatusBar: NSObject, NSMenuDelegate {
             onSelect: { [unowned self] value in write(desktop, key, value) })
     }
 
-    private func masterSizeItem(_ desktop: Desktop, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+    private func arrangementItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = Arrangement.allCases.map { arrangement in
+            SettingOption(label: arrangement.label, value: .string(arrangement.rawValue), checked: effective.arrange == arrangement)
+        }
+        return settingSubmenu(desktop, "Arrangement", key: "arrange", defaultLabel: defaults.arrange.label,
+            isInherited: isInherited, enabled: enabled, options: options)
+    }
+
+    private func featureSideItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = FeatureSide.allCases.map { side in
+            SettingOption(label: side.label, value: .string(side.rawValue), checked: effective.feature == side)
+        }
+        return settingSubmenu(desktop, "Feature", key: "feature", defaultLabel: defaults.feature.label,
+            isInherited: isInherited, enabled: enabled, options: options)
+    }
+
+    private func featureSizeItem(_ desktop: Desktop, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {
         let options = [50, 55, 60, 65, 70, 75, 80].map { p -> SettingOption in
             SettingOption(label: "\(p)%", value: .float(Double(p) / 100), checked: near(current, Double(p) / 100))
         }
-        return settingSubmenu(desktop, "Master Size", key: "master_ratio", defaultLabel: "\(Int((defaults.masterRatio * 100).rounded()))%",
+        return settingSubmenu(desktop, "Feature Size", key: "feature_size", defaultLabel: "\(Int((defaults.featureSize * 100).rounded()))%",
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
-    private func masterCountItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+    private func featureCountItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
         let options = (1...4).map { n -> SettingOption in
             SettingOption(label: "\(n)", value: .integer(n), checked: current == n)
         }
-        return settingSubmenu(desktop, "Master Count", key: "master_count", defaultLabel: "\(defaults.masterCount)",
+        return settingSubmenu(desktop, "Feature Count", key: "feature_count", defaultLabel: "\(defaults.featureCount)",
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
-    private func stackSideItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
-        let sides: [(StackSide, String)] = [(.right, "Right"), (.left, "Left"), (.bottom, "Bottom"), (.top, "Top")]
-        let options = sides.map { side, label in
-            SettingOption(label: label, value: .string(side.rawValue), checked: effective.stackSide == side)
+    private func floatPlacementItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = FloatPlacement.allCases.map { placement in
+            SettingOption(label: placement == .cascade ? "Cascade" : "None", value: .string(placement.rawValue),
+                          checked: effective.floatPlacement == placement)
         }
-        return settingSubmenu(desktop, "Stack Side", key: "stack_side", defaultLabel: defaults.stackSide.rawValue.capitalized,
+        return settingSubmenu(desktop, "New Windows", key: "float_placement", defaultLabel: defaults.floatPlacement.rawValue.capitalized,
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
-    private func gridMaxItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
-        let options = [0, 2, 3, 4, 5].map { n -> SettingOption in
-            SettingOption(label: n == 0 ? "No Limit" : "\(n)", value: .integer(n), checked: current == n)
+    private func rowsItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+        let options = [0, 1, 2, 3, 4, 5].map { n -> SettingOption in
+            SettingOption(label: n == 0 ? "No Cap" : "\(n)", value: .integer(n), checked: current == n)
         }
-        return settingSubmenu(desktop, "Grid Max", key: "grid_max", defaultLabel: defaults.gridMax == 0 ? "No Limit" : "\(defaults.gridMax)",
+        return settingSubmenu(desktop, "Rows", key: "rows", defaultLabel: defaults.rows == 0 ? "No Cap" : "\(defaults.rows)",
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
-    private func gridColumnsItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+    private func columnsItem(_ desktop: Desktop, current: Int, isInherited: Bool, enabled: Bool) -> NSMenuItem {
         let options = (1...4).map { n -> SettingOption in
             SettingOption(label: "\(n)", value: .integer(n), checked: current == n)
         }
-        return settingSubmenu(desktop, "Grid Columns", key: "grid_columns", defaultLabel: "\(defaults.gridColumns)",
+        return settingSubmenu(desktop, "Columns", key: "columns", defaultLabel: "\(defaults.columns)",
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
-    private func stackBothSidesItem(_ desktop: Desktop, current: Bool, isInherited: Bool, enabled: Bool) -> NSMenuItem {
-        let options = [
-            SettingOption(label: "On", value: .bool(true), checked: current),
-            SettingOption(label: "Off", value: .bool(false), checked: !current),
-        ]
-        return settingSubmenu(desktop, "Stack on Both Sides", key: "stack_both_sides", defaultLabel: defaults.stackBothSides ? "On" : "Off",
-            isInherited: isInherited, enabled: enabled, options: options)
-    }
-
-    private func stackPeekItem(_ desktop: Desktop, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {
+    private func deckPeekItem(_ desktop: Desktop, current: Double, isInherited: Bool, enabled: Bool) -> NSMenuItem {
         let options = [0, 16, 24, 30, 40].map { pt -> SettingOption in
             SettingOption(label: "\(pt) pt", value: .integer(pt), checked: near(current, Double(pt)))
         }
-        return settingSubmenu(desktop, "Stack Peek", key: "stack_peek", defaultLabel: "\(Int(defaults.stackPeek)) pt",
-            isInherited: isInherited, enabled: enabled, options: options)
-    }
-
-    private func bspArrangementItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
-        let shapes: [(BSPShape, String)] = [(.dwindle, "Dwindle"), (.balanced, "Balanced")]
-        let options = shapes.map { shape, label in
-            SettingOption(label: label, value: .string(shape.rawValue), checked: effective.bspShape == shape)
-        }
-        return settingSubmenu(desktop, "Arrangement", key: "bsp_shape", defaultLabel: defaults.bspShape.rawValue.capitalized,
+        return settingSubmenu(desktop, "Deck Peek", key: "deck_peek", defaultLabel: "\(Int(defaults.deckPeek)) pt",
             isInherited: isInherited, enabled: enabled, options: options)
     }
 
@@ -420,14 +406,14 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     private func weightShareLimitItem(_ desktop: Desktop, effective: LayoutSettings, isInherited: Bool, enabled: Bool) -> NSMenuItem {
         let options = [60, 67, 75, 80, 90].map { p -> SettingOption in
-            SettingOption(label: "Max \(p)%", value: .float(Double(p) / 100), checked: near(effective.bspMaxRatio, Double(p) / 100))
+            SettingOption(label: "Max \(p)%", value: .float(Double(p) / 100), checked: near(effective.weightShareMax, Double(p) / 100))
         }
-        return optionSubmenu("Weight Share Limit", defaultLabel: "Default (Max \(Int((defaults.bspMaxRatio * 100).rounded()))%)",
+        return optionSubmenu("Weight Share Limit", defaultLabel: "Default (Max \(Int((defaults.weightShareMax * 100).rounded()))%)",
             isInherited: isInherited, enabled: enabled, options: options,
-            onDefault: { [unowned self] in writePair(desktop, ("bsp_max_ratio", nil), ("bsp_min_ratio", nil)) },
+            onDefault: { [unowned self] in writePair(desktop, ("weight_share_max", nil), ("weight_share_min", nil)) },
             onSelect: { [unowned self] value in
                 guard case .float(let v) = value else { return }
-                writePair(desktop, ("bsp_max_ratio", .float(v)), ("bsp_min_ratio", .float(1 - v)))
+                writePair(desktop, ("weight_share_max", .float(v)), ("weight_share_min", .float(1 - v)))
             })
     }
 
@@ -538,8 +524,8 @@ final class StatusBar: NSObject, NSMenuDelegate {
     # `ballast spaces` lists display and Space UUIDs plus ordinals for [[space]] entries.
 
     [layout]
-    # No `mode`: master_stack on a built-in display, master_grid on external ones.
-    master_ratio = 0.6
+    # Small displays default to one full-screen deck, large ones to a feature beside two tiles.
+    feature_size = 0.6
 
     [bindings]
     "alt+h" = "focus left"

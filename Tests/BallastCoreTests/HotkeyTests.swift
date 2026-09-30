@@ -4,6 +4,18 @@ import Testing
 @Suite("Hotkey parsing")
 struct HotkeyTests {
 
+    @Test("symbols show macOS modifiers in menu order, then the key")
+    func symbols() {
+        let expected = [("alt+m", "⌥M"), ("hyper+left", "⌃⌥⇧⌘←"), ("ctrl+shift+space", "⌃⇧Space"), ("cmd+f5", "⌘F5")]
+        for (spec, symbols) in expected {
+            guard case .success(let hotkey) = Hotkey.parse(spec) else {
+                Issue.record("expected success for \(spec)")
+                continue
+            }
+            #expect(hotkey.symbols == symbols, "\(spec)")
+        }
+    }
+
     @Test("modifier aliases resolve to the same modifier")
     func modifierAliases() {
         let commandSpecs = ["cmd+a", "command+a", "\u{2318}+a"]

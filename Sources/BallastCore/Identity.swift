@@ -98,15 +98,19 @@ public struct DisplaySpaces: Equatable, Sendable {
     /// All Spaces of the display, in Mission Control order.
     public let spaces: [SpaceInfo]
     public let activeSpace: SpaceID?
-    /// A built-in (laptop) display; it gets `master_stack` unless the config
-    /// says otherwise.
+    /// A built-in (laptop) display.
     public let builtin: Bool
+    /// Visible frame narrower than `LayoutSettings.smallWidth` points; picks
+    /// the built-in layout defaults. The platform computes it; false (a large
+    /// screen) when not given.
+    public let small: Bool
 
-    public init(displayUUID: String, spaces: [SpaceInfo], activeSpace: SpaceID?, builtin: Bool = false) {
+    public init(displayUUID: String, spaces: [SpaceInfo], activeSpace: SpaceID?, builtin: Bool = false, small: Bool = false) {
         self.displayUUID = displayUUID
         self.spaces = spaces
         self.activeSpace = activeSpace
         self.builtin = builtin
+        self.small = small
     }
 }
 
@@ -165,6 +169,10 @@ public struct SpaceSnapshot: Equatable, Sendable {
 
     public func isBuiltin(display uuid: String) -> Bool {
         displays.first { $0.displayUUID == uuid }?.builtin ?? false
+    }
+
+    public func isSmall(display uuid: String) -> Bool {
+        displays.first { $0.displayUUID == uuid }?.small ?? false
     }
 
     /// Every user-desktop Space id currently known.

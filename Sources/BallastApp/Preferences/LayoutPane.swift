@@ -8,7 +8,7 @@ enum LayoutScope: Hashable {
     case desktop(SpaceKey)
 }
 
-/// Master-grid/master-stack/BSP layout defaults, plus per-desktop overrides.
+/// Arrangement, feature, and deck defaults, plus per-desktop overrides.
 /// Every field carries its own "Inherit" toggle when a specific desktop is
 /// selected: on means the key is absent from that desktop's `[[space]]`
 /// block (it falls back to `[layout]`); off writes the field's current
@@ -31,8 +31,9 @@ struct LayoutPane: View {
 
     private var effective: LayoutSettings {
         switch scope {
-        case .defaults: config.layout
-        case .desktop(let key): config.layoutSettings(for: key)
+        case .defaults: config.layoutDefaults(small: false)
+        case .desktop(let key):
+            config.layoutSettings(for: key, small: manager.engine.snapshot.isSmall(display: key.display))
         }
     }
 
@@ -58,78 +59,89 @@ struct LayoutPane: View {
                     Text("Checked settings apply only to this desktop. Unchecked settings follow Defaults (all desktops).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else {
+                    Text("A setting you change here applies to every screen. One left unset follows the built-in default for its screen: small (visible width under \(Int(LayoutSettings.smallWidth)) pt, every MacBook) or large.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .disabled(editingDisabled)
 
-            Section("Master-Grid & Master-Stack") {
-                fieldRow("Mode", inherited: modeInherited) {
+            Section("Arrangement & feature") {
+                fieldRow("Arrangement", inherited: overrides?.arrange == nil,
+                         builtin: builtin(config.layout.arrange != nil) { $0.arrange.label }) {
                     Picker("", selection: Binding(
-                        get: { modeSelection },
-                        set: { commitMode($0) }
+                        get: { effective.arrange },
+                        set: { commitDesktopField("arrange", .string($0.rawValue)) }
                     )) {
-                        if case .defaults = scope {
-                            Text(automaticModeLabel).tag(LayoutMode?.none)
-                        }
-                        ForEach(LayoutMode.allCases, id: \.self) { mode in
-                            Text(modeLabel(mode)).tag(LayoutMode?.some(mode))
-                        }
+                        ForEach(Arrangement.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .labelsHidden()
                 }
-                fieldRow("Master Ratio", inherited: overrides?.masterRatio == nil) {
+                fieldRow("Feature", inherited: overrides?.feature == nil,
+                         builtin: builtin(config.layout.feature != nil) { $0.feature.label }) {
+                    Picker("", selection: Binding(
+                        get: { effective.feature },
+                        set: { commitDesktopField("feature", .string($0.rawValue)) }
+                    )) {
+                        ForEach(FeatureSide.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden()
+                }
+                fieldRow("Feature Size", inherited: overrides?.featureSize == nil,
+                         builtin: builtin(config.layout.featureSize != nil) { "\(Int(($0.featureSize * 100).rounded()))%" }) {
                     CommitSlider(
-                        title: "", liveValue: effective.masterRatio, range: 0.1...0.9, step: 0.05,
+                        title: "", liveValue: effective.featureSize, range: 0.1...0.9, step: 0.05,
                         format: { "\(Int(($0 * 100).rounded()))%" },
-                        commit: { commitMasterRatio($0) }
+                        commit: { commitFeatureSize($0) }
                     )
                 }
-                fieldRow("Master Count", inherited: overrides?.masterCount == nil) {
-                    CommitStepper(title: "", liveValue: effective.masterCount, range: 1...16) {
-                        commitMasterCount($0)
+                fieldRow("Feature Count", inherited: overrides?.featureCount == nil,
+                         builtin: builtin(config.layout.featureCount != nil) { "\($0.featureCount)" }) {
+                    CommitStepper(title: "", liveValue: effective.featureCount, range: 1...16) {
+                        commitFeatureCount($0)
                     }
                 }
-                fieldRow("Stack Side", inherited: overrides?.stackSide == nil) {
-                    Picker("", selection: Binding(
-                        get: { effective.stackSide },
-                        set: { commitDesktopField("stack_side", .string($0.rawValue)) }
-                    )) {
-                        ForEach(StackSide.allCases, id: \.self) { side in
-                            Text(side.rawValue.capitalized).tag(side)
-                        }
-                    }
-                    .labelsHidden()
-                }
-                fieldRow("Stack Both Sides", inherited: overrides?.stackBothSides == nil) {
-                    Toggle("", isOn: Binding(
-                        get: { effective.stackBothSides },
-                        set: { commitDesktopField("stack_both_sides", .bool($0)) }
-                    ))
-                    .labelsHidden()
-                }
-                fieldRow("Grid Max", inherited: overrides?.gridMax == nil) {
+                fieldRow("Columns", inherited: overrides?.columns == nil,
+                         builtin: builtin(config.layout.columns != nil) { "\($0.columns)" }) {
                     Stepper(
-                        value: Binding(get: { effective.gridMax }, set: { commitDesktopField("grid_max", .integer($0)) }),
-                        in: 0...16
-                    ) {
-                        Text(effective.gridMax == 0 ? "No limit" : "\(effective.gridMax)").monospacedDigit()
-                    }
-                }
-                fieldRow("Grid Columns", inherited: overrides?.gridColumns == nil) {
-                    Stepper(
-                        value: Binding(get: { effective.gridColumns }, set: { commitDesktopField("grid_columns", .integer($0)) }),
+                        value: Binding(get: { effective.columns }, set: { commitDesktopField("columns", .integer($0)) }),
                         in: 1...8
                     ) {
-                        Text("\(effective.gridColumns)").monospacedDigit()
+                        Text("\(effective.columns)").monospacedDigit()
                     }
                 }
-                fieldRow("Stack Peek", inherited: overrides?.stackPeek == nil) {
+                fieldRow("Rows", inherited: overrides?.rows == nil,
+                         builtin: builtin(config.layout.rows != nil) { $0.rows == 0 ? "no cap" : "\($0.rows)" }) {
                     Stepper(
-                        value: Binding(get: { Int(effective.stackPeek) }, set: { commitDesktopField("stack_peek", .integer($0)) }),
+                        value: Binding(get: { effective.rows }, set: { commitDesktopField("rows", .integer($0)) }),
+                        in: 0...16
+                    ) {
+                        Text(effective.rows == 0 ? "No cap" : "\(effective.rows)").monospacedDigit()
+                    }
+                }
+                fieldRow("Deck Peek", inherited: overrides?.deckPeek == nil,
+                         builtin: builtin(config.layout.deckPeek != nil) { "\(Int($0.deckPeek)) pt" }) {
+                    Stepper(
+                        value: Binding(get: { Int(effective.deckPeek) }, set: { commitDesktopField("deck_peek", .integer($0)) }),
                         in: 0...200, step: 2
                     ) {
-                        Text("\(Int(effective.stackPeek)) pt").monospacedDigit()
+                        Text("\(Int(effective.deckPeek)) pt").monospacedDigit()
                     }
+                }
+            }
+            .disabled(editingDisabled)
+
+            Section("Float") {
+                fieldRow("New Windows", inherited: overrides?.floatPlacement == nil) {
+                    Picker("", selection: Binding(
+                        get: { effective.floatPlacement },
+                        set: { commitDesktopField("float_placement", .string($0.rawValue)) }
+                    )) {
+                        Text("Cascade").tag(FloatPlacement.cascade)
+                        Text("Leave where they open").tag(FloatPlacement.none)
+                    }
+                    .labelsHidden()
                 }
             }
             .disabled(editingDisabled)
@@ -143,16 +155,6 @@ struct LayoutPane: View {
                         Text("Auto").tag(BallastCore.Axis?.none)
                         Text("Horizontal").tag(BallastCore.Axis?.some(.horizontal))
                         Text("Vertical").tag(BallastCore.Axis?.some(.vertical))
-                    }
-                    .labelsHidden()
-                }
-                fieldRow("Arrangement", inherited: overrides?.bspShape == nil) {
-                    Picker("", selection: Binding(
-                        get: { effective.bspShape },
-                        set: { commitDesktopField("bsp_shape", .string($0.rawValue)) }
-                    )) {
-                        Text("Dwindle").tag(BSPShape.dwindle)
-                        Text("Balanced").tag(BSPShape.balanced)
                     }
                     .labelsHidden()
                 }
@@ -211,8 +213,19 @@ struct LayoutPane: View {
 
     // MARK: - Rows
 
+    /// In the Defaults scope, what a key `[layout]` does not set falls back to:
+    /// the built-in default of each screen class.
+    private func builtin(_ isSet: Bool, _ value: (LayoutSettings) -> String) -> String? {
+        guard case .defaults = scope, !isSet else { return nil }
+        let small = value(.defaults(small: true)), large = value(.defaults(small: false))
+        return small == large
+            ? "Not set — built-in default: \(small)"
+            : "Not set — built-in default: small screen \(small), large screen \(large)"
+    }
+
     @ViewBuilder
-    private func fieldRow<Content: View>(_ title: String, inherited: Bool, @ViewBuilder content: () -> Content) -> some View {
+    private func fieldRow<Content: View>(_ title: String, inherited: Bool, builtin: String? = nil,
+                                         @ViewBuilder content: () -> Content) -> some View {
         if case .desktop = scope {
             HStack {
                 Toggle(title, isOn: Binding(
@@ -228,32 +241,40 @@ struct LayoutPane: View {
                     .opacity(inherited ? 0.55 : 1)
             }
         } else {
-            HStack {
-                Text(title)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .frame(minWidth: 160, alignment: .leading)
-                content()
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(title)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(minWidth: 160, alignment: .leading)
+                    content()
+                }
+                if let builtin {
+                    Text(builtin)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
 
+
     private var weightShareRow: some View {
-        let inherited = overrides?.bspMinRatio == nil && overrides?.bspMaxRatio == nil
-        let symmetric = abs(effective.bspMinRatio - (1 - effective.bspMaxRatio)) < 0.001
+        let inherited = overrides?.weightShareMin == nil && overrides?.weightShareMax == nil
+        let symmetric = abs(effective.weightShareMin - (1 - effective.weightShareMax)) < 0.001
         return fieldRow("Weight Share Limit", inherited: inherited) {
             if symmetric {
                 CommitSlider(
-                    title: "", liveValue: effective.bspMaxRatio, range: 0.5...0.95, step: 0.05,
+                    title: "", liveValue: effective.weightShareMax, range: 0.5...0.95, step: 0.05,
                     format: { "\(Int(($0 * 100).rounded()))% / \(Int(((1 - $0) * 100).rounded()))%" },
                     commit: { commitWeightShare(max: $0) }
                 )
             } else {
                 HStack {
-                    Text("min \(Int((effective.bspMinRatio * 100).rounded()))% / max \(Int((effective.bspMaxRatio * 100).rounded()))%")
+                    Text("min \(Int((effective.weightShareMin * 100).rounded()))% / max \(Int((effective.weightShareMax * 100).rounded()))%")
                         .foregroundStyle(.secondary)
                     Slider(value: Binding(
-                        get: { effective.bspMaxRatio },
+                        get: { effective.weightShareMax },
                         set: { commitWeightShare(max: $0) }
                     ), in: 0.5...0.95, step: 0.05)
                 }
@@ -276,21 +297,6 @@ struct LayoutPane: View {
         }
     }
 
-    private var modeInherited: Bool { overrides?.mode == nil }
-
-    /// Defaults: the `[layout]` mode, `nil` for automatic. A desktop: the
-    /// mode it resolves to on its display.
-    private var modeSelection: LayoutMode? {
-        switch scope {
-        case .defaults: config.layout.mode
-        case .desktop(let key): effective.mode(builtin: model.desktops.first { $0.key == key }?.builtin ?? false)
-        }
-    }
-
-    private var automaticModeLabel: String {
-        let automatic = LayoutSettings()
-        return "Automatic (\(modeLabel(automatic.mode(builtin: true))) on Built-in, \(modeLabel(automatic.mode(builtin: false))) on External)"
-    }
 
     private var splitInherited: Bool { splitOverride == nil }
 
@@ -303,15 +309,6 @@ struct LayoutPane: View {
 
     private func desktopLabel(_ desktop: WindowManager.DesktopInfo) -> String {
         "\(desktop.displayName) — Desktop \(desktop.key.ordinal)" + (desktop.isActive ? " (active)" : "")
-    }
-
-    private func modeLabel(_ mode: LayoutMode) -> String {
-        switch mode {
-        case .masterGrid: "Master-Grid"
-        case .masterStack: "Master-Stack"
-        case .bsp: "BSP"
-        case .float: "Float (Passthrough)"
-        }
     }
 
     private func shortUUID(_ uuid: String) -> String {
@@ -328,37 +325,27 @@ struct LayoutPane: View {
         editError = error?.description
     }
 
-    private func commitMode(_ mode: LayoutMode?) {
+    private func commitFeatureSize(_ value: Double) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set("mode", mode.map { .string($0.rawValue) }, in: .layout) })
-        case .desktop(let key):
-            guard let mode, let space = spaceID(for: key) else { return }
-            setError(manager.setSpaceSetting("mode", .string(mode.rawValue), space: space))
-        }
-    }
-
-    private func commitMasterRatio(_ value: Double) {
-        switch scope {
-        case .defaults:
-            setError(manager.editConfig { $0.set("master_ratio", .float(value), in: .layout) })
+            setError(manager.editConfig { $0.set("feature_size", .float(value), in: .layout) })
         case .desktop(let key):
             guard let space = spaceID(for: key) else { return }
-            setError(manager.setSpaceSetting("master_ratio", .float(value), space: space))
+            setError(manager.setSpaceSetting("feature_size", .float(value), space: space))
         }
     }
 
-    private func commitMasterCount(_ value: Int) {
+    private func commitFeatureCount(_ value: Int) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set("master_count", .integer(value), in: .layout) })
+            setError(manager.editConfig { $0.set("feature_count", .integer(value), in: .layout) })
         case .desktop(let key):
             guard let space = spaceID(for: key) else { return }
-            setError(manager.setSpaceSetting("master_count", .integer(value), space: space))
+            setError(manager.setSpaceSetting("feature_count", .integer(value), space: space))
         }
     }
 
-    /// Every field besides mode/master_ratio/master_count, which are covered
+    /// Every field besides feature_size/feature_count, which are covered
     /// by `setSpaceSetting` (it also clears the matching runtime override).
     private func commitDesktopField(_ key: String, _ value: ConfigValue?) {
         switch scope {
@@ -372,8 +359,8 @@ struct LayoutPane: View {
 
     private func commitWeightShare(max: Double) {
         let min = 1 - max
-        commitDesktopField("bsp_min_ratio", .float(min))
-        commitDesktopField("bsp_max_ratio", .float(max))
+        commitDesktopField("weight_share_min", .float(min))
+        commitDesktopField("weight_share_max", .float(max))
     }
 
     /// Pure merge used by `commitGaps`/`commitGapsInherit`: an untouched
@@ -420,33 +407,31 @@ struct LayoutPane: View {
     private func toggleInherit(_ title: String, inheriting: Bool) {
         guard case .desktop = scope else { return }
         switch title {
-        case "Mode":
-            commitMode0(inheriting ? nil : modeSelection)
-        case "Master Ratio":
-            commitMasterRatio0(inheriting ? nil : effective.masterRatio)
-        case "Master Count":
-            commitMasterCount0(inheriting ? nil : effective.masterCount)
-        case "Stack Side":
-            commitDesktopField("stack_side", inheriting ? nil : .string(effective.stackSide.rawValue))
-        case "Stack Both Sides":
-            commitDesktopField("stack_both_sides", inheriting ? nil : .bool(effective.stackBothSides))
-        case "Grid Max":
-            commitDesktopField("grid_max", inheriting ? nil : .integer(effective.gridMax))
-        case "Grid Columns":
-            commitDesktopField("grid_columns", inheriting ? nil : .integer(effective.gridColumns))
-        case "Stack Peek":
-            commitDesktopField("stack_peek", inheriting ? nil : .integer(Int(effective.stackPeek)))
+        case "Arrangement":
+            commitDesktopField("arrange", inheriting ? nil : .string(effective.arrange.rawValue))
+        case "Feature":
+            commitDesktopField("feature", inheriting ? nil : .string(effective.feature.rawValue))
+        case "New Windows":
+            commitDesktopField("float_placement", inheriting ? nil : .string(effective.floatPlacement.rawValue))
+        case "Feature Size":
+            commitFeatureSize0(inheriting ? nil : effective.featureSize)
+        case "Feature Count":
+            commitFeatureCount0(inheriting ? nil : effective.featureCount)
+        case "Columns":
+            commitDesktopField("columns", inheriting ? nil : .integer(effective.columns))
+        case "Rows":
+            commitDesktopField("rows", inheriting ? nil : .integer(effective.rows))
+        case "Deck Peek":
+            commitDesktopField("deck_peek", inheriting ? nil : .integer(Int(effective.deckPeek)))
         case "Split Direction":
             commitDesktopField("split", inheriting ? nil : .string(effective.split?.rawValue ?? "auto"))
-        case "Arrangement":
-            commitDesktopField("bsp_shape", inheriting ? nil : .string(effective.bspShape.rawValue))
         case "Weight Share Limit":
             if inheriting {
-                commitDesktopField("bsp_min_ratio", nil)
-                commitDesktopField("bsp_max_ratio", nil)
+                commitDesktopField("weight_share_min", nil)
+                commitDesktopField("weight_share_max", nil)
             } else {
-                commitDesktopField("bsp_min_ratio", .float(effective.bspMinRatio))
-                commitDesktopField("bsp_max_ratio", .float(effective.bspMaxRatio))
+                commitDesktopField("weight_share_min", .float(effective.weightShareMin))
+                commitDesktopField("weight_share_max", .float(effective.weightShareMax))
             }
         case "Inner Gap":
             commitGapsInherit(inner: inheriting ? nil : effective.gaps.inner, clearInner: inheriting)
@@ -459,19 +444,14 @@ struct LayoutPane: View {
 
     /// Wrappers so `setSpaceSetting`'s `nil` (remove key) path is reachable
     /// from the inherit toggle without duplicating the scope switch above.
-    private func commitMode0(_ mode: LayoutMode?) {
+    private func commitFeatureSize0(_ value: Double?) {
         guard case .desktop(let key) = scope, let space = spaceID(for: key) else { return }
-        setError(manager.setSpaceSetting("mode", mode.map { .string($0.rawValue) }, space: space))
+        setError(manager.setSpaceSetting("feature_size", value.map { .float($0) }, space: space))
     }
 
-    private func commitMasterRatio0(_ value: Double?) {
+    private func commitFeatureCount0(_ value: Int?) {
         guard case .desktop(let key) = scope, let space = spaceID(for: key) else { return }
-        setError(manager.setSpaceSetting("master_ratio", value.map { .float($0) }, space: space))
-    }
-
-    private func commitMasterCount0(_ value: Int?) {
-        guard case .desktop(let key) = scope, let space = spaceID(for: key) else { return }
-        setError(manager.setSpaceSetting("master_count", value.map { .integer($0) }, space: space))
+        setError(manager.setSpaceSetting("feature_count", value.map { .integer($0) }, space: space))
     }
 
     private func commitGapsInherit(inner: Double? = nil, outer: Double? = nil, clearInner: Bool = false, clearOuter: Bool = false) {
@@ -485,7 +465,8 @@ struct LayoutPane: View {
 
     private func removeAllOverrides(_ key: SpaceKey) {
         if let space = spaceID(for: key) {
-            _ = manager.setSpaceSetting("mode", nil, space: space)
+            _ = manager.setSpaceSetting("feature_size", nil, space: space)
+            _ = manager.setSpaceSetting("feature_count", nil, space: space)
         }
         setError(manager.editConfig { $0.removeSpaces(for: key) })
     }

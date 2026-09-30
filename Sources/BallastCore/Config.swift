@@ -47,103 +47,198 @@ public struct FocusFlashSettings: Equatable, Sendable {
     public init() {}
 }
 
-/// Fully-resolved layout settings for one (display, space).
-public struct LayoutSettings: Equatable, Sendable {
-    /// `nil` leaves the mode to the display; see `mode(builtin:)`.
-    public var mode: LayoutMode?
-    public var masterRatio = 0.6
-    public var masterCount = 1
-    public var stackSide = StackSide.right
-    /// Master-grid: the most stack windows tiled per column; past
-    /// `gridColumns * gridMax` on a side, the outermost column scrolls like
-    /// master-stack's one window. 0 = no limit.
-    public var gridMax = 0
-    /// Master-grid: columns side by side on each stack side, filled
-    /// column-major from the one nearest the masters.
-    public var gridColumns = 1
-    /// Masters in the middle with a stack on both sides along `stackSide`'s
-    /// axis; `stackSide`'s side gets the first half of the stack.
-    public var stackBothSides = false
-    /// Points of the previous and next stack windows left showing at either
-    /// end of a scrolling stack.
-    public var stackPeek = 30.0
-    /// Axis for new BSP splits; `nil` = automatic (longer side).
-    public var split: Axis?
-    /// Shape of the weight-default BSP tree.
-    public var bspShape = BSPShape.dwindle
-    /// Weight Share Limit, for every layout. BSP clamps each split's first
-    /// share to `[bspMinRatio, bspMaxRatio]`; the master layouts apply the
-    /// same band as `maxWeightRatio`.
-    public var bspMinRatio = 0.25
-    public var bspMaxRatio = 0.75
-    public var gaps = Gaps(inner: 8, outer: 8)
+/// How tiles are arranged in the area outside the feature (or in the whole
+/// area when there is no feature).
+public enum Arrangement: String, CaseIterable, Equatable, Sendable {
+    /// `columns` × `rows`: a fixed grid whose last column decks its overflow.
+    case fixed
+    /// √n equal cells, row-major; the last row stretches.
+    case adaptive
+    /// Binary space partition: each window splits the previous one.
+    case dwindle
+    /// Binary space partition as an equal-area grid.
+    case balanced
+    /// Hands off: windows keep the frames they have.
+    case float
 
-    public init() {}
-
-    /// The mode for a Space on a built-in (laptop) or an external display:
-    /// `mode` when set, otherwise the one-window stack on a small built-in
-    /// screen and the grid everywhere else.
-    public func mode(builtin: Bool) -> LayoutMode { mode ?? (builtin ? .masterStack : .masterGrid) }
-
-    /// How many stack windows `mode` shows at once before its stack scrolls;
-    /// `nil` = every one (no scrolling). Takes the Space's effective mode,
-    /// which a runtime override or the display can make differ from `self.mode`.
-    public func stackLimit(in mode: LayoutMode) -> Int? {
-        switch mode {
-        case .masterStack: return 1
-        case .masterGrid: return gridMax > 0 ? gridMax : nil
-        case .bsp, .float: return nil
+    /// Human name for menus, Settings, and the Inspector.
+    public var label: String {
+        switch self {
+        case .fixed: return "Fixed grid"
+        case .adaptive: return "Adaptive grid"
+        case .dwindle: return "BSP dwindle"
+        case .balanced: return "BSP balanced"
+        case .float: return "Float"
         }
     }
 
-    /// Columns side by side on each stack side in `mode`.
-    public func stackColumns(in mode: LayoutMode) -> Int {
-        mode == .masterGrid ? max(gridColumns, 1) : 1
+    /// Whether the arrangement is a BSP tree.
+    public var isTree: Bool { self == .dwindle || self == .balanced }
+}
+
+/// Which side of the area the feature takes, if any.
+public enum FeatureSide: String, CaseIterable, Equatable, Sendable {
+    case off = "none"
+    case left, right, top, bottom
+    /// The feature in the middle, the grid split into a right and a left half.
+    case center
+
+    public var label: String {
+        switch self {
+        case .off: return "None"
+        case .left: return "Left"
+        case .right: return "Right"
+        case .top: return "Top"
+        case .bottom: return "Bottom"
+        case .center: return "Center"
+        }
     }
 
-    /// The Weight Share Limit as a master-layout factor: no window's weight
+    /// Axis along which the feature and the grid sit side by side.
+    var primaryAxis: Axis { self == .top || self == .bottom ? .vertical : .horizontal }
+    /// The grid comes after the feature (right of or below it) along the primary axis.
+    var gridFollows: Bool { self == .left || self == .top || self == .center }
+}
+
+/// Fully-resolved layout settings for one (display, space).
+public struct LayoutSettings: Equatable, Sendable {
+    public var arrange = Arrangement.fixed
+    /// fixed: columns side by side (per grid half with a centered feature),
+    /// filled column-major nearest the feature first.
+    public var columns = 1
+    /// fixed: the most tiles shown per column; past `columns * rows` tiles
+    /// the last column decks and scrolls with `rows` in view. 0 = no cap.
+    public var rows = 1
+    public var feature = FeatureSide.off
+    public var featureSize = 0.6
+    public var featureCount = 1
+    /// Where a window that newly opens on a float Space is put.
+    public var floatPlacement = FloatPlacement.cascade
+    /// Points of the previous and next deck windows left showing at either
+    /// end of a scrolling deck.
+    public var deckPeek = 30.0
+    /// Axis for new BSP splits; `nil` = automatic (longer side).
+    public var split: Axis?
+    /// Weight Share Limit, for every arrangement. BSP clamps each split's first
+    /// share to `[weightShareMin, weightShareMax]`; feature and fixed columns
+    /// apply the same band as `maxWeightRatio`.
+    public var weightShareMin = 0.25
+    public var weightShareMax = 0.75
+    public var gaps = Gaps(inner: 8, outer: 8)
+
+    /// The small-screen defaults (see `defaults(small:)`).
+    public init() {}
+
+    /// Visible-frame width below which a display counts as small.
+    public static let smallWidth = 1800.0
+
+    /// Built-in defaults: a small screen shows one full-screen deck; a large
+    /// one a feature on the left beside two tiles.
+    public static func defaults(small: Bool) -> LayoutSettings {
+        var s = LayoutSettings()
+        if !small {
+            s.rows = 2
+            s.feature = .left
+        }
+        return s
+    }
+
+    /// The feature side the layout uses: BSP has one tree and no halves, so
+    /// a centered feature sits on the left there. `.off` for float.
+    public var effectiveFeature: FeatureSide {
+        switch arrange {
+        case .float: return .off
+        case .dwindle, .balanced: return feature == .center ? .left : feature
+        case .fixed, .adaptive: return feature
+        }
+    }
+
+    public var hasFeature: Bool { effectiveFeature != .off }
+
+    /// Tiles shown at once per grid column before it decks; `nil` = all.
+    public var deckLimit: Int? { arrange == .fixed && rows > 0 ? rows : nil }
+
+    /// Grid columns per side (1 outside `fixed`).
+    public var gridColumns: Int { arrange == .fixed ? max(columns, 1) : 1 }
+
+    /// Menu-bar glyph: `F·` when a feature is on, then `C×R` (`∞` for no row cap),
+    /// `A`, `D`, `B`; `⋯` for float.
+    public var glyph: String {
+        let body: String
+        switch arrange {
+        case .fixed: body = "\(columns)×\(rows == 0 ? "∞" : String(rows))"
+        case .adaptive: body = "A"
+        case .dwindle: body = "D"
+        case .balanced: body = "B"
+        case .float: return "⋯"
+        }
+        return hasFeature ? "F·\(body)" : body
+    }
+
+    /// Human description for menus and the Inspector, e.g. "Fixed 1×2 with left feature".
+    public var summary: String {
+        var text: String
+        switch arrange {
+        case .fixed: text = "Fixed grid \(columns)×\(rows == 0 ? "∞" : String(rows))"
+        case .adaptive: text = Arrangement.adaptive.label
+        case .dwindle: text = Arrangement.dwindle.label
+        case .balanced: text = Arrangement.balanced.label
+        case .float: return "Float"
+        }
+        if hasFeature {
+            let side = effectiveFeature
+            text += side == .center ? " with centered feature" : " with \(side.rawValue) feature"
+        }
+        return text
+    }
+
+    /// The Weight Share Limit as a feature/column factor: no window's weight
     /// counts for more than this many times the lightest in its region, so two
     /// windows split a region at most 75/25 by default, like the two sides of
     /// a BSP split.
     public var maxWeightRatio: Double {
-        let lo = min(bspMinRatio, bspMaxRatio), hi = max(bspMinRatio, bspMaxRatio)
+        let lo = min(weightShareMin, weightShareMax), hi = max(weightShareMin, weightShareMax)
         return lo > 0 ? hi / lo : .infinity
     }
 }
 
-/// Per-(display, space) partial override of `LayoutSettings`.
+public enum FloatPlacement: String, CaseIterable, Equatable, Sendable {
+    case cascade
+    case none
+}
+
+/// Partial override of `LayoutSettings`: what a `[layout]` or `[[space]]`
+/// table sets.
 public struct LayoutOverrides: Equatable, Sendable {
-    public var mode: LayoutMode?
-    public var masterRatio: Double?
-    public var masterCount: Int?
-    public var stackSide: StackSide?
-    public var gridMax: Int?
-    public var gridColumns: Int?
-    public var stackBothSides: Bool?
-    public var stackPeek: Double?
+    public var arrange: Arrangement?
+    public var columns: Int?
+    public var rows: Int?
+    public var feature: FeatureSide?
+    public var featureSize: Double?
+    public var featureCount: Int?
+    public var floatPlacement: FloatPlacement?
+    public var deckPeek: Double?
     public var split: Axis??
-    public var bspShape: BSPShape?
-    public var bspMinRatio: Double?
-    public var bspMaxRatio: Double?
+    public var weightShareMin: Double?
+    public var weightShareMax: Double?
     public var gapsInner: Double?
     public var gapsOuter: Double?
 
     public init() {}
 
-    func applied(to base: LayoutSettings) -> LayoutSettings {
+    public func applied(to base: LayoutSettings) -> LayoutSettings {
         var s = base
-        if let mode { s.mode = mode }
-        if let masterRatio { s.masterRatio = masterRatio }
-        if let masterCount { s.masterCount = masterCount }
-        if let stackSide { s.stackSide = stackSide }
-        if let gridMax { s.gridMax = gridMax }
-        if let gridColumns { s.gridColumns = gridColumns }
-        if let stackBothSides { s.stackBothSides = stackBothSides }
-        if let stackPeek { s.stackPeek = stackPeek }
+        if let arrange { s.arrange = arrange }
+        if let columns { s.columns = columns }
+        if let rows { s.rows = rows }
+        if let feature { s.feature = feature }
+        if let featureSize { s.featureSize = featureSize }
+        if let featureCount { s.featureCount = featureCount }
+        if let floatPlacement { s.floatPlacement = floatPlacement }
+        if let deckPeek { s.deckPeek = deckPeek }
         if let split { s.split = split }
-        if let bspShape { s.bspShape = bspShape }
-        if let bspMinRatio { s.bspMinRatio = bspMinRatio }
-        if let bspMaxRatio { s.bspMaxRatio = bspMaxRatio }
+        if let weightShareMin { s.weightShareMin = weightShareMin }
+        if let weightShareMax { s.weightShareMax = weightShareMax }
         if let gapsInner { s.gaps.inner = gapsInner }
         if let gapsOuter { s.gaps.outer = gapsOuter }
         return s
@@ -166,7 +261,8 @@ public struct Config: Equatable, Sendable {
     public var focusFollowsMouse = false
     /// Warp the cursor to the focused window's center when focus crosses displays.
     public var cursorFollowsFocus = true
-    public var layout = LayoutSettings()
+    /// What `[layout]` sets; built-in defaults fill the rest (see `layoutDefaults(small:)`).
+    public var layout = LayoutOverrides()
     /// Per-desktop overrides, keyed by how the config file addresses the desktop.
     public var spaces: [SpaceAddress: LayoutOverrides] = [:]
     public var rules: [AppRule] = []
@@ -190,8 +286,17 @@ public struct Config: Equatable, Sendable {
         key.flatMap { address(for: $0) }.flatMap { spaces[$0] }
     }
 
-    public func layoutSettings(for key: SpaceKey?) -> LayoutSettings {
-        overrides(for: key)?.applied(to: layout) ?? layout
+    /// Settings for `key` on a display that is `small` or large: the built-in
+    /// defaults, then `[layout]`, then the desktop's `[[space]]`.
+    public func layoutSettings(for key: SpaceKey?, small: Bool) -> LayoutSettings {
+        let base = layoutDefaults(small: small)
+        return overrides(for: key)?.applied(to: base) ?? base
+    }
+
+    /// What a desktop without its own `[[space]]` uses: built-in defaults for
+    /// the screen size under the keys `[layout]` sets.
+    public func layoutDefaults(small: Bool) -> LayoutSettings {
+        layout.applied(to: LayoutSettings.defaults(small: small))
     }
 }
 
@@ -244,8 +349,8 @@ extension Config {
 
         if let layout = top.table("layout") {
             let overrides = readLayout(layout, allowPlacement: false)
-            config.layout = overrides.applied(to: LayoutSettings())
-            validateClamp(config.layout, reader: layout)
+            config.layout = overrides
+            validateClamp(overrides.applied(to: LayoutSettings()), reader: layout)
         }
 
         for (index, space) in top.tables("space").enumerated() {
@@ -288,9 +393,9 @@ extension Config {
                 space.error("", "duplicate [[space]] for \(address) (entry \(index + 1))")
             }
             let overrides = readLayout(space, allowPlacement: true)
-            if overrides.bspMinRatio != nil || overrides.bspMaxRatio != nil {
-                let clampKey = overrides.bspMinRatio != nil ? "bsp_min_ratio" : "bsp_max_ratio"
-                validateClamp(overrides.applied(to: config.layout), reader: space, key: clampKey)
+            if overrides.weightShareMin != nil || overrides.weightShareMax != nil {
+                let clampKey = overrides.weightShareMin != nil ? "weight_share_min" : "weight_share_max"
+                validateClamp(overrides.applied(to: config.layout.applied(to: LayoutSettings())), reader: space, key: clampKey)
             }
             config.spaces[address] = overrides
         }
@@ -331,32 +436,31 @@ extension Config {
     }
 
     private static let layoutKeys: Set<String> = [
-        "mode", "master_ratio", "master_count", "stack_side", "stack_both_sides", "grid_max", "grid_columns",
-        "stack_peek", "split", "bsp_shape",
-        "bsp_min_ratio", "bsp_max_ratio", "gaps",
+        "arrange", "columns", "rows", "feature", "feature_size", "feature_count", "deck_peek", "float_placement",
+        "split", "weight_share_min", "weight_share_max", "gaps",
     ]
 
     private static func readLayout(_ r: Reader, allowPlacement: Bool) -> LayoutOverrides {
         r.allowOnly(allowPlacement ? layoutKeys.union(["display", "ordinal", "uuid"]) : layoutKeys)
         var o = LayoutOverrides()
-        o.mode = r.enumeration("mode")
-        if let v = r.number("master_ratio") {
-            if v > 0.05 && v < 0.95 { o.masterRatio = v }
-            else { r.error("master_ratio", "must be strictly between 0.05 and 0.95") }
+        o.arrange = r.enumeration("arrange")
+        o.feature = r.enumeration("feature")
+        o.floatPlacement = r.enumeration("float_placement")
+        if let v = r.int("columns") {
+            if (1...8).contains(v) { o.columns = v } else { r.error("columns", "must be within 1…8") }
         }
-        if let v = r.int("master_count") {
-            if (1...16).contains(v) { o.masterCount = v } else { r.error("master_count", "must be within 1…16") }
+        if let v = r.int("rows") {
+            if (0...16).contains(v) { o.rows = v } else { r.error("rows", "must be within 0…16 (0 = no cap)") }
         }
-        o.stackSide = r.enumeration("stack_side")
-        if let v = r.int("grid_max") {
-            if (0...16).contains(v) { o.gridMax = v } else { r.error("grid_max", "must be within 0…16 (0 = no limit)") }
+        if let v = r.number("feature_size") {
+            if v > 0.05 && v < 0.95 { o.featureSize = v }
+            else { r.error("feature_size", "must be strictly between 0.05 and 0.95") }
         }
-        if let v = r.int("grid_columns") {
-            if (1...8).contains(v) { o.gridColumns = v } else { r.error("grid_columns", "must be within 1…8") }
+        if let v = r.int("feature_count") {
+            if (1...16).contains(v) { o.featureCount = v } else { r.error("feature_count", "must be within 1…16") }
         }
-        o.stackBothSides = r.bool("stack_both_sides")
-        if let v = r.number("stack_peek") {
-            if (0...200).contains(v) { o.stackPeek = v } else { r.error("stack_peek", "must be within 0…200") }
+        if let v = r.number("deck_peek") {
+            if (0...200).contains(v) { o.deckPeek = v } else { r.error("deck_peek", "must be within 0…200") }
         }
         if let v = r.string("split") {
             switch v {
@@ -366,9 +470,8 @@ extension Config {
             default: r.error("split", "expected auto|horizontal|vertical, got '\(v)'")
             }
         }
-        o.bspShape = r.enumeration("bsp_shape")
-        for (key, apply) in [("bsp_min_ratio", { (v: Double) in o.bspMinRatio = v }),
-                             ("bsp_max_ratio", { (v: Double) in o.bspMaxRatio = v })] {
+        for (key, apply) in [("weight_share_min", { (v: Double) in o.weightShareMin = v }),
+                             ("weight_share_max", { (v: Double) in o.weightShareMax = v })] {
             if let v = r.number(key) {
                 if v > 0 && v < 1 { apply(v) } else { r.error(key, "must be within (0, 1)") }
             }
@@ -385,9 +488,9 @@ extension Config {
         return o
     }
 
-    private static func validateClamp(_ s: LayoutSettings, reader: Reader, key: String = "bsp_min_ratio") {
-        if s.bspMinRatio > s.bspMaxRatio {
-            reader.error(key, "must not exceed bsp_max_ratio")
+    private static func validateClamp(_ s: LayoutSettings, reader: Reader, key: String = "weight_share_min") {
+        if s.weightShareMin > s.weightShareMax {
+            reader.error(key, "must not exceed weight_share_max")
         }
     }
 
@@ -496,7 +599,7 @@ struct Reader {
 
     func allowOnly(_ keys: Set<String>) {
         for key in table.keys where !keys.contains(key) {
-            error(key, "unknown key")
+            error(key, LegacyNames.keyMessage(key) ?? "unknown key")
         }
     }
 

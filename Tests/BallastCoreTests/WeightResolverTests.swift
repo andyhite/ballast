@@ -93,8 +93,8 @@ struct WeightResolverTests {
         return result
     }
 
-    @Test("master/stack assignment: first masterCount ranked windows land in the master region")
-    func masterAssignment() {
+    @Test("feature assignment: first featureCount ranked windows land in the feature area")
+    func featureAssignment() {
         let candidates = [
             WeightResolver.Candidate(id: 1, weight: 1, focusRank: nil, creation: 0),
             WeightResolver.Candidate(id: 2, weight: 10, focusRank: nil, creation: 1),
@@ -104,13 +104,14 @@ struct WeightResolverTests {
         #expect(order == [2, 3, 1])
 
         let rect = CGRect(x: 0, y: 0, width: 1200, height: 800)
-        let frames = MasterLayout.plan(order: order, in: rect, masterCount: 2, ratio: 0.5, side: .right, gap: 0).frames
-        guard let masterFrame2 = frames[2], let masterFrame3 = frames[3], let stackFrame1 = frames[1] else {
+        let frames = FeatureLayout.plan(order: order, in: rect, feature: .left, featureCount: 2, size: 0.5,
+                                        grid: .fixed(columns: 1, limit: nil), gap: 0).frames
+        guard let featureFrame2 = frames[2], let featureFrame3 = frames[3], let gridFrame1 = frames[1] else {
             Issue.record("expected frames for windows 1, 2, 3")
             return
         }
-        #expect(masterFrame2.maxX <= stackFrame1.minX, "window 2 (master) should be left of the stack region")
-        #expect(masterFrame3.maxX <= stackFrame1.minX, "window 3 (master) should be left of the stack region")
+        #expect(featureFrame2.maxX <= gridFrame1.minX, "window 2 (feature) should be left of the grid region")
+        #expect(featureFrame3.maxX <= gridFrame1.minX, "window 3 (feature) should be left of the grid region")
     }
 
     // MARK: - FocusHistory

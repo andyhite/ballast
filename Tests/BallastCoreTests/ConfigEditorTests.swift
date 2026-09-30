@@ -18,7 +18,7 @@ struct ConfigEditorTests {
     @Test("no-op set of an existing value leaves the example config byte-identical")
     func noOpRoundTrip() {
         var editor = ConfigEditor(text: Self.example)
-        let result = editor.set("master_ratio", .float(0.6), in: .layout)
+        let result = editor.set("feature_size", .float(0.6), in: .layout)
         expectSuccess(result)
         #expect(editor.text == Self.example)
     }
@@ -38,42 +38,42 @@ struct ConfigEditorTests {
     func replaceKeepsComment() {
         let text = """
         [layout]
-        master_ratio = 0.6                 # share of master
+        feature_size = 0.6               # share of feature
         """
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_ratio", .float(0.7), in: .layout))
-        #expect(editor.text.contains("master_ratio = 0.7                 # share of master"))
+        expectSuccess(editor.set("feature_size", .float(0.7), in: .layout))
+        #expect(editor.text.contains("feature_size = 0.7               # share of feature"))
     }
 
     @Test("replace without a fitting comment column falls back to one space")
     func replaceCommentTooNarrow() {
         let text = """
         [layout]
-        master_ratio = 0.6 # r
+        feature_size = 0.6 # r
         """
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_ratio", .float(0.85), in: .layout))
-        #expect(editor.text == "[layout]\nmaster_ratio = 0.85 # r\n")
+        expectSuccess(editor.set("feature_size", .float(0.85), in: .layout))
+        #expect(editor.text == "[layout]\nfeature_size = 0.85 # r\n")
     }
 
     @Test("replace on an existing key does not disturb sibling keys")
     func replacePreservesSiblings() {
         let text = """
         [layout]
-        mode = "bsp"
-        master_ratio = 0.6
-        master_count = 1
+        arrange = "dwindle"
+        feature_size = 0.6
+        feature_count = 1
         """
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_count", .integer(3), in: .layout))
-        #expect(editor.text == "[layout]\nmode = \"bsp\"\nmaster_ratio = 0.6\nmaster_count = 3\n")
+        expectSuccess(editor.set("feature_count", .integer(3), in: .layout))
+        #expect(editor.text == "[layout]\narrange = \"dwindle\"\nfeature_size = 0.6\nfeature_count = 3\n")
     }
 
     @Test("replace collapses a multi-line array value to one line")
     func replaceMultiLineValue() {
         let text = """
         [layout]
-        mode = "bsp"
+        arrange = "dwindle"
         # trailing marker
         """
         // Simulate a multi-line inline table under a custom section by using .settings/.animation not
@@ -84,10 +84,10 @@ struct ConfigEditorTests {
             inner = 8,
             outer = 8
         }
-        mode = "bsp"
+        arrange = "dwindle"
         """)
         expectSuccess(editor.set("gaps", .inlineTable([ConfigField("inner", .integer(4)), ConfigField("outer", .integer(4))]), in: .layout))
-        #expect(editor.text == "[layout]\ngaps = { inner = 4, outer = 4 }\nmode = \"bsp\"\n")
+        #expect(editor.text == "[layout]\ngaps = { inner = 4, outer = 4 }\narrange = \"dwindle\"\n")
         _ = text
     }
 
@@ -97,19 +97,19 @@ struct ConfigEditorTests {
     func insertIntoExistingSection() {
         let text = """
         [layout]
-        mode = "bsp"
-        master_count = 1
+        arrange = "dwindle"
+        feature_count = 1
         """
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_ratio", .float(0.55), in: .layout))
-        #expect(editor.text == "[layout]\nmode = \"bsp\"\nmaster_count = 1\nmaster_ratio = 0.55\n")
+        expectSuccess(editor.set("feature_size", .float(0.55), in: .layout))
+        #expect(editor.text == "[layout]\narrange = \"dwindle\"\nfeature_count = 1\nfeature_size = 0.55\n")
     }
 
     @Test("set creates a missing [settings] section before [layout]")
     func createsSettingsSection() {
         let text = """
         [layout]
-        mode = "bsp"
+        arrange = "dwindle"
         """
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.set("focus_follows_mouse", .bool(true), in: .settings))
@@ -123,7 +123,7 @@ struct ConfigEditorTests {
         focus_follows_mouse = false
 
         [layout]
-        mode = "bsp"
+        arrange = "dwindle"
         """
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.set("duration_ms", .integer(250), in: .animation))
@@ -144,7 +144,7 @@ struct ConfigEditorTests {
         enabled = true
 
         [layout]
-        mode = "bsp"
+        arrange = "dwindle"
         """
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.set("hold", .string("none"), in: .focusFlash))
@@ -161,43 +161,43 @@ struct ConfigEditorTests {
     func removeKey() {
         let text = """
         [layout]
-        mode = "bsp"
-        master_count = 2
+        arrange = "dwindle"
+        feature_count = 2
         """
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_count", nil, in: .layout))
-        #expect(editor.text == "[layout]\nmode = \"bsp\"\n")
+        expectSuccess(editor.set("feature_count", nil, in: .layout))
+        #expect(editor.text == "[layout]\narrange = \"dwindle\"\n")
     }
 
     @Test("removing an absent key is a no-op")
     func removeAbsentKey() {
-        let text = "[layout]\nmode = \"bsp\"\n"
+        let text = "[layout]\narrange = \"dwindle\"\n"
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("master_count", nil, in: .layout))
+        expectSuccess(editor.set("feature_count", nil, in: .layout))
         #expect(editor.text == text)
     }
 
     @Test("removing a key removes an orphaned aligned comment-continuation line")
     func removeKeyRemovesAlignedContinuation() {
-        let text = "[layout]\nmode = \"bsp\"          # first\n"
-            + String(repeating: " ", count: 22) + "# second\nmaster_count = 1\n"
+        let text = "[layout]\narrange = \"dwindle\"          # first\n"
+            + String(repeating: " ", count: 29) + "# second\nfeature_count = 1\n"
         var editor = ConfigEditor(text: text)
-        expectSuccess(editor.set("mode", nil, in: .layout))
-        #expect(editor.text == "[layout]\nmaster_count = 1\n")
+        expectSuccess(editor.set("arrange", nil, in: .layout))
+        #expect(editor.text == "[layout]\nfeature_count = 1\n")
     }
 
     // MARK: - Read value
 
     @Test("value reads back an existing scalar")
     func valueReadsScalar() {
-        let editor = ConfigEditor(text: "[layout]\nmaster_ratio = 0.6\n")
-        #expect(editor.value("master_ratio", in: .layout) == .float(0.6))
+        let editor = ConfigEditor(text: "[layout]\nfeature_size = 0.6\n")
+        #expect(editor.value("feature_size", in: .layout) == .float(0.6))
     }
 
     @Test("value returns nil for a missing key")
     func valueMissingKey() {
-        let editor = ConfigEditor(text: "[layout]\nmode = \"bsp\"\n")
-        #expect(editor.value("master_ratio", in: .layout) == nil)
+        let editor = ConfigEditor(text: "[layout]\narrange = \"dwindle\"\n")
+        #expect(editor.value("feature_size", in: .layout) == nil)
     }
 
     // MARK: - Spaces
@@ -206,10 +206,10 @@ struct ConfigEditorTests {
     func createsSpaceBlock() {
         var editor = ConfigEditor(text: Self.example)
         let key = SpaceAddress.position(display: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", ordinal: 5)
-        expectSuccess(editor.set("mode", .string("float"), in: .space(key)))
+        expectSuccess(editor.set("arrange", .string("float"), in: .space(key)))
         switch editor.validated() {
         case .success(let config):
-            #expect(config.spaces[key]?.mode == .float)
+            #expect(config.spaces[key]?.arrange == .float)
         case .failure(let e):
             Issue.record("expected success, got \(e)")
         }
@@ -239,16 +239,16 @@ struct ConfigEditorTests {
     @Test("editing a uuid-addressed desktop creates and updates a uuid-only [[space]] block")
     func uuidSpaceBlockRoundTrips() {
         let uuid = SpaceAddress.uuid("06577405-6B31-4676-9725-A2F69D4232F4")
-        var editor = ConfigEditor(text: "[layout]\nmode = \"bsp\"\n")
-        expectSuccess(editor.set("mode", .string("float"), in: .space(uuid)))
-        expectSuccess(editor.set("master_ratio", .float(0.6), in: .space(uuid)))
+        var editor = ConfigEditor(text: "[layout]\narrange = \"dwindle\"\n")
+        expectSuccess(editor.set("arrange", .string("float"), in: .space(uuid)))
+        expectSuccess(editor.set("feature_size", .float(0.6), in: .space(uuid)))
         #expect(editor.text.contains("uuid = \"06577405-6B31-4676-9725-A2F69D4232F4\""))
         #expect(!editor.text.contains("ordinal"))
         #expect(editor.text.components(separatedBy: "[[space]]").count == 2) // one block
         switch editor.validated() {
         case .success(let config):
-            #expect(config.spaces[uuid]?.mode == .float)
-            #expect(config.spaces[uuid]?.masterRatio == 0.6)
+            #expect(config.spaces[uuid]?.arrange == .float)
+            #expect(config.spaces[uuid]?.featureSize == 0.6)
         case .failure(let e):
             Issue.record("expected success, got \(e)")
         }
@@ -261,17 +261,17 @@ struct ConfigEditorTests {
         let text = """
         [[space]]
         uuid = "\(uuid)"
-        mode = "bsp"
+        arrange = "dwindle"
 
         [[space]]
         display = "\(display)"
         ordinal = 1
-        mode = "float"
+        arrange = "float"
 
         [[space]]
         display = "\(display)"
         ordinal = 2
-        mode = "float"
+        arrange = "float"
         """
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.removeSpaces(for: SpaceKey(display: display, ordinal: 1, uuid: uuid)))
@@ -295,10 +295,10 @@ struct ConfigEditorTests {
 
     @Test("set creates a missing [bindings] section")
     func createsBindingsSection() {
-        let text = "[layout]\nmode = \"bsp\"\n"
+        let text = "[layout]\narrange = \"dwindle\"\n"
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.set("alt+h", .string("focus left"), in: .bindings))
-        #expect(editor.text == "[layout]\nmode = \"bsp\"\n\n[bindings]\n\"alt+h\" = \"focus left\"\n")
+        #expect(editor.text == "[layout]\narrange = \"dwindle\"\n\n[bindings]\n\"alt+h\" = \"focus left\"\n")
     }
 
     // MARK: - Rules
@@ -321,7 +321,7 @@ struct ConfigEditorTests {
     func appendRuleNoExistingRules() {
         let text = """
         [layout]
-        mode = "bsp"
+        arrange = "dwindle"
 
         [bindings]
         "alt+h" = "focus left"
@@ -393,16 +393,16 @@ struct ConfigEditorTests {
 
     @Test("float formatting avoids trailing binary noise")
     func floatFormatting() {
-        var editor = ConfigEditor(text: "[layout]\nmaster_ratio = 0.6\n")
-        expectSuccess(editor.set("master_ratio", .float(0.65), in: .layout))
-        #expect(editor.text == "[layout]\nmaster_ratio = 0.65\n")
+        var editor = ConfigEditor(text: "[layout]\nfeature_size = 0.6\n")
+        expectSuccess(editor.set("feature_size", .float(0.65), in: .layout))
+        #expect(editor.text == "[layout]\nfeature_size = 0.65\n")
     }
 
     @Test("whole-number floats render with a decimal point")
     func floatFormattingWhole() {
-        var editor = ConfigEditor(text: "[layout]\nbsp_max_ratio = 0.75\n")
-        expectSuccess(editor.set("bsp_max_ratio", .float(1.0), in: .layout))
-        #expect(editor.text == "[layout]\nbsp_max_ratio = 1.0\n")
+        var editor = ConfigEditor(text: "[layout]\nweight_share_max = 0.75\n")
+        expectSuccess(editor.set("weight_share_max", .float(1.0), in: .layout))
+        #expect(editor.text == "[layout]\nweight_share_max = 1.0\n")
     }
 
     // MARK: - Error cases
@@ -520,12 +520,12 @@ struct ConfigEditorTests {
         """
         var editor = ConfigEditor(text: text)
         let key2 = SpaceAddress.position(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
-        expectSuccess(editor.set("mode", .string("float"), in: .space(key2)))
+        expectSuccess(editor.set("arrange", .string("float"), in: .space(key2)))
         switch editor.validated() {
         case .success(let config):
             let key1 = SpaceAddress.position(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
             #expect(config.spaces[key1]?.gapsInner == 12)
-            #expect(config.spaces[key2]?.mode == .float)
+            #expect(config.spaces[key2]?.arrange == .float)
         case .failure(let e):
             Issue.record("expected success, got \(e)")
         }
@@ -534,12 +534,66 @@ struct ConfigEditorTests {
 
     @Test("removing a missing key from a [[space]] that doesn't exist yet is a byte-identical no-op")
     func removeMissingKeyFromAbsentSpaceIsNoOp() {
-        let text = "[layout]\nmode = \"bsp\"\n"
+        let text = "[layout]\narrange = \"dwindle\"\n"
         var editor = ConfigEditor(text: text)
         let key = SpaceAddress.position(display: "33333333-3333-3333-3333-333333333333", ordinal: 3)
-        expectSuccess(editor.set("mode", nil, in: .space(key)))
+        expectSuccess(editor.set("arrange", nil, in: .space(key)))
         #expect(editor.text == text)
         #expect(!editor.text.contains("[[space]]"))
+    }
+
+    @Test("removing a key written as the space's own child table removes that table, leaving the sibling's")
+    func removeKeyWrittenAsChildTable() {
+        let text = """
+        [[space]]
+        display = "11111111-1111-1111-1111-111111111111"
+        ordinal = 1
+        arrange = "dwindle"
+
+        [space.gaps]
+        inner = 3
+
+        [[space]]
+        display = "22222222-2222-2222-2222-222222222222"
+        ordinal = 2
+
+        [space.gaps]
+        inner = 5
+        """
+        var editor = ConfigEditor(text: text)
+        let key1 = SpaceAddress.position(display: "11111111-1111-1111-1111-111111111111", ordinal: 1)
+        let key2 = SpaceAddress.position(display: "22222222-2222-2222-2222-222222222222", ordinal: 2)
+        expectSuccess(editor.set("gaps", nil, in: .space(key1)))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.spaces[key1]?.gapsInner == nil)
+            #expect(config.spaces[key1]?.arrange == .dwindle)
+            #expect(config.spaces[key2]?.gapsInner == 5)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+    }
+
+    @Test("setting a key written as a child table replaces the table with the inline value")
+    func setKeyWrittenAsChildTable() {
+        let text = """
+        [layout]
+        arrange = "dwindle"
+
+        [layout.gaps]
+        inner = 4
+        outer = 6
+        """
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("gaps", .inlineTable([ConfigField("inner", .integer(10))]), in: .layout))
+        switch editor.validated() {
+        case .success(let config):
+            #expect(config.layout.gapsInner == 10)
+            #expect(config.layout.gapsOuter == nil)
+        case .failure(let e):
+            Issue.record("expected success, got \(e)")
+        }
+        #expect(!editor.text.contains("[layout.gaps]"))
     }
 
     @Test("removeSpace on one of two spaces removes its own [space.gaps] and leaves the sibling's [space.gaps] intact")
@@ -608,7 +662,7 @@ struct ConfigEditorTests {
 
     @Test("removing a missing key from a section that doesn't exist yet is a byte-identical no-op")
     func removeMissingKeyFromAbsentSectionIsNoOp() {
-        let text = "[layout]\nmode = \"bsp\"\n"
+        let text = "[layout]\narrange = \"dwindle\"\n"
         var editor = ConfigEditor(text: text)
         expectSuccess(editor.set("duration_ms", nil, in: .animation))
         #expect(editor.text == text)

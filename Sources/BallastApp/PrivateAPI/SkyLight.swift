@@ -187,6 +187,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         var displays: [DisplaySpaces] = []
         displays.reserveCapacity(managed.count)
         let builtin = DisplayInfo.builtinUUIDs()
+        let small = Set(DisplayInfo.current().filter { $0.visibleFrame.width < LayoutSettings.smallWidth }.map(\.uuid))
 
         for entry in managed {
             guard let dict = entry as? [String: AnyObject] else { continue }
@@ -200,7 +201,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
 
             guard let rawSpaces = dict["Spaces"] as? [AnyObject] else {
                 displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: [], activeSpace: activeSpaceID,
-                                              builtin: builtin.contains(displayUUID)))
+                                              builtin: builtin.contains(displayUUID), small: small.contains(displayUUID)))
                 continue
             }
 
@@ -215,7 +216,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
             }
 
             displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: spaces, activeSpace: activeSpaceID,
-                                          builtin: builtin.contains(displayUUID)))
+                                          builtin: builtin.contains(displayUUID), small: small.contains(displayUUID)))
         }
 
         return SpaceSnapshot(displays: displays)

@@ -115,17 +115,17 @@ public enum BallastCLI {
                 if space.kind == .user {
                     ordinal += 1
                     let key = SpaceKey(display: display.displayUUID, ordinal: ordinal, uuid: space.uuid)
-                    let mode = config.map {
-                        " mode=\($0.layoutSettings(for: key).mode(builtin: display.builtin).rawValue)\($0.address(for: key) != nil ? " (override)" : "")"
+                    let layout = config.map {
+                        " layout=\($0.layoutSettings(for: key, small: display.small).glyph)\($0.address(for: key) != nil ? " (override)" : "")"
                     } ?? ""
                     let uuid = space.uuid.isEmpty ? "" : "   uuid = \"\(space.uuid)\""
-                    print("  \(active) ordinal = \(ordinal)\(uuid)   space id \(space.id)\(mode)")
+                    print("  \(active) ordinal = \(ordinal)\(uuid)   space id \(space.id)\(layout)")
                 } else {
                     print("  \(active) (fullscreen/other Space, id \(space.id) — ignored)")
                 }
             }
         }
-        if config == nil { print("\n(no valid config at \(configURL.path); modes not shown)") }
+        if config == nil { print("\n(no valid config at \(configURL.path); layouts not shown)") }
         return 0
     }
 

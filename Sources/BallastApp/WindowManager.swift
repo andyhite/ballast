@@ -548,13 +548,13 @@ final class WindowManager: AppObserverDelegate {
         if AX.bool(element, "AXFullScreen") == true { return }
         let facts = Self.windowFacts(element, observer: observer)
         let minimized = AX.bool(element, kAXMinimizedAttribute) == true
-        commitTracked(id, element: element, observer: observer, facts: facts, minimized: minimized)
+        commitTracked(id, element: element, observer: observer, facts: facts, minimized: minimized, opened: true)
     }
 
     /// Registers AX notifications for a window and adds it to the engine,
     /// using facts already read from AX by either caller above. Always
     /// runs on the main thread.
-    private func commitTracked(_ id: WindowID, element: AXUIElement, observer: AppObserver, facts: WindowFacts, minimized: Bool) {
+    private func commitTracked(_ id: WindowID, element: AXUIElement, observer: AppObserver, facts: WindowFacts, minimized: Bool, opened: Bool = false) {
         guard elements[id] == nil else { return } // raced with a live notification for the same window
         guard observer.observe(window: element) else {
             Log.ax.notice("window \(id) of \(facts.appName ?? "?", privacy: .public) refused AX notifications; not tracked yet")
@@ -566,7 +566,8 @@ final class WindowManager: AppObserverDelegate {
         arrivals.insert(id)
         if minimized { markDirty(engine.setMinimized(id, true)) }
         if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
-        if space.map({ engine.mode(for: $0) }) != .float { placeFloating(id, element: element) }
+        if space.map({ engine.arrangement(for: $0) }) != .float { placeFloating(id, element: element) }
+        else if opened, !minimized, let space { cascade(id, element: element, on: space) }
         if engine.windows[id]?.rule.sticky == true {
             Log.wm.notice("sticky rule for \(facts.appName ?? "?", privacy: .public): pinning to all Spaces needs SIP changes; treated as floating")
         }
@@ -606,6 +607,23 @@ final class WindowManager: AppObserverDelegate {
         if let bound = launchBindings[pid] { return bound }
         guard let element, let frame = AX.frame(element), let display = displays.best(for: frame) else { return nil }
         return snapshot.activeSpace(ofDisplay: display.uuid)
+    }
+
+    /// Moves a window that just opened on a float Space to the next cascade
+    /// slot (`float_placement = "cascade"`); never under Stage Manager, and
+    /// never again afterwards.
+    private func cascade(_ id: WindowID, element: AXUIElement, on space: SpaceID) {
+        guard !engine.passthrough, let w = engine.windows[id], w.isManaged, !w.isFloating,
+              engine.settings(for: space).floatPlacement == .cascade,
+              let current = AX.frame(element),
+              let display = displays.best(for: current) ?? displays.first else { return }
+        let occupied = engine.windows.compactMap { other -> CGPoint? in
+            guard other.key != id, other.value.space == space, let e = elements[other.key] else { return nil }
+            return AX.frame(e)?.origin
+        }
+        let frame = Cascade.frame(size: current.size, in: display.visibleFrame,
+                                  outerGap: engine.settings(for: space).gaps.outer, occupied: occupied)
+        applier.apply(.init(window: id, pid: w.pid, element: element, target: frame, animation: nil)) { _, _, _ in }
     }
 
     private func placeFloating(_ id: WindowID, element: AXUIElement) {
@@ -758,7 +776,7 @@ final class WindowManager: AppObserverDelegate {
         }
         // A layout change mid-drag (a window opened or closed) moves the landing frame.
         if !spaces.isEmpty { updateDropPreview(force: true) }
-        // Focus can scroll a stack: the flash follows its window to the new slot.
+        // Focus can scroll a deck: the flash follows its window to the new slot.
         if let id = focusFlash.target, let frame = expected[id] { focusFlash.move(to: frame) }
         refreshSurfaces()
     }
@@ -793,7 +811,7 @@ final class WindowManager: AppObserverDelegate {
             expected[id] = frame
             inFlight[id, default: 0] += 1
             // Strategy (a): on an active Space, only the focused window and a
-            // scrolling stack's windows interpolate.
+            // scrolling deck's windows interpolate.
             let animate = animates && (id == engine.focused || scroll.contains(id))
             var reveal: (focus: WindowID, generation: UInt64)?
             if animate, let pending = pendingFocus, pending.covering == id, let from,
@@ -827,7 +845,7 @@ final class WindowManager: AppObserverDelegate {
         if engine.snapshot.isActive(space) { raiseDeck(plan) }
     }
 
-    /// Puts a scrolling stack's windows back in their deck order.
+    /// Puts a scrolling deck's windows back in their deck order.
     private func raiseDeck(_ plan: SpaceLayout) {
         if !plan.behind.isEmpty {
             // A window scrolled out of view can sit in front of the tile it
@@ -989,7 +1007,7 @@ final class WindowManager: AppObserverDelegate {
     /// Where releasing dragged window `id` at `point` sends it; nil snaps it back.
     ///
     /// Hit-tests against a fresh layout plan rather than `expected`: in a
-    /// scrolling stack, tucked windows' frames overlap the tile in view, so a
+    /// scrolling deck, tucked windows' frames overlap the tile in view, so a
     /// tile in view must win before a covered window's exposed strip.
     private func dropTarget(for id: WindowID, at point: CGPoint) -> DropTarget? {
         guard let space = engine.windows[id]?.space else { return nil }
@@ -1088,7 +1106,7 @@ final class WindowManager: AppObserverDelegate {
     }
 
     /// WM-initiated focus. Warps the cursor when focus crosses displays.
-    /// When focus scrolls a stack, the window comes forward (activation and
+    /// When focus scrolls a deck, the window comes forward (activation and
     /// raise) once the previously focused window has slid off it.
     func focusWindow(_ id: WindowID, warp: Bool = true) {
         guard let element = elements[id], let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
@@ -1240,9 +1258,8 @@ final class WindowManager: AppObserverDelegate {
     /// Space (later fields win) and (re)starts the debounce timer.
     private func schedulePersist(_ change: SettingsChange) {
         var pending = pendingSettings[change.space] ?? SettingsChange(space: change.space)
-        if let mode = change.mode { pending.mode = mode }
-        if let ratio = change.masterRatio { pending.masterRatio = ratio }
-        if let count = change.masterCount { pending.masterCount = count }
+        if let size = change.featureSize { pending.featureSize = size }
+        if let count = change.featureCount { pending.featureCount = count }
         pendingSettings[change.space] = pending
         settingsFlushWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in self?.flushPendingSettings() }
@@ -1263,23 +1280,18 @@ final class WindowManager: AppObserverDelegate {
             guard let key = snapshot.key(for: space) else { continue }
             let address = config.writeAddress(for: key)
             let error = editConfig { editor in
-                if let mode = change.mode {
-                    let value: ConfigValue? = mode.map { .string($0.rawValue) }
-                    if case .failure(let e) = editor.set("mode", value, in: .space(address)) { return .failure(e) }
-                }
-                if let ratio = change.masterRatio,
-                   case .failure(let e) = editor.set("master_ratio", .float(ratio), in: .space(address)) {
+                if let size = change.featureSize,
+                   case .failure(let e) = editor.set("feature_size", .float(size), in: .space(address)) {
                     return .failure(e)
                 }
-                if let count = change.masterCount,
-                   case .failure(let e) = editor.set("master_count", .integer(count), in: .space(address)) {
+                if let count = change.featureCount,
+                   case .failure(let e) = editor.set("feature_count", .integer(count), in: .space(address)) {
                     return .failure(e)
                 }
                 return .success(())
             }
             guard error == nil else { continue } // notification already posted; runtime override stays effective
-            engine.clearSettingOverrides(
-                space, mode: change.mode != nil, masterRatio: change.masterRatio != nil, masterCount: change.masterCount != nil)
+            engine.clearSettingOverrides(space, featureSize: change.featureSize != nil, featureCount: change.featureCount != nil)
         }
     }
 
@@ -1539,9 +1551,8 @@ final class WindowManager: AppObserverDelegate {
         let address = config.writeAddress(for: spaceKey)
         if let error = editConfig({ $0.set(key, value, in: .space(address)) }) { return error }
         switch key {
-        case "mode": engine.clearSettingOverrides(space, mode: true, masterRatio: false, masterCount: false)
-        case "master_ratio": engine.clearSettingOverrides(space, mode: false, masterRatio: true, masterCount: false)
-        case "master_count": engine.clearSettingOverrides(space, mode: false, masterRatio: false, masterCount: true)
+        case "feature_size": engine.clearSettingOverrides(space, featureSize: true, featureCount: false)
+        case "feature_count": engine.clearSettingOverrides(space, featureSize: false, featureCount: true)
         default: break
         }
         return nil
@@ -1568,12 +1579,16 @@ final class WindowManager: AppObserverDelegate {
                 "ordinal": key?.ordinal ?? NSNull(),
                 "uuid": key?.uuid ?? NSNull(),
                 "active": engine.snapshot.isActive(id),
-                "mode": engine.mode(for: id).rawValue,
-                "mode_override": state.modeOverride?.rawValue ?? NSNull(),
+                "arrange": engine.arrangement(for: id).rawValue,
+                "layout": engine.glyph(for: id),
+                "feature": engine.settings(for: id).effectiveFeature.rawValue,
+                "feature_size_override": state.featureSizeOverride ?? NSNull(),
+                "feature_count_override": state.featureCountOverride ?? NSNull(),
                 "monocle": state.monocle,
                 "manual": state.manual,
                 "live_order": state.liveOrder.map { describe($0) },
                 "ideal_order": state.idealOrder.map { describe($0) },
+                "decks": state.decks.sorted(by: { $0.key < $1.key }).map { $0.value.map { describe($0) } },
                 "frames": frames.map { ["window": describe($0.key), "x": $0.value.minX, "y": $0.value.minY,
                                         "w": $0.value.width, "h": $0.value.height] },
             ])
