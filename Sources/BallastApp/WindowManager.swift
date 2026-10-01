@@ -443,6 +443,10 @@ final class WindowManager: AppObserverDelegate {
         applier.perform(pid: observer.pid) {
             var found: [(id: WindowID, element: AXUIElement, facts: WindowFacts, minimized: Bool)] = []
             var visible = Set<WindowID>()
+            // `AXWindows` lists only windows on the active Spaces, so it can
+            // only be judged against the Spaces that were active while it
+            // was read. A switch mid-read leaves nothing to judge it by.
+            let activeBefore = provider.activeSpaceIDs()
             for element in observer.windows {
                 guard let id = provider.windowID(for: element), id != 0 else { continue }
                 visible.insert(id)
@@ -454,12 +458,14 @@ final class WindowManager: AppObserverDelegate {
                 let minimized = AX.bool(element, kAXMinimizedAttribute) == true
                 found.append((id, element, facts, minimized))
             }
+            let activeAfter = provider.activeSpaceIDs()
+            let activeDuringRead = activeBefore == activeAfter ? activeBefore : nil
             DispatchQueue.main.async { [weak self] in
                 guard let self else { completion?(); return }
                 for w in found {
                     commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized)
                 }
-                reconcileTabs(pid: observer.pid, visible: visible, readAfter: known)
+                reconcileTabs(pid: observer.pid, visible: visible, readAfter: known, activeDuringRead: activeDuringRead)
                 completion?()
             }
         }
@@ -473,7 +479,18 @@ final class WindowManager: AppObserverDelegate {
     /// dropped out with it, so a tab switch never rearranges the Space.
     /// `tracked`: the windows known when `visible` was read; one tracked
     /// since cannot have dropped out of a list that predates it.
-    private func reconcileTabs(pid: pid_t, visible: Set<WindowID>, readAfter tracked: Set<WindowID>) {
+    /// `activeDuringRead`: the live active Spaces while `visible` was read.
+    private func reconcileTabs(pid: pid_t, visible: Set<WindowID>, readAfter tracked: Set<WindowID>,
+                               activeDuringRead: Set<SpaceID>?) {
+        // A Space switch posts app activation and focus notifications before
+        // (or with) `activeSpaceDidChange`, so `visible` can already list the
+        // new Space's windows while `engine.snapshot` still names the old one
+        // active. Judged against it, every window on the old Space would
+        // "vanish" into a background tab, lose its tile, and come back in a
+        // new one. Skip until they agree: the resync that updates the
+        // snapshot rediscovers every app.
+        guard let activeDuringRead,
+              activeDuringRead == Set(engine.snapshot.displays.compactMap(\.activeSpace)) else { return }
         let fresh = arrivals.filter { visible.contains($0) && engine.windows[$0]?.pid == pid }
         arrivals.subtract(fresh)
         // An empty list is a failed read, not an app with no windows; a

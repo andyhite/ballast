@@ -10,6 +10,9 @@ public protocol SpaceProvider: AnyObject {
     /// Every display's Spaces plus the active Space per display.
     /// `nil` when SkyLight returned malformed data.
     func snapshot() -> SpaceSnapshot?
+    /// Each display's active Space, read live (no display metadata, so safe
+    /// off the main thread). `nil` when SkyLight returned malformed data.
+    func activeSpaceIDs() -> Set<SpaceID>?
     /// Window ids that live on `space` (all levels/owners, onscreen or not).
     func windowIDs(onSpace space: SpaceID) -> [WindowID]
     /// Spaces a single window belongs to (more than one only for sticky windows).

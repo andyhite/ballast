@@ -565,7 +565,13 @@ next frame (per-window generation counter).
 windows on the *current* Space. Windows on Spaces you haven't visited since
 launch are discovered on the first visit. This is also why an
 app-moved-its-own-window check happens only for windows Ballast already
-tracks.
+tracks. The same list drives native-tab detection (a tracked window missing
+from it became a background tab), so it is judged only when the Spaces
+SkyLight reports active before and after the read agree with each other and
+with Ballast's snapshot. A Space switch posts app activation and focus
+notifications before the resync that updates the snapshot. Judged in that
+window, windows on the old Space would read as background tabs and come
+back in different tiles.
 
 ## 8. Window-state policy
 

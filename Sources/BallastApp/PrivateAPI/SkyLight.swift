@@ -222,6 +222,20 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return SpaceSnapshot(displays: displays)
     }
 
+    public func activeSpaceIDs() -> Set<SpaceID>? {
+        guard let managed = slsCopyManagedDisplaySpaces(connectionID)?.takeRetainedValue() as? [AnyObject] else {
+            return nil
+        }
+        var active = Set<SpaceID>()
+        for entry in managed {
+            guard let dict = entry as? [String: AnyObject],
+                  let current = dict["Current Space"] as? [String: AnyObject],
+                  let id = spaceID(fromEntry: current) else { continue }
+            active.insert(id)
+        }
+        return active
+    }
+
     /// Extracts a Space id from a SkyLight dictionary, trying both known keys.
     private func spaceID(fromEntry dict: [String: AnyObject]) -> SpaceID? {
         if let number = dict["ManagedSpaceID"] as? NSNumber {
