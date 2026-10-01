@@ -1,14 +1,12 @@
 import Foundation
 
 /// A parsed TOML value. Arrays of tables (`[[a.b]]`) surface as
-/// `.array([.table(...), ...])`; datetimes are stored as their raw source
-/// lexeme (loosely validated, not fully RFC 3339 parsed).
+/// `.array([.table(...), ...])`.
 public indirect enum TOMLValue: Equatable, Sendable {
     case string(String)
     case integer(Int64)
     case float(Double)
     case boolean(Bool)
-    case datetime(String)
     case array([TOMLValue])
     case table(TOMLTable)
 }
@@ -61,9 +59,10 @@ public struct TOMLError: Error, Equatable, CustomStringConvertible {
     public var description: String { "line \(line), column \(column): \(message)" }
 }
 
-/// Zero-dependency TOML 1.0 parser producing an ordered value tree.
+/// Zero-dependency parser for a subset of TOML 1.0 (no datetimes, no radix
+/// integers) producing an ordered value tree.
 public enum TOML {
-    /// Parses `text` as a TOML 1.0 document. Never traps; every malformed
+    /// Parses `text` as that TOML subset. Never traps; every malformed
     /// input surfaces as a thrown `TOMLError`.
     public static func parse(_ text: String) throws -> TOMLTable {
         let parser = TOMLParser(text)
@@ -123,8 +122,6 @@ private final class TOMLBuildTable {
     /// Set when this table was created implicitly via a dotted key in a
     /// key/value pair; such tables may never be reopened with a `[header]`.
     var closedForHeader = false
-    /// Set for inline (`{ ... }`) tables, which are fully closed on creation.
-    var isInline = false
 }
 
 private enum TOMLBuildEntry {
@@ -236,7 +233,6 @@ private final class TOMLParser {
             if let entry = node.children[last] {
                 switch entry {
                 case .table(let t):
-                    if t.isInline { throw err("cannot redefine inline table '\(last)'", at: pos) }
                     if t.headerDefined { throw err("table '\(last)' redefined", at: pos) }
                     if t.closedForHeader { throw err("table '\(last)' already defined via dotted key", at: pos) }
                     t.headerDefined = true
@@ -264,7 +260,6 @@ private final class TOMLParser {
         if let entry = node.children[part] {
             switch entry {
             case .table(let t):
-                if t.isInline { throw err("cannot extend inline table '\(part)'", at: pos) }
                 if creatingClosed, t.headerDefined {
                     throw err("dotted key cannot extend table '\(part)' defined by a [header]", at: pos)
                 }
@@ -475,8 +470,6 @@ private final class TOMLParser {
         defer { depth -= 1 }
         guard depth <= Self.maxNestingDepth else { throw err("nesting too deep") }
         let node = TOMLBuildTable()
-        node.isInline = true
-        node.headerDefined = true
         skipSpacesTabsOnly()
         if scanner.peek() == "}" {
             scanner.advance()
@@ -710,7 +703,7 @@ private final class TOMLParser {
         result.unicodeScalars.append(scalar)
     }
 
-    // MARK: Booleans / numbers / datetimes
+    // MARK: Booleans / numbers
 
     private func gatherToken() -> String {
         var s = ""
@@ -732,25 +725,6 @@ private final class TOMLParser {
         if token1 == "true" { return .boolean(true) }
         if token1 == "false" { return .boolean(false) }
 
-        let chars1 = Array(token1.unicodeScalars)
-        if looksLikeDate(chars1) {
-            if scanner.peek() == " ", let n = scanner.peek(1), isDigitScalar(n) {
-                let save = (scanner.idx, scanner.line, scanner.col)
-                scanner.advance() // space
-                let token2 = gatherToken()
-                let chars2 = Array(token2.unicodeScalars)
-                if looksLikeTimeStart(chars2) {
-                    return .datetime(token1 + " " + token2)
-                }
-                scanner.idx = save.0
-                scanner.line = save.1
-                scanner.col = save.2
-            }
-            return .datetime(token1)
-        }
-        if isDateTimeToken(chars1) {
-            return .datetime(token1)
-        }
         if let n = parseNumber(token1) {
             return n
         }
@@ -760,72 +734,11 @@ private final class TOMLParser {
 
 // MARK: - Freestanding helpers
 
-private func isDigitScalar(_ c: Unicode.Scalar) -> Bool { c >= "0" && c <= "9" }
-
-private func looksLikeDate(_ s: [Unicode.Scalar]) -> Bool {
-    guard s.count == 10 else { return false }
-    return isDigitScalar(s[0]) && isDigitScalar(s[1]) && isDigitScalar(s[2]) && isDigitScalar(s[3])
-        && s[4] == "-" && isDigitScalar(s[5]) && isDigitScalar(s[6])
-        && s[7] == "-" && isDigitScalar(s[8]) && isDigitScalar(s[9])
-}
-
-private func looksLikeTimeStart(_ s: [Unicode.Scalar]) -> Bool {
-    guard s.count >= 8 else { return false }
-    return isDigitScalar(s[0]) && isDigitScalar(s[1]) && s[2] == ":"
-        && isDigitScalar(s[3]) && isDigitScalar(s[4]) && s[5] == ":"
-        && isDigitScalar(s[6]) && isDigitScalar(s[7])
-}
-
-/// Loose datetime/date/time detector: any token starting with a digit that
-/// contains a colon, or a dash not in the sign position, and otherwise only
-/// characters legal in RFC 3339-ish lexemes.
-private func isDateTimeToken(_ chars: [Unicode.Scalar]) -> Bool {
-    guard let first = chars.first, isDigitScalar(first) else { return false }
-    var sawColon = false
-    var sawInnerDash = false
-    for (i, c) in chars.enumerated() {
-        switch c {
-        case "0"..."9": continue
-        case ":": sawColon = true
-        case "-": if i > 0 { sawInnerDash = true }
-        case ".", "T", "t", "Z", "z", "+": continue
-        default: return false
-        }
-    }
-    return sawColon || sawInnerDash
-}
-
 private func isValidUnderscoreGrouping(_ s: String) -> Bool {
     let chars = Array(s)
     for (i, c) in chars.enumerated() where c == "_" {
         guard i > 0, i < chars.count - 1 else { return false }
         guard chars[i - 1].isNumber, chars[i + 1].isNumber else { return false }
-    }
-    return true
-}
-
-/// Validates digits (and `_` grouping) for a radix-prefixed integer body.
-/// Every character must be a valid digit for `radix`; underscores must sit
-/// strictly between two valid digits. This rejects stray `+`/`-` signs,
-/// which TOML disallows after `0x`/`0o`/`0b` prefixes.
-private func isValidRadixDigits(_ s: String, radix: Int) -> Bool {
-    let chars = Array(s)
-    guard !chars.isEmpty else { return false }
-    func isDigit(_ c: Character) -> Bool {
-        switch radix {
-        case 16: return c.isHexDigit
-        case 8: return ("0"..."7").contains(c)
-        case 2: return c == "0" || c == "1"
-        default: return false
-        }
-    }
-    for (i, c) in chars.enumerated() {
-        if c == "_" {
-            guard i > 0, i < chars.count - 1 else { return false }
-            guard isDigit(chars[i - 1]), isDigit(chars[i + 1]) else { return false }
-        } else {
-            guard isDigit(c) else { return false }
-        }
     }
     return true
 }
@@ -849,37 +762,16 @@ private func parseNumber(_ raw: String) -> TOMLValue? {
     guard !raw.isEmpty else { return nil }
     var s = raw
     var negative = false
-    var hadSign = false
     if s.hasPrefix("+") {
         s.removeFirst()
-        hadSign = true
     } else if s.hasPrefix("-") {
         s.removeFirst()
         negative = true
-        hadSign = true
     }
     guard !s.isEmpty else { return nil }
 
     if s == "inf" { return .float(negative ? -Double.infinity : Double.infinity) }
     if s == "nan" { return .float(Double.nan) }
-
-    if s.hasPrefix("0x") || s.hasPrefix("0o") || s.hasPrefix("0b") {
-        guard !hadSign else { return nil }
-        let radixChar = s[s.index(s.startIndex, offsetBy: 1)]
-        let digitsPart = String(s.dropFirst(2))
-        let radix: Int
-        switch radixChar {
-        case "x": radix = 16
-        case "o": radix = 8
-        case "b": radix = 2
-        default: return nil
-        }
-        guard isValidRadixDigits(digitsPart, radix: radix) else { return nil }
-        let cleaned = digitsPart.replacingOccurrences(of: "_", with: "")
-        guard !cleaned.isEmpty else { return nil }
-        guard let v = Int64(cleaned, radix: radix) else { return nil }
-        return .integer(v)
-    }
 
     let isFloat = s.contains(".") || s.contains("e") || s.contains("E")
     guard isValidUnderscoreGrouping(s) else { return nil }
@@ -888,7 +780,7 @@ private func parseNumber(_ raw: String) -> TOMLValue? {
 
     if isFloat {
         guard isValidFloatLiteral(cleaned) else { return nil }
-        guard let d = Double(cleaned) else { return nil }
+        guard let d = Double(cleaned), d.isFinite else { return nil }
         return .float(negative ? -d : d)
     } else {
         guard cleaned.allSatisfy({ $0.isNumber }) else { return nil }

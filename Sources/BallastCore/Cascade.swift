@@ -12,7 +12,9 @@ public enum Cascade {
     /// fit in `area` (inset by `outerGap`) — also when every slot that fits is taken.
     /// `size` is clamped to the inset area.
     public static func frame(size: CGSize, in area: CGRect, outerGap: CGFloat, occupied: [CGPoint]) -> CGRect {
-        let inner = area.insetBy(dx: max(outerGap, 0), dy: max(outerGap, 0))
+        // A gap larger than half the area would invert the rect (insetBy then returns .null).
+        let gap = min(max(outerGap, 0), min(area.width, area.height) / 2)
+        let inner = area.insetBy(dx: gap, dy: gap)
         let size = CGSize(width: min(size.width, max(inner.width, 0)), height: min(size.height, max(inner.height, 0)))
         func origin(_ k: Int) -> CGPoint {
             CGPoint(x: inner.minX + CGFloat(k) * step, y: inner.minY + CGFloat(k) * step)

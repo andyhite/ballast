@@ -486,9 +486,10 @@ public struct Engine: Sendable {
             s.decks[key == hidden ? shown : key] = list
         }
         if let tree = s.tree {
-            switch tree.substituting(shown, for: hidden) {
-            case .success(let next): s.tree = next
-            case .failure: s.tree = idealTree(s.tiles, on: space, decks: s.decks)
+            if tree.contains(hidden) {
+                if case .success(let next) = tree.substituting(shown, for: hidden) { s.tree = next }
+            } else if tree.contains(shown), case .success(.some(let next)) = tree.removing(shown) {
+                s.tree = next
             }
         }
         if let frame = s.frameOverrides.removeValue(forKey: hidden) { s.frameOverrides[shown] = frame }
@@ -650,7 +651,11 @@ public struct Engine: Sendable {
                 } else {
                     let context = bspContext(s, decks: state.decks)
                     guard case .success(let tree)? = state.tree?.resizing(tile, by: delta, context: context,
-                                                                          hidden: Set(featured)) else { return out }
+                                                                          hidden: Set(featured)),
+                          tree != state.tree else {
+                        out.message = "nothing to resize"
+                        return out
+                    }
                     beginManual(space)
                     spaces[space]?.tree = tree
                 }
@@ -787,8 +792,6 @@ public struct Engine: Sendable {
         s.manual = false
         s.manualOrder = []
         s.frameOverrides = [:]
-        s.featureSizeOverride = nil
-        s.featureCountOverride = nil
         // Decks are arrangement: every window is a tile of its own again.
         s.decks = [:]
         spaces[space] = s
@@ -898,7 +901,8 @@ public struct Engine: Sendable {
         let current = settings(for: space).featureSize
         guard delta.isFinite else { return current }
         let lowerBound = 0.05, upperBound = 0.95
-        let target = current + delta
+        // Snap to 4 decimals so persisted values read 0.7, not 0.7000000000000001.
+        let target = ((current + delta) * 10_000).rounded() / 10_000
         let clamped: Double
         if target <= lowerBound {
             clamped = lowerBound.nextUp
@@ -1033,7 +1037,8 @@ public struct Engine: Sendable {
             return w.isFinite ? w : 0
         }
         let tileSet = Set(tiles)
-        let kept = s.idealOrder.filter { tileSet.contains($0) && $0 != newcomer }
+        var seen = Set<WindowID>()
+        let kept = s.idealOrder.filter { tileSet.contains($0) && $0 != newcomer && seen.insert($0).inserted }
         let keptSet = Set(kept)
         // Only after drift or a first sighting: members with no place yet join by rank.
         let unplaced = tiles.filter { !keptSet.contains($0) && $0 != newcomer }.map { id in
@@ -1041,7 +1046,8 @@ public struct Engine: Sendable {
                                      focusRank: s.focus.rank(of: id), creation: windows[id]?.creation ?? 0)
         }
         let base = kept + WeightResolver.rank(unplaced)
-        let position = Dictionary(uniqueKeysWithValues: base.enumerated().map { ($1, $0) })
+        var position: [WindowID: Int] = [:]
+        for (i, id) in base.enumerated() where position[id] == nil { position[id] = i }
         s.idealOrder = base.sorted { a, b in
             weight(a) != weight(b) ? weight(a) > weight(b) : (position[a] ?? 0) < (position[b] ?? 0)
         }

@@ -4,6 +4,7 @@ import BallastCore
 /// Always-present menu bar item: `<ordinal> · <mode glyph>[ Z]` for the
 /// current display's active Space; red with a reason whenever something is
 /// wrong (permission, config, unsupported OS, blocking system setting).
+@MainActor
 final class StatusBar: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private unowned let manager: WindowManager
@@ -26,6 +27,9 @@ final class StatusBar: NSObject, NSMenuDelegate {
             .foregroundColor: color,
             .font: NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium),
         ])
+        let problem = problemLines().first
+        item.button?.toolTip = problem
+        item.button?.setAccessibilityLabel(problem.map { "Ballast: \($0)" } ?? "Ballast")
     }
 
     private func title() -> (String, Bool) {
@@ -39,11 +43,11 @@ final class StatusBar: NSObject, NSMenuDelegate {
         }
         let engine = manager.engine
         guard let display = manager.currentDisplay,
-              let space = engine.snapshot.activeSpace(ofDisplay: display.uuid) else { return ("–", manager.configError != nil) }
+              let space = engine.snapshot.activeSpace(ofDisplay: display.uuid) else { return ("–", manager.configStore.error != nil) }
         let ordinal = engine.snapshot.key(for: space).map { String($0.ordinal) } ?? "FS"
         let monocle = engine.spaces[space]?.monocle == true ? " ⤢" : ""
-        let prefix = manager.configError != nil ? "! " : ""
-        return ("\(prefix)\(ordinal) · \(engine.glyph(for: space))\(monocle)", manager.configError != nil)
+        let prefix = manager.configStore.error != nil ? "! " : ""
+        return ("\(prefix)\(ordinal) · \(engine.glyph(for: space))\(monocle)", manager.configStore.error != nil)
     }
 
 
@@ -55,10 +59,22 @@ final class StatusBar: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let configOK = manager.configError == nil
+        let configOK = manager.configStore.error == nil
 
         for line in problemLines() { menu.addItem(Self.info(line, color: .systemRed)) }
-        if let note = manager.configNote { menu.addItem(Self.info(note)) }
+        switch manager.status {
+        case .needsAccessibility:
+            menu.addItem(action("Open Accessibility Settings…") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            })
+        case .invalidConfig:
+            menu.addItem(action("Open Config File") { [unowned self] in Self.openConfig(manager: manager) })
+        default:
+            if !configOK { menu.addItem(action("Open Config File") { [unowned self] in Self.openConfig(manager: manager) }) }
+        }
+        if let note = manager.configStore.note { menu.addItem(Self.info(note)) }
         if !configOK {
             menu.addItem(Self.info("Config file has errors — settings won't be saved until it's fixed", color: .systemRed))
         }
@@ -86,7 +102,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     private func toolsMenuItem() -> NSMenuItem {
         let menu = NSMenu(title: "Tools")
         menu.addItem(action("Reload Config") { [unowned self] in manager.reloadConfig() })
-        menu.addItem(action("Open Config File") { [unowned self] in openConfig() })
+        menu.addItem(action("Open Config File") { [unowned self] in Self.openConfig(manager: manager) })
         menu.addItem(.separator())
         menu.addItem(action("Window Inspector…") { [unowned self] in InspectorWindow.show(manager: manager) })
         menu.addItem(action("Run Doctor…") { Self.showDoctor() })
@@ -174,7 +190,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(action("Remove Desktop Overrides", enabled: enabled) { [unowned self] in
-            if let error = manager.editConfig({ $0.removeSpaces(for: desktop.key) }) { writeError(error) }
+            if let error = manager.configStore.edit({ $0.removeSpaces(for: desktop.key) }) { writeError(error) }
         })
         menu.addItem(action("More in Settings…") { [unowned self] in
             PreferencesWindow.show(manager: manager, desktop: desktop.key)
@@ -255,7 +271,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     }
 
     private func setRuleField(bundleID: String, ruleIndex: Int?, key: String, value: ConfigValue?) {
-        let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
+        let error = manager.configStore.edit { editor -> Result<Void, ConfigEditError> in
             if let ruleIndex {
                 return editor.set(key, value, in: .rule(ruleIndex))
             }
@@ -435,12 +451,12 @@ final class StatusBar: NSObject, NSMenuDelegate {
     // MARK: Config writes
 
     private func write(_ desktop: Desktop, _ key: String, _ value: ConfigValue?) {
-        if let error = manager.setSpaceSetting(key, value, space: desktop.space) { writeError(error) }
+        if let error = manager.configStore.setSpaceSetting(key, value, space: desktop.space) { writeError(error) }
     }
 
     private func writePair(_ desktop: Desktop, _ a: (String, ConfigValue?), _ b: (String, ConfigValue?)) {
         let section = ConfigSection.space(manager.config.writeAddress(for: desktop.key))
-        let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
+        let error = manager.configStore.edit { editor -> Result<Void, ConfigEditError> in
             if case .failure(let e) = editor.set(a.0, a.1, in: section) { return .failure(e) }
             return editor.set(b.0, b.1, in: section)
         }
@@ -453,9 +469,10 @@ final class StatusBar: NSObject, NSMenuDelegate {
         let overrides = manager.config.overrides(for: desktop.key)
         let inner = isOuter ? overrides?.gapsInner : newValue
         let outer = isOuter ? newValue : overrides?.gapsOuter
+        func value(_ v: Double) -> ConfigValue { v.rounded() == v ? .integer(Int(v)) : .float(v) }
         var fields: [ConfigField] = []
-        if let inner { fields.append(ConfigField("inner", .integer(Int(inner)))) }
-        if let outer { fields.append(ConfigField("outer", .integer(Int(outer)))) }
+        if let inner { fields.append(ConfigField("inner", value(inner))) }
+        if let outer { fields.append(ConfigField("outer", value(outer))) }
         write(desktop, "gaps", fields.isEmpty ? nil : .inlineTable(fields))
     }
 
@@ -478,21 +495,28 @@ final class StatusBar: NSObject, NSMenuDelegate {
         case .starting, .running:
             break
         }
-        if let error = manager.configError {
+        if let error = manager.configStore.error {
             lines.append("Config rejected — previous config still live:")
             lines += error.split(separator: "\n").prefix(5).map(String.init)
         }
+        lines += manager.hotkeyFailures.map { "Hotkey not registered — \($0)" }
         return lines
     }
 
-    private func openConfig() {
-        let url = manager.configURL
-        if !FileManager.default.fileExists(atPath: url.path) {
-            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? Self.starterConfig.write(to: url, atomically: true, encoding: .utf8)
-            manager.configFileCreated()
+    /// Creates a missing config through `ConfigStore.edit` (its rules: validated,
+    /// symlink-resolved, never recreated once one has loaded), then opens or
+    /// reveals it. Returns the edit error, if any.
+    @discardableResult
+    static func openConfig(manager: WindowManager, reveal: Bool = false) -> ConfigEditError? {
+        // Only a missing file needs creating; an existing (possibly invalid) one must open as is.
+        if !FileManager.default.fileExists(atPath: manager.configStore.url.resolvingSymlinksInPath().path),
+           let error = manager.configStore.edit({ _ in .success(()) }) { return error }
+        if reveal {
+            NSWorkspace.shared.activateFileViewerSelecting([manager.configStore.url])
+        } else {
+            NSWorkspace.shared.open(manager.configStore.url)
         }
-        NSWorkspace.shared.open(url)
+        return nil
     }
 
 

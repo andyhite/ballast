@@ -8,6 +8,7 @@ import os
 /// Carbon hotkey registration has no AppKit/Cocoa replacement as of macOS 14
 /// and remains the supported mechanism for system-wide hotkeys that work
 /// even when the app isn't frontmost.
+@MainActor
 public final class HotKeyCenter {
     private static let logger = Logger(subsystem: "dev.ballast", category: "hotkeys")
     private static let signature: OSType = 0x626C_7374 // 'blst'
@@ -16,10 +17,11 @@ public final class HotKeyCenter {
     /// to `setBindings`.
     private let handler: (Int) -> Void
 
-    private var eventHandlerRef: EventHandlerRef?
-    private var hotKeyRefs: [EventHotKeyRef] = []
+    // nonisolated(unsafe): only so the nonisolated deinit can unregister; every other access is on the main actor.
+    nonisolated(unsafe) private var eventHandlerRef: EventHandlerRef?
+    nonisolated(unsafe) private var hotKeyRefs: [EventHotKeyRef] = []
     private var nextHotKeyID: UInt32 = 1
-    private var idToIndex: [UInt32: Int] = [:]
+    nonisolated(unsafe) private var idToIndex: [UInt32: Int] = [:]
 
     public init(handler: @escaping (Int) -> Void) {
         self.handler = handler
@@ -70,7 +72,7 @@ public final class HotKeyCenter {
     }
 
     /// Unregisters every currently registered hotkey.
-    public func removeAll() {
+    public nonisolated func removeAll() {
         for ref in hotKeyRefs {
             UnregisterEventHotKey(ref)
         }
@@ -87,7 +89,8 @@ public final class HotKeyCenter {
             { _, eventRef, userData in
                 guard let eventRef, let userData else { return noErr }
                 let center = Unmanaged<HotKeyCenter>.fromOpaque(userData).takeUnretainedValue()
-                center.handleHotKeyEvent(eventRef)
+                // Carbon delivers application-target events on the main thread.
+                MainActor.assumeIsolated { center.handleHotKeyEvent(eventRef) }
                 return noErr
             },
             1,

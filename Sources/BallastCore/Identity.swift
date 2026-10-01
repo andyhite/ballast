@@ -115,7 +115,7 @@ public struct DisplaySpaces: Equatable, Sendable {
 }
 
 /// Point-in-time view of every display's Spaces. Pure data; built by the
-/// platform `SpaceProvider`, consumed by the engine and tests.
+/// platform `SkyLightSpaceProvider`, consumed by the engine and tests.
 public struct SpaceSnapshot: Equatable, Sendable {
     public let displays: [DisplaySpaces]
 

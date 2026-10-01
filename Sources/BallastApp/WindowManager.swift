@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import BallastCore
 
 /// Orchestrator. Main thread only.
@@ -7,7 +7,8 @@ import BallastCore
 /// Observation (AX observers, NSWorkspace, SkyLight reads) → normalized
 /// engine events → coalesced layout pass (≤ 1 per frame) → frame requests to
 /// the per-app `FrameApplier` workers → results fed back as engine events.
-final class WindowManager: AppObserverDelegate {
+@MainActor
+final class WindowManager {
     enum Status: Equatable {
         case starting
         case needsAccessibility
@@ -17,23 +18,31 @@ final class WindowManager: AppObserverDelegate {
         case running
     }
 
-    private(set) var status = Status.starting { didSet { refreshSurfaces() } }
-    private(set) var engine = Engine(config: Config())
-    /// Latest reload error; the previous config stays live while set.
-    private(set) var configError: String?
-    private(set) var configNote: String?
-    let configURL: URL
+    private(set) var status = Status.starting {
+        didSet {
+            // Carbon registrations are exclusive and system-wide: while not
+            // running they would swallow the user's keys and do nothing.
+            // `begin()` re-applies them.
+            if oldValue == .running, status != .running { releaseHotkeys() }
+            refreshSurfaces()
+        }
+    }
+    var engine = Engine(config: Config())
+    let configStore: ConfigStore
 
-    let provider: (any SpaceProvider)?
+    let provider: SkyLightSpaceProvider?
     private let providerError: String?
     let applier = FrameApplier()
     private(set) var observers: [pid_t: AppObserver] = [:]
+    /// Apps whose observer attach chain (see `attach`) is in flight.
+    private var attaching = Set<pid_t>()
     private var dockObserver: AppObserver?
-    private(set) var elements: [WindowID: AXUIElement] = [:]
+    var slots: [WindowID: WindowSlot] = [:]
     private(set) var displays: [DisplayInfo] = []
     private var statusBar: StatusBar?
     private var hotkeys: HotKeyCenter?
-    private var watcher: ConfigWatcher?
+    /// Readable reasons the last `setBindings` could not register some hotkeys.
+    private(set) var hotkeyFailures: [String] = []
     private var workspaceTokens: [NSObjectProtocol] = []
     private var eventMonitors: [Any] = []
     private var didPromptAccessibility = false
@@ -42,41 +51,14 @@ final class WindowManager: AppObserverDelegate {
     private var dirty = Set<SpaceID>()
     private var passScheduled = false
     private var frameInterval = 1.0 / 60
-    private var reduceMotion = false
-    /// Frame each window should have (last requested, then last observed result).
-    private(set) var expected: [WindowID: CGRect] = [:]
-    /// Last frame sent per window; identical requests are not re-sent (a
-    /// window that refused a size is not retried every pass).
-    private var lastRequested: [WindowID: CGRect] = [:]
-    private var inFlight: [WindowID: Int] = [:]
-    /// Windows tracked since their app's tabs were last reconciled: one of
-    /// them may be the tab that just came in front of a tab that vanished.
-    private var arrivals = Set<WindowID>()
-    /// Windows whose moved/resized notification still needs classifying.
-    private var pendingChecks = Set<WindowID>()
-    /// Windows the user is dragging (mouse was down when they moved).
-    private var dragCandidates = Set<WindowID>()
-    /// Where the button was released for each candidate awaiting its AX read:
-    /// the drop resolves there, not wherever the cursor has moved since.
-    private var dropPoints: [WindowID: CGPoint] = [:]
-    /// Candidates with a `probeDrag` read in flight.
-    private var dragProbes = Set<WindowID>()
-    /// The confirmed drag while the button is down; drives `dropPreview`.
-    private var drag: DragSession?
-    private let dropPreview = DropPreview()
+    private(set) var reduceMotion = false
+    private lazy var drag = DragController(manager: self)
     private let focusFlash = FocusFlash()
     /// The focus flash's hold modifier is down (alone, or with shift).
     private var holdDown = false
-    private var snapBackTimes: [WindowID: [Date]] = [:]
     /// Dock "Assign To Desktop" bindings, captured when an app launches.
     private var launchBindings: [pid_t: SpaceID] = [:]
     private var lastMouseFocusCheck = Date.distantPast
-    private var configLoaded = false
-    /// True once a real config file was successfully read from disk at
-    /// least once (built-in defaults for a file that never existed do not
-    /// count). Once true, a later disappearance must never cause `editConfig`
-    /// to recreate the starter template and silently drop the live config.
-    private var configEverLoadedFromDisk = false
     /// Last focus transition, to recognise "AppKit moved focus, then the window closed".
     private var lastFocusLoss: (window: WindowID, at: Date)?
     /// Spaces already seen by a full resync (first sighting adopts the ideal BSP tree).
@@ -91,17 +73,19 @@ final class WindowManager: AppObserverDelegate {
     /// Bumped by every WM-initiated focus, so a superseded deferred raise never runs.
     private var focusGeneration: UInt64 = 0
     private var axTrustObserverTarget: AXTrustObserverTarget?
-    /// Settings changed by commands (hotkeys, `ballast send …`, menu),
-    /// merged per-Space and flushed to the config file after a short
-    /// debounce, so a held grow/shrink key does not write on every step.
-    private var pendingSettings: [SpaceID: SettingsChange] = [:]
-    private var settingsFlushWorkItem: DispatchWorkItem?
 
     init(configURL: URL) {
-        self.configURL = configURL
+        configStore = ConfigStore(url: configURL)
         switch SkyLightSpaceProvider.make() {
         case .success(let p): provider = p; providerError = nil
         case .failure(let missing): provider = nil; providerError = missing.description
+        }
+        configStore.onChange = { [unowned self] in reloadConfig() }
+        configStore.address = { [unowned self] space in
+            engine.snapshot.key(for: space).map { engine.config.writeAddress(for: $0) }
+        }
+        configStore.clearOverrides = { [unowned self] space, size, count in
+            engine.clearSettingOverrides(space, featureSize: size, featureCount: count)
         }
     }
 
@@ -109,8 +93,7 @@ final class WindowManager: AppObserverDelegate {
 
     func launch() {
         statusBar = StatusBar(manager: self)
-        watcher = ConfigWatcher(url: configURL) { [weak self] in self?.reloadConfig() }
-        watcher?.start()
+        configStore.startWatching()
         hotkeys = HotKeyCenter { [weak self] index in self?.runBinding(index) }
         let axTrustTarget = AXTrustObserverTarget { [weak self] in
             // Posted before the trust database settles; check shortly after.
@@ -126,9 +109,11 @@ final class WindowManager: AppObserverDelegate {
             forName: BallastCLI.commandNotification, object: nil, queue: .main
         ) { [weak self] note in
             guard let text = note.object as? String else { return }
-            switch Command.parse(text) {
-            case .success(let command): self?.perform(command)
-            case .failure(let error): Log.wm.error("ignored command '\(text, privacy: .public)': \(error.message, privacy: .public)")
+            MainActor.assumeIsolated {
+                switch Command.parse(text) {
+                case .success(let command): self?.perform(command)
+                case .failure(let error): Log.wm.error("ignored command '\(text, privacy: .public)': \(error.message, privacy: .public)")
+                }
             }
         }
         tryStart()
@@ -156,7 +141,7 @@ final class WindowManager: AppObserverDelegate {
             status = .needsAccessibility
             if !didPromptAccessibility {
                 didPromptAccessibility = true
-                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(options)
             }
             return
@@ -168,19 +153,10 @@ final class WindowManager: AppObserverDelegate {
     /// startup config load without going through `tryStart`'s AX/SkyLight
     /// gates (which would need real permissions and a live WM).
     func loadInitialConfig() -> Bool {
-        guard !configLoaded else { return true }
-        guard FileManager.default.fileExists(atPath: configURL.path) else {
-            configNote = "No config file; using built-in defaults"
-            engine = Engine(config: Config())
-            configLoaded = true
-            return true
-        }
-        switch readConfig() {
+        guard !configStore.loaded else { return true }
+        switch configStore.loadInitial() {
         case .success(let config):
             engine = Engine(config: config)
-            configNote = nil
-            configLoaded = true
-            configEverLoadedFromDisk = true
             return true
         case .failure(let error):
             status = .invalidConfig(error.message)
@@ -215,7 +191,7 @@ final class WindowManager: AppObserverDelegate {
               let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return }
         let o = AppObserver(pid: dock.processIdentifier, bundleID: "com.apple.dock", name: "Dock",
                             notifications: AppObserver.dockNotifications)
-        o.delegate = self
+        o.onNotification = { [weak self] in self?.appObserver($0, received: $1, element: $2) }
         if o.start() {
             dockObserver = o
         } else if attempt < 8 {
@@ -229,8 +205,13 @@ final class WindowManager: AppObserverDelegate {
 
     private func observeWorkspace() {
         let center = NSWorkspace.shared.notificationCenter
-        func on(_ name: Notification.Name, _ handler: @escaping (Notification) -> Void) {
-            workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: .main, using: handler))
+        func on(_ name: Notification.Name, _ handler: @escaping @MainActor (Notification) -> Void) {
+            // `queue: .main` delivers on the main thread.
+            workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: .main) { note in
+                // Notification is not Sendable but is delivered here on the main queue and never leaves it.
+                nonisolated(unsafe) let note = note
+                MainActor.assumeIsolated { handler(note) }
+            })
         }
         on(NSWorkspace.didLaunchApplicationNotification) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -250,8 +231,8 @@ final class WindowManager: AppObserverDelegate {
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             guard let observer = observers[app.processIdentifier] else { observe(app); return }
-            discoverWindows(observer) { [weak self] in
-                if let window = observer.focusedWindow { self?.focusChanged(to: window) }
+            discoverWindows(observer) { [weak self] focused in
+                if let focused { self?.focusChanged(to: focused) }
             }
         }
         on(NSWorkspace.didHideApplicationNotification) { [weak self] note in
@@ -272,22 +253,15 @@ final class WindowManager: AppObserverDelegate {
         }
         workspaceTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.requestResync() })
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.requestResync() } })
     }
 
     private func observeMouse() {
-        if let up = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp, handler: { [weak self] _ in
+        eventMonitors += drag.monitors { [weak self] ids in
             guard let self else { return }
-            endDrag()
-            guard !dragCandidates.isEmpty else { return }
-            let point = currentMouseLocation()
-            for id in dragCandidates { dropPoints[id] = point }
-            pendingChecks.formUnion(dragCandidates)
+            for id in ids { slots[id]?.pendingCheck = true }
             scheduleLayout()
-        }) { eventMonitors.append(up) }
-        if let dragged = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDragged, handler: { [weak self] _ in
-            self?.updateDropPreview()
-        }) { eventMonitors.append(dragged) }
+        }
         if let moved = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved, handler: { [weak self] _ in
             self?.focusFollowsMouse()
         }) { eventMonitors.append(moved) }
@@ -306,28 +280,43 @@ final class WindowManager: AppObserverDelegate {
 
     private func observe(_ app: NSRunningApplication) {
         let pid = app.processIdentifier
-        guard observers[pid] == nil, pid != getpid(), app.activationPolicy != .prohibited,
+        guard observers[pid] == nil, !attaching.contains(pid), pid != getpid(), app.activationPolicy != .prohibited,
               app.bundleIdentifier != "com.apple.dock" else { return }
         let observer = AppObserver(pid: pid, bundleID: app.bundleIdentifier, name: app.localizedName)
-        observer.delegate = self
+        observer.onNotification = { [weak self] in self?.appObserver($0, received: $1, element: $2) }
+        attaching.insert(pid)
         attach(observer, attempt: 0)
     }
 
-    /// Launching apps are not AX-ready immediately; retry a bounded number of times.
+    /// Launching apps are not AX-ready immediately; retry a bounded number
+    /// of times. The AX subscription runs on the app's own worker, so a hung
+    /// app stalls only its own queue. `attaching` keeps a second activation
+    /// from starting a second chain while one is in flight.
     private func attach(_ observer: AppObserver, attempt: Int) {
-        guard status == .running, observers[observer.pid] == nil else { return }
-        if observer.start() {
-            observers[observer.pid] = observer
-            applier.perform(pid: observer.pid) {
-                // Chromium/Electron honour this: much faster resizes, no competing animation.
-                AX.setBool(observer.app, "AXEnhancedUserInterface", false)
+        let pid = observer.pid
+        guard status == .running, observers[pid] == nil, attaching.contains(pid) else { attaching.remove(pid); return }
+        applier.perform(pid: pid) {
+            let created = observer.subscribe()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard status == .running, observers[pid] == nil, attaching.contains(pid) else { attaching.remove(pid); return }
+                if let created {
+                    attaching.remove(pid)
+                    observer.install(created)
+                    observers[pid] = observer
+                    applier.perform(pid: pid) {
+                        // Chromium/Electron honour this: much faster resizes, no competing animation.
+                        AX.setBool(observer.app, "AXEnhancedUserInterface", false)
+                    }
+                    discoverWindows(observer)
+                } else if attempt < 8 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25 * Double(attempt + 1)) { [weak self] in
+                        self?.attach(observer, attempt: attempt + 1)
+                    }
+                } else {
+                    attaching.remove(pid)
+                }
             }
-            discoverWindows(observer)
-            return
-        }
-        guard attempt < 8 else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25 * Double(attempt + 1)) { [weak self] in
-            self?.attach(observer, attempt: attempt + 1)
         }
     }
 
@@ -341,6 +330,7 @@ final class WindowManager: AppObserverDelegate {
     private func forget(pid: pid_t) {
         observers[pid]?.stop()
         observers[pid] = nil
+        attaching.remove(pid)
         launchBindings[pid] = nil
         for (id, w) in engine.windows where w.pid == pid { untrack(id) }
         applier.forget(pid: pid)
@@ -355,10 +345,8 @@ final class WindowManager: AppObserverDelegate {
         for (id, w) in engine.windows where w.pid == pid { markDirty(engine.setHidden(id, hidden)) }
         // AppKit reports subrole AXDialog for windows of hidden apps; re-read
         // once the app is unhidden so the resolved facts are correct again.
-        guard !hidden, let observer = observers[pid] else { return }
-        for (id, element) in elements where engine.windows[id]?.pid == pid {
-            markDirty(engine.updateFacts(id, Self.windowFacts(element, observer: observer)))
-        }
+        guard !hidden else { return }
+        for id in slots.keys where engine.windows[id]?.pid == pid { refreshFacts(id) }
     }
 
     // MARK: AX events
@@ -380,12 +368,16 @@ final class WindowManager: AppObserverDelegate {
             // Ballast raises one; an app coming forward is picked up by its
             // activation instead.
             guard observer.pid == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
-            focusChanged(to: element)
             // A native tab switch posts no destruction: it shows up only as a
-            // new main window and a changed `AXWindows`.
-            discoverWindows(observer)
+            // new main window and a changed `AXWindows`. A tab not tracked
+            // yet can only be focused once discovery has committed it.
+            let tracked = windowID(element) != nil
+            if tracked { focusChanged(to: element) }
+            discoverWindows(observer) { [weak self] focused in
+                if !tracked { self?.focusChanged(to: focused ?? element) }
+            }
         case kAXUIElementDestroyedNotification:
-            if let id = elements.first(where: { CFEqual($0.value, element) })?.key {
+            if let id = slots.first(where: { CFEqual($0.value.element, element) })?.key {
                 let hadFocus = lastFocusLoss.map { $0.window == id && Date().timeIntervalSince($0.at) < 0.5 } ?? false
                 let removal = untrack(id, hadFocus: hadFocus)
                 if let fallback = removal.focusFallback, isOnActiveSpace(fallback) { focusWindow(fallback) }
@@ -395,218 +387,44 @@ final class WindowManager: AppObserverDelegate {
             let deminiaturized = notification == kAXWindowDeminiaturizedNotification
             markDirty(engine.setMinimized(id, !deminiaturized))
             // AppKit reports subrole AXDialog while minimized; re-read on restore.
-            if deminiaturized, let pid = engine.windows[id]?.pid, let observer = observers[pid] {
-                markDirty(engine.updateFacts(id, Self.windowFacts(element, observer: observer)))
-            }
+            if deminiaturized { refreshFacts(id) }
         case kAXMovedNotification, kAXResizedNotification:
             // Only windows in the last plan can be displaced from their tile
-            // (float-mode / passthrough Spaces are left alone).
-            guard let id = windowID(element), expected[id] != nil else { return }
-            pendingChecks.insert(id)
-            scheduleLayout()
+            // (float-mode / passthrough Spaces are left alone). Our own
+            // animation steps land here too: `applied` reschedules once the
+            // request completes, so no pass is needed while one is in flight.
+            guard let id = windowID(element), slots[id]?.expected != nil else { return }
+            slots[id]?.pendingCheck = true
+            if (slots[id]?.inFlight ?? 0) == 0 { scheduleLayout() }
         case kAXTitleChangedNotification:
-            guard let id = windowID(element), var facts = engine.windows[id]?.facts else { return }
-            facts.title = AX.string(element, kAXTitleAttribute)
-            markDirty(engine.updateFacts(id, facts))
-            if id == engine.frontmost { refreshSurfaces() }
+            guard let id = windowID(element), engine.windows[id] != nil else { return }
+            applier.perform(pid: observer.pid) {
+                let title = AX.string(element, kAXTitleAttribute)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, var facts = engine.windows[id]?.facts else { return }
+                    facts.title = title
+                    markDirty(engine.updateFacts(id, facts))
+                    if id == engine.frontmost { refreshSurfaces() }
+                }
+            }
         default:
             break
         }
     }
 
     private func windowID(_ element: AXUIElement) -> WindowID? {
-        if let id = provider?.windowID(for: element), elements[id] != nil { return id }
-        return elements.first { CFEqual($0.value, element) }?.key
-    }
-
-    /// Reads every window of `observer`'s app and tracks the ones not
-    /// already known. The AX reads (`observer.windows`, then each
-    /// candidate window's role/fullscreen/facts/minimized state) run on
-    /// that app's own serial queue, not the main thread — the same
-    /// isolation `FrameApplier` already gives frame writes — so one
-    /// unresponsive app's AX round-trips during a bulk resync
-    /// (`fullResync`, called on every Space change, wake, display change,
-    /// and Mission Control exit) never block discovery, or anything else
-    /// on the main thread, for every other observed app. `completion`
-    /// (main thread) runs after every discovered window has been
-    /// committed; callers that need to act on a specific window right
-    /// after activation (e.g. following focus) must wait for it rather
-    /// than assuming discovery finished synchronously.
-    private func discoverWindows(_ observer: AppObserver, completion: (() -> Void)? = nil) {
-        guard let provider else { completion?(); return }
-        // Snapshot, not a live reference: read on the worker queue below
-        // without touching `self.elements` off the main thread. A window
-        // that starts being tracked concurrently (a live `AXWindowCreated`
-        // notification racing this discovery) is still caught safely by
-        // `commitTracked`'s own `elements[id] == nil` check on main.
-        let known = Set(elements.keys)
-        applier.perform(pid: observer.pid) {
-            var found: [(id: WindowID, element: AXUIElement, facts: WindowFacts, minimized: Bool)] = []
-            var visible = Set<WindowID>()
-            // `AXWindows` lists only windows on the active Spaces, so it can
-            // only be judged against the Spaces that were active while it
-            // was read. A switch mid-read leaves nothing to judge it by.
-            let activeBefore = provider.activeSpaceIDs()
-            for element in observer.windows {
-                guard let id = provider.windowID(for: element), id != 0 else { continue }
-                visible.insert(id)
-                guard !known.contains(id) else { continue }
-                guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { continue }
-                // Native fullscreen windows live on their own Space: ignore entirely.
-                if AX.bool(element, "AXFullScreen") == true { continue }
-                let facts = Self.windowFacts(element, observer: observer)
-                let minimized = AX.bool(element, kAXMinimizedAttribute) == true
-                found.append((id, element, facts, minimized))
-            }
-            let activeAfter = provider.activeSpaceIDs()
-            let activeDuringRead = activeBefore == activeAfter ? activeBefore : nil
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { completion?(); return }
-                for w in found {
-                    commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized)
-                }
-                reconcileTabs(pid: observer.pid, visible: visible, readAfter: known, activeDuringRead: activeDuringRead)
-                completion?()
-            }
-        }
-    }
-
-    /// Native tabs of one window group are separate windows, and the app
-    /// lists only the selected one in `AXWindows` without ever announcing
-    /// the others' departure. Given the ids the app lists now, this hides
-    /// tracked windows that dropped out and restores those that came back.
-    /// A window that came in front takes over the tile of the window that
-    /// dropped out with it, so a tab switch never rearranges the Space.
-    /// `tracked`: the windows known when `visible` was read; one tracked
-    /// since cannot have dropped out of a list that predates it.
-    /// `activeDuringRead`: the live active Spaces while `visible` was read.
-    private func reconcileTabs(pid: pid_t, visible: Set<WindowID>, readAfter tracked: Set<WindowID>,
-                               activeDuringRead: Set<SpaceID>?) {
-        // A Space switch posts app activation and focus notifications before
-        // (or with) `activeSpaceDidChange`, so `visible` can already list the
-        // new Space's windows while `engine.snapshot` still names the old one
-        // active. Judged against it, every window on the old Space would
-        // "vanish" into a background tab, lose its tile, and come back in a
-        // new one. Skip until they agree: the resync that updates the
-        // snapshot rediscovers every app.
-        guard let activeDuringRead,
-              activeDuringRead == Set(engine.snapshot.displays.compactMap(\.activeSpace)) else { return }
-        let fresh = arrivals.filter { visible.contains($0) && engine.windows[$0]?.pid == pid }
-        arrivals.subtract(fresh)
-        // An empty list is a failed read, not an app with no windows; a
-        // hidden app's windows are already out of the layout.
-        guard !visible.isEmpty, NSRunningApplication(processIdentifier: pid)?.isHidden != true else { return }
-        var vanished: [WindowID] = []
-        var appeared: [WindowID] = []
-        for (id, w) in engine.windows where w.pid == pid && !w.minimized {
-            // Only windows on a visible Space are expected in `AXWindows`.
-            guard let space = w.space, engine.snapshot.isActive(space) else { continue }
-            if !visible.contains(id) {
-                if !w.backgroundTab, tracked.contains(id) { vanished.append(id) }
-            } else if w.backgroundTab || fresh.contains(id) {
-                appeared.append(id)
-            }
-        }
-        appeared.sort()
-        let frames = Dictionary(uniqueKeysWithValues: appeared.map { ($0, elements[$0].flatMap(AX.frame)) })
-        for old in vanished.sorted() {
-            let space = engine.windows[old]?.space
-            let was = expected[old]
-            // Tabs of a group share one frame: the closest arrival is its successor.
-            let successor = appeared.filter { engine.windows[$0]?.space == space }.min { a, b in
-                Self.distance(frames[a] ?? nil, was) < Self.distance(frames[b] ?? nil, was)
-            }
-            if let successor {
-                appeared.removeAll { $0 == successor }
-                markDirty(engine.swapTab(hiding: old, showing: successor))
-            } else {
-                markDirty(engine.setBackgroundTab(old, true))
-            }
-        }
-        for id in appeared where engine.windows[id]?.backgroundTab == true {
-            markDirty(engine.setBackgroundTab(id, false))
-        }
-    }
-
-    private static func distance(_ a: CGRect?, _ b: CGRect?) -> CGFloat {
-        guard let a, let b else { return .infinity }
-        return abs(a.minX - b.minX) + abs(a.minY - b.minY) + abs(a.width - b.width) + abs(a.height - b.height)
-    }
-
-    /// Reads a window's `WindowFacts` from AX. `fullScreen` is judged only
-    /// when the close button exists and is enabled: macOS drops the
-    /// full-screen button while a sheet is attached, and title-bar-less
-    /// windows have no buttons at all, so both cases must read as unknown
-    /// rather than "no full-screen button". `static`: called from
-    /// `discoverWindows`'s background closure, which must not touch `self`.
-    private static func windowFacts(_ element: AXUIElement, observer: AppObserver) -> WindowFacts {
-        let closeButton = AX.element(element, "AXCloseButton")
-        let closeEnabled = closeButton.flatMap { AX.bool($0, kAXEnabledAttribute) } == true
-        let fullScreen: Bool? = closeEnabled ? AX.element(element, "AXFullScreenButton") != nil : nil
-        return WindowFacts(bundleID: observer.bundleID, appName: observer.name,
-                           title: AX.string(element, kAXTitleAttribute),
-                           role: AX.string(element, kAXRoleAttribute),
-                           subrole: AX.string(element, kAXSubroleAttribute),
-                           identifier: AX.string(element, kAXIdentifierAttribute),
-                           modal: AX.bool(element, "AXModal"),
-                           resizable: AX.isSettable(element, kAXSizeAttribute),
-                           fullScreen: fullScreen)
-    }
-
-    /// Live path: a single window from an `AXWindowCreated` notification,
-    /// already on the main thread with the element in hand. Small enough
-    /// (one window, not a whole app's inventory) that reading its facts
-    /// inline is not worth the round trip through `discoverWindows`.
-    private func track(_ element: AXUIElement, observer: AppObserver) {
-        guard let provider, let id = provider.windowID(for: element), id != 0 else { return }
-        if elements[id] != nil { return }
-        guard AX.string(element, kAXRoleAttribute) == kAXWindowRole else { return }
-        // Native fullscreen windows live on their own Space: ignore entirely.
-        if AX.bool(element, "AXFullScreen") == true { return }
-        let facts = Self.windowFacts(element, observer: observer)
-        let minimized = AX.bool(element, kAXMinimizedAttribute) == true
-        commitTracked(id, element: element, observer: observer, facts: facts, minimized: minimized, opened: true)
-    }
-
-    /// Registers AX notifications for a window and adds it to the engine,
-    /// using facts already read from AX by either caller above. Always
-    /// runs on the main thread.
-    private func commitTracked(_ id: WindowID, element: AXUIElement, observer: AppObserver, facts: WindowFacts, minimized: Bool, opened: Bool = false) {
-        guard elements[id] == nil else { return } // raced with a live notification for the same window
-        guard observer.observe(window: element) else {
-            Log.ax.notice("window \(id) of \(facts.appName ?? "?", privacy: .public) refused AX notifications; not tracked yet")
-            return
-        }
-        elements[id] = element
-        let space = resolveSpace(for: id, pid: observer.pid, element: element)
-        markDirty(engine.addWindow(id, pid: observer.pid, facts: facts, space: space))
-        arrivals.insert(id)
-        if minimized { markDirty(engine.setMinimized(id, true)) }
-        if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
-        if space.map({ engine.arrangement(for: $0) }) != .float { placeFloating(id, element: element) }
-        else if opened, !minimized, let space { cascade(id, element: element, on: space) }
-        if engine.windows[id]?.rule.sticky == true {
-            Log.wm.notice("sticky rule for \(facts.appName ?? "?", privacy: .public): pinning to all Spaces needs SIP changes; treated as floating")
-        }
+        if let id = provider?.windowID(for: element), slots[id] != nil { return id }
+        return slots.first { CFEqual($0.value.element, element) }?.key
     }
 
     @discardableResult
     private func untrack(_ id: WindowID, hadFocus: Bool = false) -> WindowRemoval {
-        if let element = elements[id], let pid = engine.windows[id]?.pid {
+        if let element = slots[id]?.element, let pid = engine.windows[id]?.pid {
             observers[pid]?.unobserve(window: element)
         }
-        elements[id] = nil
-        expected[id] = nil
+        slots[id] = nil
         if focusFlash.target == id { focusFlash.hide() }
-        lastRequested[id] = nil
-        inFlight[id] = nil
-        pendingChecks.remove(id)
-        dragCandidates.remove(id)
-        arrivals.remove(id)
-        dropPoints[id] = nil
-        if drag?.window == id { endDrag() }
-        snapBackTimes[id] = nil
-        applier.cancel(id)
+        drag.forget(id)
         applier.forget(window: id)
         let removal = engine.removeWindow(id, hadFocus: hadFocus)
         markDirty(removal.dirty)
@@ -616,35 +434,36 @@ final class WindowManager: AppObserverDelegate {
     /// Space of a window: SkyLight membership, else the Dock binding of a
     /// just-launched app (so the layout is computed for where macOS will put
     /// it), else the active Space of the display it is on.
-    private func resolveSpace(for id: WindowID, pid: pid_t, element: AXUIElement?) -> SpaceID? {
+    func resolveSpace(for id: WindowID, pid: pid_t) -> SpaceID? {
         let snapshot = engine.snapshot
         let candidates = provider?.spaces(forWindow: id) ?? []
         if candidates.count == 1, let only = candidates.first { return only }
         if candidates.count > 1 { return nil } // on every Space: sticky by the app itself
         if let bound = launchBindings[pid] { return bound }
-        guard let element, let frame = AX.frame(element), let display = displays.best(for: frame) else { return nil }
+        guard let frame = Self.windowBounds(of: id), let display = displays.best(for: frame) else { return nil }
         return snapshot.activeSpace(ofDisplay: display.uuid)
     }
 
     /// Moves a window that just opened on a float Space to the next cascade
     /// slot (`float_placement = "cascade"`); never under Stage Manager, and
-    /// never again afterwards.
-    private func cascade(_ id: WindowID, element: AXUIElement, on space: SpaceID) {
+    /// never again afterwards. Frames come from the WindowServer's list, not AX.
+    func cascade(_ id: WindowID, element: AXUIElement, on space: SpaceID) {
+        let bounds = Self.windowBounds()
         guard !engine.passthrough, let w = engine.windows[id], w.isManaged, !w.isFloating,
               engine.settings(for: space).floatPlacement == .cascade,
-              let current = AX.frame(element),
+              let current = bounds[id],
               let display = displays.best(for: current) ?? displays.first else { return }
         let occupied = engine.windows.compactMap { other -> CGPoint? in
-            guard other.key != id, other.value.space == space, let e = elements[other.key] else { return nil }
-            return AX.frame(e)?.origin
+            guard other.key != id, other.value.space == space else { return nil }
+            return bounds[other.key]?.origin
         }
         let frame = Cascade.frame(size: current.size, in: display.visibleFrame,
                                   outerGap: engine.settings(for: space).gaps.outer, occupied: occupied)
         applier.apply(.init(window: id, pid: w.pid, element: element, target: frame, animation: nil)) { _, _, _ in }
     }
 
-    private func placeFloating(_ id: WindowID, element: AXUIElement) {
-        guard let w = engine.windows[id], w.isFloating, let current = AX.frame(element),
+    func placeFloating(_ id: WindowID, element: AXUIElement) {
+        guard let w = engine.windows[id], w.isFloating, let current = Self.windowBounds(of: id),
               let display = displays.best(for: current) ?? displays.first,
               let frame = engine.initialFrame(for: id, current: current, area: display.visibleFrame,
                                               mouse: currentMouseLocation()) else { return }
@@ -679,16 +498,23 @@ final class WindowManager: AppObserverDelegate {
         if let snapshot = provider.snapshot() {
             markDirty(engine.updateSnapshot(snapshot))
         }
-        for observer in observers.values { discoverWindows(observer) }
+        let front = engine.focused == nil ? NSWorkspace.shared.frontmostApplication?.processIdentifier : nil
+        for observer in observers.values {
+            if observer.pid == front {
+                // Focus is read on the worker and applied once discovery has committed.
+                discoverWindows(observer) { [weak self] focused in
+                    guard let self, engine.focused == nil, let focused else { return }
+                    focusChanged(to: focused)
+                }
+            } else {
+                discoverWindows(observer)
+            }
+        }
         reconcileMembership()
         // A Space seen for the first time was filled in discovery order, not
         // rank order: start its BSP tree from the weight-computed ideal.
         for space in engine.spaces.keys where !seenSpaces.contains(space) { engine.adoptIdealTree(space) }
         seenSpaces = Set(engine.spaces.keys).union(engine.snapshot.displays.compactMap(\.activeSpace))
-        if engine.focused == nil, let front = NSWorkspace.shared.frontmostApplication,
-           let window = observers[front.processIdentifier]?.focusedWindow {
-            focusChanged(to: window)
-        }
         for display in engine.snapshot.displays {
             if let active = display.activeSpace { dirty.insert(active) }
         }
@@ -704,16 +530,16 @@ final class WindowManager: AppObserverDelegate {
         var ambiguous = Set<WindowID>()
         for display in engine.snapshot.displays {
             for space in display.spaces {
-                for id in provider.windowIDs(onSpace: space.id) where elements[id] != nil {
+                for id in provider.windowIDs(onSpace: space.id) where slots[id] != nil {
                     if location[id] != nil, location[id] != space.id { ambiguous.insert(id) }
                     location[id] = space.id
                 }
             }
         }
-        for id in elements.keys {
+        for id in slots.keys {
             let pid = engine.windows[id]?.pid ?? 0
             let space = ambiguous.contains(id) ? nil
-                : (location[id] ?? resolveSpace(for: id, pid: pid, element: elements[id]))
+                : (location[id] ?? resolveSpace(for: id, pid: pid))
             markDirty(engine.setSpace(id, space))
         }
         launchBindings.removeAll()
@@ -721,7 +547,7 @@ final class WindowManager: AppObserverDelegate {
 
     // MARK: Layout pass
 
-    private func markDirty(_ spaces: Set<SpaceID>) {
+    func markDirty(_ spaces: Set<SpaceID>) {
         guard !spaces.isEmpty else { return }
         dirty.formUnion(spaces)
         scheduleLayout()
@@ -776,57 +602,54 @@ final class WindowManager: AppObserverDelegate {
         // dirtied them and this pass; drop their stale `laidOut` membership so
         // a reused ordinal never inherits a phantom departure set.
         laidOut = laidOut.filter { engine.spaces[$0.key] != nil }
-        // A window can hop from a higher-ordinal source Space to a
-        // lower-ordinal destination Space within the same pass. Both are
-        // processed here (ascending), so the destination's `layout` call can
-        // run first and set `expected`/`lastRequested` for the window's new
-        // frame, only for the source's later `layout` call to see the window
-        // missing from its own stale plan and null those slots right back
-        // out. Track every id (re)assigned during this pass and never let a
-        // same-pass departure cleanup erase it, regardless of processing order.
-        var reassignedThisPass = Set<WindowID>()
-        for space in spaces.sorted() { layout(space, reassignedThisPass: &reassignedThisPass) }
+        var departed = Set<WindowID>()
+        var placed = Set<WindowID>()
+        for space in spaces.sorted() {
+            let result = layout(space)
+            departed.formUnion(result.departed)
+            placed.formUnion(result.placed)
+        }
+        // Left a plan and entered none this pass: re-sent when it comes back, not a displaced tile meanwhile.
+        for id in departed.subtracting(placed) {
+            slots[id]?.lastRequested = nil
+            slots[id]?.expected = nil
+        }
         // No pass slid a window off the newly focused one: bring it forward now.
+        var worked = !spaces.isEmpty
         if let pending = pendingFocus {
             pendingFocus = nil
+            worked = true
             bringForward(pending.id)
         }
         // A layout change mid-drag (a window opened or closed) moves the landing frame.
-        if !spaces.isEmpty { updateDropPreview(force: true) }
+        if !spaces.isEmpty { drag.updateDropPreview(force: true) }
         // Focus can scroll a deck: the flash follows its window to the new slot.
-        if let id = focusFlash.target, let frame = expected[id] { focusFlash.move(to: frame) }
-        refreshSurfaces()
+        if let id = focusFlash.target, let frame = slots[id]?.expected { focusFlash.move(to: frame) }
+        if worked { refreshSurfaces() }
     }
 
-    private func layout(_ space: SpaceID, reassignedThisPass: inout Set<WindowID>) {
-        guard let key = engine.snapshot.key(for: space), let display = displays.with(uuid: key.display) else { return }
+    private func layout(_ space: SpaceID) -> (departed: Set<WindowID>, placed: Set<WindowID>) {
+        guard let key = engine.snapshot.key(for: space), let display = displays.with(uuid: key.display) else { return ([], []) }
         let active = engine.snapshot.isActive(space)
         let plan = engine.layout(space: space, area: display.visibleFrame)
-        // Windows that left this Space's plan (floated, minimized, moved away,
-        // float-mode Space) must be re-sent when they come back, even to the
-        // same slot, and must not be treated as displaced tiles meanwhile.
         let previous = laidOut[space] ?? []
-        for id in previous where plan.frames[id] == nil && !reassignedThisPass.contains(id) {
-            lastRequested[id] = nil
-            expected[id] = nil
-        }
-        laidOut[space] = Set(plan.frames.keys)
+        let planned = Set(plan.frames.keys)
+        laidOut[space] = planned
         // Same windows as last pass: a scrolling column's windows moved
         // because focus (or a swap) scrolled the view, so they slide too.
-        let scroll = previous == laidOut[space] ? plan.scrolling : []
+        let scroll = previous == planned ? plan.scrolling : []
         let anim = engine.config.animation
         let animates = active && anim.enabled && !reduceMotion && anim.duration > 0 && !plan.monocle
         // The previously focused window sliding off the newly focused one
         // stays in front until its slide ends, uncovering the new window.
         var revealing: (focus: WindowID, generation: UInt64)?
         for (id, frame) in plan.frames.sorted(by: { $0.key < $1.key }) {
-            guard let element = elements[id], let w = engine.windows[id] else { continue }
-            reassignedThisPass.insert(id)
-            if lastRequested[id] == frame { continue }
-            let from = lastRequested[id]
-            lastRequested[id] = frame
-            expected[id] = frame
-            inFlight[id, default: 0] += 1
+            guard let element = slots[id]?.element, let w = engine.windows[id] else { continue }
+            if slots[id]?.lastRequested == frame { continue }
+            let from = slots[id]?.lastRequested
+            slots[id]?.lastRequested = frame
+            slots[id]?.expected = frame
+            slots[id]?.inFlight += 1
             // Strategy (a): on an active Space, only the focused window and a
             // scrolling deck's windows interpolate.
             let animate = animates && (id == engine.focused || scroll.contains(id))
@@ -840,10 +663,11 @@ final class WindowManager: AppObserverDelegate {
             let request = FrameApplier.Request(
                 window: id, pid: w.pid, element: element, target: frame,
                 animation: animate ? (anim.duration, anim.easing, frameInterval) : nil)
+            let revealed = reveal
             applier.apply(request) { [weak self] id, requested, outcome in
                 guard let self else { return }
                 applied(id, requested: requested, outcome: outcome)
-                if let reveal { finishReveal(reveal.focus, generation: reveal.generation, space: space, plan: plan) }
+                if let revealed { finishReveal(revealed.focus, generation: revealed.generation, space: space) }
             }
         }
         if pendingFocus.map({ plan.frames[$0.id] != nil }) == true, let pending = pendingFocus {
@@ -852,14 +676,18 @@ final class WindowManager: AppObserverDelegate {
             bringForward(pending.id)
         }
         if revealing == nil, active { raiseDeck(plan) }
+        return (previous.subtracting(planned), planned)
     }
 
     /// The deferred half of `focusWindow`, once the window covering the
     /// newly focused one has slid away: skipped if focus has moved on since.
-    private func finishReveal(_ id: WindowID, generation: UInt64, space: SpaceID, plan: SpaceLayout) {
+    private func finishReveal(_ id: WindowID, generation: UInt64, space: SpaceID) {
         guard generation == focusGeneration, engine.focused == id else { return }
         bringForward(id)
-        if engine.snapshot.isActive(space) { raiseDeck(plan) }
+        // Recomputed: passes during the slide may have changed the deck.
+        guard engine.snapshot.isActive(space), let key = engine.snapshot.key(for: space),
+              let area = displays.with(uuid: key.display)?.visibleFrame else { return }
+        raiseDeck(engine.layout(space: space, area: area))
     }
 
     /// Puts a scrolling deck's windows back in their deck order.
@@ -879,7 +707,7 @@ final class WindowManager: AppObserverDelegate {
     }
 
     private func raiseWindow(_ id: WindowID) {
-        guard let element = elements[id], let pid = engine.windows[id]?.pid else { return }
+        guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid else { return }
         applier.perform(pid: pid) { AX.raise(element) }
     }
 
@@ -890,18 +718,51 @@ final class WindowManager: AppObserverDelegate {
         return list.compactMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
     }
 
+    /// `kCGWindowBounds` per window id, straight from the WindowServer: no AX
+    /// round trip, so safe on main even for an unresponsive app. Same
+    /// top-left global coordinates as AX frames.
+    static func windowBounds(_ options: CGWindowListOption = .optionAll,
+                             relativeTo window: CGWindowID = kCGNullWindowID) -> [WindowID: CGRect] {
+        let list = CGWindowListCopyWindowInfo(options, window) as? [[String: Any]] ?? []
+        var bounds: [WindowID: CGRect] = [:]
+        for info in list {
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let dict = info[kCGWindowBounds as String] as? NSDictionary,
+                  let rect = CGRect(dictionaryRepresentation: dict as CFDictionary) else { continue }
+            bounds[id] = rect
+        }
+        return bounds
+    }
+
+    static func windowBounds(of id: WindowID) -> CGRect? {
+        windowBounds(.optionIncludingWindow, relativeTo: id)[id]
+    }
+
+    /// Re-reads a window's facts on its app's worker and applies them on main.
+    private func refreshFacts(_ id: WindowID) {
+        guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid, let observer = observers[pid] else { return }
+        applier.perform(pid: pid) {
+            let facts = WindowDiscovery.facts(element, observer: observer)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, slots[id] != nil else { return }
+                markDirty(engine.updateFacts(id, facts))
+            }
+        }
+    }
+
     private func applied(_ id: WindowID, requested: CGRect, outcome: FrameApplier.Outcome) {
-        inFlight[id] = max(0, (inFlight[id] ?? 1) - 1)
-        guard elements[id] != nil else { return }
-        let current = lastRequested[id] == requested
+        if let n = slots[id]?.inFlight { slots[id]?.inFlight = max(0, n - 1) }
+        guard let slot = slots[id] else { return }
+        let current = slot.lastRequested == requested
         guard let actual = outcome.actual else {
-            // Transient AX failure (app busy launching): let the next event retry.
-            if current { lastRequested[id] = nil }
+            // Unreadable (app busy launching): let the next event retry. A
+            // superseded request says nothing about the window.
+            if current, outcome.completed { slots[id]?.lastRequested = nil }
             Log.ax.debug("window \(id) did not accept a frame")
             return
         }
         if current {
-            expected[id] = actual
+            slots[id]?.expected = actual
             if id == focusFlash.target { focusFlash.move(to: actual) }
         }
         // Refused to shrink: remember the minimum and reflow the rest around it.
@@ -910,7 +771,7 @@ final class WindowManager: AppObserverDelegate {
            actual.width > requested.width + 2 || actual.height > requested.height + 2 {
             markDirty(engine.learnMinSize(id, Self.learnedMinSize(requested: requested, actual: actual)))
         }
-        if pendingChecks.contains(id) { scheduleLayout() }
+        if slot.pendingCheck { scheduleLayout() }
     }
 
     /// The size to feed `Engine.learnMinSize` for a completed, still-current
@@ -929,24 +790,22 @@ final class WindowManager: AppObserverDelegate {
     /// verifies the frame runs on the app's own worker (never the main
     /// thread), so a slow app only delays its own classification.
     private func classifyExternalMoves() {
-        guard !pendingChecks.isEmpty else { return }
+        let pending = slots.filter { $0.value.pendingCheck }.keys
+        guard !pending.isEmpty else { return }
         let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
-        for id in pendingChecks {
-            if (inFlight[id] ?? 0) > 0 { continue }
-            pendingChecks.remove(id)
+        for id in pending {
+            if (slots[id]?.inFlight ?? 0) > 0 { continue }
+            slots[id]?.pendingCheck = false
             if mouseDown {
-                dragCandidates.insert(id) // resolved on mouse-up
-                dropPoints[id] = nil // a new press supersedes an unresolved release
-                probeDrag(id)
+                drag.moved(id) // resolved on mouse-up
                 continue
             }
-            let dragged = dragCandidates.remove(id) != nil
-            let dropPoint = dropPoints.removeValue(forKey: id)
-            guard let element = elements[id], let pid = engine.windows[id]?.pid else { continue }
+            let (dragged, dropPoint) = drag.release(id)
+            guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid else { continue }
             applier.perform(pid: pid) { [weak self] in
                 let current = AX.frame(element)
                 DispatchQueue.main.async {
-                    guard let self, let want = self.expected[id], let current,
+                    guard let self, let want = self.slots[id]?.expected, let current,
                           !current.approximatelyEquals(want) else { return }
                     if dragged {
                         self.userDragged(id, to: current, from: want, at: dropPoint ?? currentMouseLocation())
@@ -960,14 +819,14 @@ final class WindowManager: AppObserverDelegate {
 
     /// A user drag between tiles is always a swap intent (or a display move).
     private func userDragged(_ id: WindowID, to current: CGRect, from want: CGRect, at point: CGPoint) {
-        guard !Self.isResize(current, from: want), let space = engine.windows[id]?.space else {
+        guard !DragController.isResize(current, from: want), let space = engine.windows[id]?.space else {
             selfMoved(id, to: current)
             return
         }
-        switch dropTarget(for: id, at: point) {
+        switch drag.dropTarget(for: id, at: point) {
         case .display?:
             // Dropped on another display: macOS reassigns the Space natively.
-            let newSpace = resolveSpace(for: id, pid: engine.windows[id]?.pid ?? 0, element: elements[id])
+            let newSpace = resolveSpace(for: id, pid: engine.windows[id]?.pid ?? 0)
             markDirty(engine.setSpace(id, newSpace))
         case .swap(let target)?:
             if engine.swap(id, target, on: space) { reapply(target) }
@@ -983,8 +842,8 @@ final class WindowManager: AppObserverDelegate {
         var policy = rule.onSelfMove
         if policy == .snapBack {
             let now = Date()
-            let recent = (snapBackTimes[id] ?? []).filter { now.timeIntervalSince($0) < 2 } + [now]
-            snapBackTimes[id] = recent
+            let recent = (slots[id]?.snapBackTimes ?? []).filter { now.timeIntervalSince($0) < 2 } + [now]
+            slots[id]?.snapBackTimes = recent
             if recent.count > 3 {
                 // The app keeps fighting (e.g. grid-snapping terminal): stop the loop.
                 Log.wm.notice("window \(id) keeps moving itself; adopting its frame")
@@ -995,120 +854,15 @@ final class WindowManager: AppObserverDelegate {
         case .snapBack:
             reapply(id)
         case .adopt:
-            expected[id] = current
-            lastRequested[id] = current
+            slots[id]?.expected = current
+            slots[id]?.lastRequested = current
             markDirty(engine.adoptFrame(id, current))
         }
     }
 
     private func reapply(_ id: WindowID) {
-        lastRequested[id] = nil
+        slots[id]?.lastRequested = nil
         if let space = engine.windows[id]?.space { markDirty([space]) }
-    }
-
-    // MARK: Drag preview
-
-    /// What releasing a dragged tile does. The drop and its live preview both
-    /// come from `dropTarget(for:at:)`, so they cannot disagree.
-    private enum DropTarget: Equatable {
-        case swap(WindowID)
-        case display(DisplayInfo)
-    }
-
-    /// The tile being dragged (confirmed by `probeDrag`) and its current target.
-    private struct DragSession {
-        let window: WindowID
-        var target: DropTarget?
-    }
-
-    /// Where releasing dragged window `id` at `point` sends it; nil snaps it back.
-    ///
-    /// Hit-tests against a fresh layout plan rather than `expected`: in a
-    /// scrolling deck, tucked windows' frames overlap the tile in view, so a
-    /// tile in view must win before a covered window's exposed strip.
-    private func dropTarget(for id: WindowID, at point: CGPoint) -> DropTarget? {
-        guard let space = engine.windows[id]?.space else { return nil }
-        if let key = engine.snapshot.key(for: space), let display = displays.containing(point), display.uuid != key.display {
-            return .display(display)
-        }
-        guard let key = engine.snapshot.key(for: space), let area = displays.with(uuid: key.display)?.visibleFrame else { return nil }
-        let plan = engine.layout(space: space, area: area)
-        if let member = plan.frames.first(where: { $0.key != id && !plan.covered.keys.contains($0.key) && $0.value.contains(point) }) {
-            return .swap(member.key)
-        }
-        if let member = plan.covered.first(where: { $0.key != id && $0.value.contains(point) }) {
-            return .swap(member.key)
-        }
-        return nil
-    }
-
-    /// The frame changed size, not just position: a resize, never a drag between tiles.
-    private static func isResize(_ current: CGRect, from want: CGRect) -> Bool {
-        abs(current.width - want.width) > 2 || abs(current.height - want.height) > 2
-    }
-
-    /// A tile moved while the button was down. One AX read tells a drag
-    /// (moved, same size) from a resize or a frame Ballast just applied; only
-    /// a drag starts the preview. At most one read per window is in flight.
-    private func probeDrag(_ id: WindowID) {
-        guard drag == nil, !dragProbes.contains(id), let element = elements[id],
-              let pid = engine.windows[id]?.pid else { return }
-        dragProbes.insert(id)
-        applier.perform(pid: pid) { [weak self] in
-            let current = AX.frame(element)
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.dragProbes.remove(id)
-                guard self.drag == nil, self.dragCandidates.contains(id), NSEvent.pressedMouseButtons & 1 != 0,
-                      let current, let want = self.expected[id], !current.approximatelyEquals(want),
-                      !Self.isResize(current, from: want) else { return }
-                self.drag = DragSession(window: id)
-                self.updateDropPreview()
-            }
-        }
-    }
-
-    /// Highlights what releasing now would hit. Runs on every mouse-dragged
-    /// event, so the zone is recomputed only when the target changes, or on
-    /// `force` after a pass that may have moved the tiles.
-    private func updateDropPreview(force: Bool = false) {
-        guard let session = drag else { return }
-        guard NSEvent.pressedMouseButtons & 1 != 0 else { endDrag(); return } // mouse-up missed
-        let target = dropTarget(for: session.window, at: currentMouseLocation())
-        guard force || target != session.target else { return }
-        drag?.target = target
-        if let target, let frame = dropZone(of: session.window, on: target) {
-            dropPreview.show(frame, below: session.window)
-        } else {
-            dropPreview.hide()
-        }
-    }
-
-    private func endDrag() {
-        guard drag != nil else { return }
-        drag = nil
-        dropPreview.hide()
-    }
-
-    /// The zone for dropping `id` on `target`. A swap highlights the window it
-    /// would trade places with: exactly the area that selects it. (The dragged
-    /// window can land a different size, since minimum sizes and weights
-    /// travel with it.) Another display has no such window, so the zone is the
-    /// tile `id` gets there, from running the move on a copy of the engine.
-    private func dropZone(of id: WindowID, on target: DropTarget) -> CGRect? {
-        switch target {
-        case .swap(let other):
-            guard let space = engine.windows[id]?.space, let key = engine.snapshot.key(for: space),
-                  let area = displays.with(uuid: key.display)?.visibleFrame else { return expected[other] }
-            let plan = engine.layout(space: space, area: area)
-            return plan.covered[other] ?? plan.frames[other]
-        case .display(let display):
-            var sim = engine
-            guard let space = sim.snapshot.activeSpace(ofDisplay: display.uuid) else { return nil }
-            _ = sim.setSpace(id, space)
-            guard let key = sim.snapshot.key(for: space), let area = displays.with(uuid: key.display)?.visibleFrame else { return nil }
-            return sim.layout(space: space, area: area).frames[id]
-        }
     }
 
     // MARK: Focus
@@ -1126,7 +880,7 @@ final class WindowManager: AppObserverDelegate {
     /// When focus scrolls a deck, the window comes forward (activation and
     /// raise) once the previously focused window has slid off it.
     func focusWindow(_ id: WindowID, warp: Bool = true) {
-        guard let element = elements[id], let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
+        guard slots[id] != nil, let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
         let previousDisplay = engine.focused.flatMap(display(of:)) ?? displays.containing(currentMouseLocation())
         let covering = engine.focused == id ? nil : engine.focused
         focusGeneration &+= 1
@@ -1140,7 +894,7 @@ final class WindowManager: AppObserverDelegate {
         }
         if holdDown { holdFocusFlash() }
         if warp, engine.config.cursorFollowsFocus, let target = display(of: id), target.uuid != previousDisplay?.uuid,
-           let frame = expected[id] ?? AX.frame(element) {
+           let frame = slots[id]?.expected ?? Self.windowBounds(of: id) {
             CGWarpMouseCursorPosition(frame.center)
         }
         refreshSurfaces()
@@ -1148,7 +902,7 @@ final class WindowManager: AppObserverDelegate {
 
     /// Activates `id`'s app and makes `id` its frontmost, main window.
     private func bringForward(_ id: WindowID) {
-        guard let element = elements[id], let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
+        guard let element = slots[id]?.element, let w = engine.windows[id], !w.hidden, !w.backgroundTab else { return }
         NSRunningApplication(processIdentifier: w.pid)?.activate()
         applier.perform(pid: w.pid) {
             AX.setBool(element, kAXMainAttribute, true)
@@ -1181,7 +935,7 @@ final class WindowManager: AppObserverDelegate {
     /// live one (a floating window Ballast never placed).
     private func flashFrame(_ id: WindowID) -> CGRect? {
         guard isOnActiveSpace(id), let w = engine.windows[id], !w.hidden, !w.backgroundTab, !w.minimized else { return nil }
-        return expected[id] ?? elements[id].flatMap(AX.frame)
+        return slots[id]?.expected ?? Self.windowBounds(of: id)
     }
 
     /// After a command moved focus.
@@ -1242,7 +996,7 @@ final class WindowManager: AppObserverDelegate {
         markDirty(outcome.dirty)
         if let target = outcome.focus { focusWindow(target) }
         if let message = outcome.message { Log.wm.info("\(message, privacy: .public)") }
-        if let change = outcome.settings { schedulePersist(change) }
+        if let change = outcome.settings { configStore.schedulePersist(change) }
         switch outcome.action {
         case .sendToDisplay(let id, let cycle)?: send(id, toDisplay: cycle)
         case .focusDisplay(let cycle)?: focusDisplay(cycle)
@@ -1259,8 +1013,8 @@ final class WindowManager: AppObserverDelegate {
     /// normally skipped) and re-discovers windows before the next pass.
     private func relayout(_ space: SpaceID) {
         for id in laidOut[space] ?? [] {
-            lastRequested[id] = nil
-            expected[id] = nil
+            slots[id]?.lastRequested = nil
+            slots[id]?.expected = nil
         }
         requestResync()
     }
@@ -1269,47 +1023,6 @@ final class WindowManager: AppObserverDelegate {
         let bindings = engine.config.bindings
         guard bindings.indices.contains(index) else { return }
         perform(bindings[index].command)
-    }
-
-    /// Merges a command's setting change into the pending queue for its
-    /// Space (later fields win) and (re)starts the debounce timer.
-    private func schedulePersist(_ change: SettingsChange) {
-        var pending = pendingSettings[change.space] ?? SettingsChange(space: change.space)
-        if let size = change.featureSize { pending.featureSize = size }
-        if let count = change.featureCount { pending.featureCount = count }
-        pendingSettings[change.space] = pending
-        settingsFlushWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in self?.flushPendingSettings() }
-        settingsFlushWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
-    }
-
-    /// Writes every pending Space's changes to the config in one edit per
-    /// Space, then drops the runtime overrides that are now persisted. A
-    /// Space without a stable config address (fullscreen, or since removed)
-    /// is skipped: its runtime override stays the effective, unsaved value.
-    private func flushPendingSettings() {
-        settingsFlushWorkItem = nil
-        let pending = pendingSettings
-        pendingSettings.removeAll()
-        let snapshot = engine.snapshot
-        for (space, change) in pending {
-            guard let key = snapshot.key(for: space) else { continue }
-            let address = config.writeAddress(for: key)
-            let error = editConfig { editor in
-                if let size = change.featureSize,
-                   case .failure(let e) = editor.set("feature_size", .float(size), in: .space(address)) {
-                    return .failure(e)
-                }
-                if let count = change.featureCount,
-                   case .failure(let e) = editor.set("feature_count", .integer(count), in: .space(address)) {
-                    return .failure(e)
-                }
-                return .success(())
-            }
-            guard error == nil else { continue } // notification already posted; runtime override stays effective
-            engine.clearSettingOverrides(space, featureSize: change.featureSize != nil, featureCount: change.featureCount != nil)
-        }
     }
 
     private func neighborDisplay(from current: DisplayInfo?, _ cycle: Cycle) -> DisplayInfo? {
@@ -1321,27 +1034,26 @@ final class WindowManager: AppObserverDelegate {
     /// Moves a window onto the neighbouring display's active Space. A plain AX
     /// position change; macOS reassigns the Space natively. Cursor follows.
     private func send(_ id: WindowID, toDisplay cycle: Cycle) {
-        guard let element = elements[id], let w = engine.windows[id],
-              let frame = expected[id] ?? AX.frame(element),
+        guard let element = slots[id]?.element, let w = engine.windows[id],
+              let frame = slots[id]?.expected ?? Self.windowBounds(of: id),
               let target = neighborDisplay(from: displays.best(for: frame), cycle) else { return }
         let area = target.visibleFrame
         let size = CGSize(width: min(frame.width, area.width), height: min(frame.height, area.height))
         let destination = CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
                                  width: size.width, height: size.height).integral
-        applier.cancel(id)
         // Only a window that's actually a member of a laid-out Space's plan
         // gets its departure cleaned up by `layout()`; setting `expected`
         // for a floating window (or one on a float-mode desktop) would
         // leave a stale entry forever, wrongly opening the moved/resized
         // gate meant only for tiled windows and poisoning the next
         // `send-to-display`'s source frame.
-        if laidOut.values.contains(where: { $0.contains(id) }) { expected[id] = destination }
-        lastRequested[id] = nil
-        inFlight[id, default: 0] += 1
+        if laidOut.values.contains(where: { $0.contains(id) }) { slots[id]?.expected = destination }
+        slots[id]?.lastRequested = nil
+        slots[id]?.inFlight += 1
         applier.apply(.init(window: id, pid: w.pid, element: element, target: destination, animation: nil)) { [weak self] id, requested, outcome in
             guard let self else { return }
             applied(id, requested: requested, outcome: outcome)
-            markDirty(engine.setSpace(id, resolveSpace(for: id, pid: w.pid, element: elements[id])))
+            markDirty(engine.setSpace(id, resolveSpace(for: id, pid: w.pid)))
             if engine.config.cursorFollowsFocus, let actual = outcome.actual, displays.best(for: actual)?.uuid == target.uuid {
                 CGWarpMouseCursorPosition(actual.center) // cursor follows the moved window
             }
@@ -1363,60 +1075,33 @@ final class WindowManager: AppObserverDelegate {
 
     // MARK: Config
 
-    struct ConfigLoadError: Error { let message: String }
-
-    private func readConfig() -> Result<Config, ConfigLoadError> {
-        let text: String
-        do { text = try String(contentsOf: configURL, encoding: .utf8) } catch {
-            return .failure(.init(message: "cannot read \(configURL.path): \(error.localizedDescription)"))
-        }
-        return Config.parse(text).mapError { ConfigLoadError(message: $0.description) }
-    }
-
-    /// The config file (or its directory) was just created by us: re-arm the
-    /// watcher, which could not watch a missing directory, and load it.
-    func configFileCreated() {
-        watcher?.stop()
-        watcher?.start()
-        reloadConfig()
-    }
-
     /// Hot reload. Invalid config is rejected and the previous one stays live.
     /// Live per-Space state (mode overrides, manual arrangements) is kept.
     func reloadConfig() {
         defer { NotificationCenter.default.post(name: Self.configDidChange, object: self) }
-        // `watcher` only exists once `launch()` has run. A config load/edit
-        // before that (e.g. tests exercising `loadInitialConfig`/`editConfig`
-        // directly on an unlaunched manager) must apply the config but never
-        // reach `tryStart`'s AX prompt or app startup.
-        if case .invalidConfig = status { if watcher != nil { tryStart() }; return }
-        defer { if watcher != nil, status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
-        guard FileManager.default.fileExists(atPath: configURL.path) else {
-            configError = "Config file missing at \(configURL.path); keeping the current config"
-            refreshSurfaces()
-            return
-        }
-        switch readConfig() {
-        case .success(let config):
-            configError = nil
-            configNote = nil
-            configEverLoadedFromDisk = true
+        // Before `launch()` (e.g. tests driving `loadInitialConfig`/`configStore.edit`
+        // on an unlaunched manager) the config is applied but `tryStart` never runs.
+        if case .invalidConfig = status { if configStore.isWatching { tryStart() }; return }
+        defer { if configStore.isWatching, status != .running { tryStart() } } // e.g. `.blocked` after a settings fix
+        if let config = configStore.reload() {
             markDirty(engine.applyConfig(config))
             if !config.focusFlash.enabled { focusFlash.hide() }
             if status == .running { applyBindings() }
             Log.config.info("config reloaded")
-        case .failure(let error):
-            configError = error.message
-            Log.config.error("rejected config: \(error.message, privacy: .public)")
-            Notifier.post(title: "Ballast config rejected", body: error.message)
         }
         refreshSurfaces()
     }
 
     private func applyBindings() {
         guard !hotkeysSuspended else { return }
-        let failures = hotkeys?.setBindings(engine.config.bindings.map(\.hotkey)) ?? []
-        for failure in failures { Log.config.error("hotkey: \(failure, privacy: .public)") }
+        hotkeyFailures = hotkeys?.setBindings(engine.config.bindings.map(\.hotkey)) ?? []
+        for failure in hotkeyFailures { Log.config.error("hotkey: \(failure, privacy: .public)") }
+        refreshSurfaces()
+    }
+
+    private func releaseHotkeys() {
+        hotkeys?.removeAll()
+        hotkeyFailures = []
     }
 
     /// Ballast's global hotkeys are off while this is true, so recording a new
@@ -1426,7 +1111,12 @@ final class WindowManager: AppObserverDelegate {
     func setHotkeysSuspended(_ suspended: Bool) {
         guard suspended != hotkeysSuspended else { return }
         hotkeysSuspended = suspended
-        if suspended { hotkeys?.removeAll() } else if status == .running { applyBindings() }
+        if suspended {
+            releaseHotkeys()
+            refreshSurfaces()
+        } else if status == .running {
+            applyBindings()
+        }
     }
 
     /// Posted after every `reloadConfig()` attempt, success or rejection.
@@ -1474,169 +1164,23 @@ final class WindowManager: AppObserverDelegate {
         }
         return result
     }
+}
 
-    /// Reads the config file, applies `change`, validates the result, and —
-    /// only if that succeeds — writes it atomically to the symlink-resolved
-    /// path and reloads. On any failure nothing is written, a notification is
-    /// posted, and the error is returned; `reloadConfig()` still posts
-    /// `configDidChange` via the write path below.
-    ///
-    /// If the file does not exist, this falls back to the starter template —
-    /// but only when no real config was ever successfully loaded from disk.
-    /// Once one has been, a later disappearance (moved/renamed, briefly
-    /// absent during a dotfiles restore, …) must fail the edit instead of
-    /// silently recreating a starter over the user's config; `reloadConfig`
-    /// already keeps the live, in-memory config running in that case, and
-    /// the edit can be retried once the file reappears.
-    @discardableResult
-    func editConfig(_ change: (inout ConfigEditor) -> Result<Void, ConfigEditError>) -> ConfigEditError? {
-        let resolvedURL = configURL.resolvingSymlinksInPath()
-        let missing = !FileManager.default.fileExists(atPath: resolvedURL.path)
-        if missing, configEverLoadedFromDisk {
-            let editError = ConfigEditError("Config file missing at \(resolvedURL.path); not recreating it")
-            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
-            return editError
-        }
-        let text: String
-        if missing {
-            text = StatusBar.starterConfig
-        } else {
-            do { text = try String(contentsOf: resolvedURL, encoding: .utf8) } catch {
-                let editError = ConfigEditError("cannot read \(resolvedURL.path): \(error.localizedDescription)")
-                Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
-                return editError
-            }
-        }
-        var editor = ConfigEditor(text: text)
-        if case .failure(let error) = change(&editor) {
-            Notifier.post(title: "Ballast couldn't save the change", body: error.description)
-            return error
-        }
-        if case .failure(let error) = editor.validated() {
-            let editError = ConfigEditError(error.description)
-            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
-            return editError
-        }
-        let data = Data(editor.text.utf8)
-        do {
-            if missing {
-                try FileManager.default.createDirectory(at: resolvedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            } else {
-                // Re-read immediately before writing: an external editor (or
-                // another Ballast command's debounced settings flush) may
-                // have changed the file after this edit's initial read
-                // above. Overwriting that unseen change would silently
-                // drop it; fail the edit instead so the caller can reload
-                // and retry. This narrows, rather than eliminates, the
-                // race — a write landing between this check and the write
-                // just below is still possible — but closes the window
-                // that was previously open for this whole function's
-                // read-edit-validate duration.
-                let onDisk = try? String(contentsOf: resolvedURL, encoding: .utf8)
-                guard onDisk == text else {
-                    let editError = ConfigEditError(
-                        "Config file changed on disk since this edit started; not overwriting it. Reload and retry.")
-                    Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
-                    return editError
-                }
-            }
-            try data.write(to: resolvedURL, options: .atomic)
-        } catch {
-            let editError = ConfigEditError("cannot write \(resolvedURL.path): \(error.localizedDescription)")
-            Notifier.post(title: "Ballast couldn't save the change", body: editError.description)
-            return editError
-        }
-        // Our own write would otherwise trigger a second, redundant reload
-        // once the watcher's debounced content check runs.
-        watcher?.acknowledge(content: data)
-        if missing {
-            configFileCreated()
-        } else {
-            reloadConfig()
-        }
-        return nil
-    }
-
-    /// Writes a per-desktop setting (`nil` removes it, so the desktop
-    /// inherits `[layout]`) into that desktop's `[[space]]` block, and, on
-    /// success, drops any runtime override of the same setting.
-    @discardableResult
-    func setSpaceSetting(_ key: String, _ value: ConfigValue?, space: SpaceID) -> ConfigEditError? {
-        guard let spaceKey = engine.snapshot.key(for: space) else {
-            return ConfigEditError("This desktop has no stable config address (fullscreen or unknown).")
-        }
-        let address = config.writeAddress(for: spaceKey)
-        if let error = editConfig({ $0.set(key, value, in: .space(address)) }) { return error }
-        switch key {
-        case "feature_size": engine.clearSettingOverrides(space, featureSize: true, featureCount: false)
-        case "feature_count": engine.clearSettingOverrides(space, featureSize: false, featureCount: true)
-        default: break
-        }
-        return nil
-    }
-
-    // MARK: Diagnostics
-
-    static var stateDumpURL: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            .map { $0.appendingPathComponent("dev.ballast/state.json") }
-            ?? URL(fileURLWithPath: "/tmp/ballast-state.json")
-    }
-
-    /// Writes a JSON snapshot of live state (used by the smoke test).
-    func dumpState() {
-        var spaces: [[String: Any]] = []
-        for (id, state) in engine.spaces.sorted(by: { $0.key < $1.key }) {
-            let key = engine.snapshot.key(for: id)
-            let area = key.flatMap { displays.with(uuid: $0.display) }?.visibleFrame ?? .zero
-            let frames = engine.layout(space: id, area: area).frames
-            spaces.append([
-                "space_id": id,
-                "display": key?.display ?? NSNull(),
-                "ordinal": key?.ordinal ?? NSNull(),
-                "uuid": key?.uuid ?? NSNull(),
-                "active": engine.snapshot.isActive(id),
-                "arrange": engine.arrangement(for: id).rawValue,
-                "layout": engine.glyph(for: id),
-                "feature": engine.settings(for: id).effectiveFeature.rawValue,
-                "feature_size_override": state.featureSizeOverride ?? NSNull(),
-                "feature_count_override": state.featureCountOverride ?? NSNull(),
-                "monocle": state.monocle,
-                "manual": state.manual,
-                "live_order": state.liveOrder.map { describe($0) },
-                "ideal_order": state.idealOrder.map { describe($0) },
-                "decks": state.decks.sorted(by: { $0.key < $1.key }).map { $0.value.map { describe($0) } },
-                "frames": frames.map { ["window": describe($0.key), "x": $0.value.minX, "y": $0.value.minY,
-                                        "w": $0.value.width, "h": $0.value.height] },
-            ])
-        }
-        let root: [String: Any] = [
-            "status": String(describing: status),
-            "config": configURL.path,
-            "config_error": configError ?? NSNull(),
-            "focused": engine.focused.map { describe($0) } ?? NSNull(),
-            "reduce_motion": reduceMotion,
-            "stage_manager_passthrough": engine.passthrough,
-            "displays": displays.map { ["uuid": $0.uuid, "name": $0.name] },
-            "spaces": spaces,
-        ]
-        let url = Self.stateDumpURL
-        do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-                attributes: [.posixPermissions: 0o700])
-            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: url, options: .atomic)
-        } catch {
-            Log.wm.error("state dump failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    private func describe(_ id: WindowID) -> [String: Any] {
-        let w = engine.windows[id]
-        return ["id": id, "app": w?.facts.appName ?? "?", "bundle": w?.facts.bundleID ?? "?",
-                "weight": w?.rule.weight ?? 1]
-    }
+/// Everything the manager keeps per tracked window; one removal untracks it.
+struct WindowSlot {
+    let element: AXUIElement
+    /// Frame the window should have (last requested, then last observed result).
+    var expected: CGRect?
+    /// Last frame sent; identical requests are not re-sent (a window that
+    /// refused a size is not retried every pass).
+    var lastRequested: CGRect?
+    var inFlight = 0
+    /// Tracked since its app's tabs were last reconciled: it may be the tab
+    /// that just came in front of a tab that vanished.
+    var arrived = false
+    /// Its moved/resized notification still needs classifying.
+    var pendingCheck = false
+    var snapBackTimes: [Date] = []
 }
 
 /// Bridges `com.apple.accessibility.api` to `WindowManager` with

@@ -21,34 +21,24 @@ public struct DoctorCheck: Sendable {
     }
 }
 
-/// Full environment report produced by `Doctor.run()`.
-public struct DoctorReport: Sendable {
-    public let checks: [DoctorCheck]
-
-    public init(checks: [DoctorCheck]) {
-        self.checks = checks
-    }
-
+/// Report helpers for the checks produced by `Doctor.run()`.
+extension [DoctorCheck] {
     /// `true` unless some check other than Accessibility permission failed.
     /// Accessibility is handled separately by the app (it has its own
     /// prompt/retry flow), so a missing AX grant alone does not mean the
     /// rest of the environment is unmanageable.
     public var canManage: Bool {
-        !checks.contains { $0.status == .fail && $0.name != Doctor.accessibilityCheckName }
+        !contains { $0.status == .fail && $0.name != Doctor.accessibilityCheckName }
     }
 
     public var accessibilityGranted: Bool {
-        checks.first { $0.name == Doctor.accessibilityCheckName }?.status == .pass
-    }
-
-    public var stageManager: Bool {
-        checks.first { $0.name == Doctor.stageManagerCheckName }?.status == .warn
+        first { $0.name == Doctor.accessibilityCheckName }?.status == .pass
     }
 
     /// Plain-text rendering: one line per check plus a trailing summary.
     public func render() -> String {
         var lines: [String] = []
-        for check in checks {
+        for check in self {
             let marker: String
             switch check.status {
             case .pass: marker = "✓"
@@ -58,13 +48,13 @@ public struct DoctorReport: Sendable {
             lines.append("\(marker) \(check.name) — \(check.detail)")
         }
 
-        let failCount = checks.filter { $0.status == .fail }.count
-        let warnCount = checks.filter { $0.status == .warn }.count
+        let failCount = filter { $0.status == .fail }.count
+        let warnCount = filter { $0.status == .warn }.count
         let summary: String
         if failCount == 0 && warnCount == 0 {
             summary = "All checks passed."
         } else {
-            summary = "\(failCount) failed, \(warnCount) warned, \(checks.count) total."
+            summary = "\(failCount) failed, \(warnCount) warned, \(count) total."
         }
         lines.append(summary)
 
@@ -83,18 +73,13 @@ public enum Doctor {
     /// Major macOS versions Ballast has been tested against.
     public static let testedMacOSRange: ClosedRange<Int> = 14...26
 
-    /// Where the doctor check is being run from — affects only the
-    /// Accessibility check's wording, since `AXIsProcessTrusted()` reports
-    /// the calling process's own grant, not Ballast.app's.
-    public enum Context: Sendable {
-        case app
-        case cli
-    }
-
-    public static func run(context: Context = .app) -> DoctorReport {
+    /// `cli`: the run is from the terminal — affects only the Accessibility
+    /// check's wording, since `AXIsProcessTrusted()` reports the calling
+    /// process's own grant, not Ballast.app's.
+    public static func run(cli: Bool = false) -> [DoctorCheck] {
         var checks: [DoctorCheck] = []
 
-        checks.append(accessibilityCheck(context: context))
+        checks.append(accessibilityCheck(cli: cli))
         checks.append(separateSpacesCheck())
         checks.append(autoRearrangeCheck())
         checks.append(stageManagerCheck())
@@ -102,23 +87,27 @@ public enum Doctor {
         checks.append(contentsOf: privateSymbolChecks())
         checks.append(skyLightSanityCheck())
 
-        return DoctorReport(checks: checks)
+        return checks
     }
 
     // MARK: - Individual checks
 
-    private static func accessibilityCheck(context: Context) -> DoctorCheck {
+    private static func accessibilityCheck(cli: Bool) -> DoctorCheck {
         if AXIsProcessTrusted() {
-            let detail = context == .cli
+            let detail = cli
                 ? "granted to this terminal — see the menu-bar Doctor for Ballast.app's own status"
                 : "granted"
             return DoctorCheck(name: accessibilityCheckName, status: .pass, detail: detail)
         }
-        let detail = context == .cli
-            ? "not granted to this terminal — enable in System Settings → Privacy & Security → " +
-                "Accessibility (add the terminal app); see the menu-bar Doctor for Ballast.app's own status"
-            : "not granted — enable in System Settings → Privacy & Security → Accessibility (add Ballast.app)"
-        return DoctorCheck(name: accessibilityCheckName, status: .fail, detail: detail)
+        if cli {
+            return DoctorCheck(
+                name: accessibilityCheckName, status: .warn,
+                detail: "not granted to this terminal — only needed for `ballast run` from this terminal " +
+                    "(System Settings → Privacy & Security → Accessibility). Tools ▸ Run Doctor… in the menu bar shows Ballast.app's own grant")
+        }
+        return DoctorCheck(
+            name: accessibilityCheckName, status: .fail,
+            detail: "not granted — enable in System Settings → Privacy & Security → Accessibility (add Ballast.app)")
     }
 
     private static func separateSpacesCheck() -> DoctorCheck {

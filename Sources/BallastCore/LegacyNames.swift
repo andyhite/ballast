@@ -6,13 +6,9 @@ enum LegacyNames {
     /// Config key → replacement key.
     static let renamedKeys: [String: String] = [
         "master_ratio": "feature_size",
-        "main_ratio": "feature_size",
         "master_count": "feature_count",
-        "main_count": "feature_count",
         "grid_columns": "columns",
-        "stack_columns": "columns",
         "grid_max": "rows",
-        "stack_max": "rows",
         "stack_peek": "deck_peek",
         "bsp_min_ratio": "weight_share_min",
         "bsp_max_ratio": "weight_share_max",
@@ -23,20 +19,13 @@ enum LegacyNames {
         "stack_both_sides": "use feature = \"center\"",
         "bsp_shape": "use arrange = \"dwindle\" | \"balanced\"",
         "mode": "use arrange and feature",
-        "mode_by_count": "",
     ]
     /// Command (verb, or "verb argument") → replacement command.
     static let renamedCommands: [String: String] = [
         "master-ratio": "feature-size",
-        "main-ratio": "feature-size",
         "master-count": "feature-count",
-        "main-count": "feature-count",
         "focus-master": "focus-feature",
-        "focus-main": "focus-feature",
         "focus master": "focus feature",
-        "focus main": "focus feature",
-        "group": "deck",
-        "ungroup": "undeck",
     ]
     /// Command → what to do instead.
     static let removedCommands: [String: String] = [

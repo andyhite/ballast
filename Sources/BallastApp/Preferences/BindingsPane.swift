@@ -15,6 +15,7 @@ struct BindingsPane: View {
     @State private var showingAddSheet = false
     @State private var editingBinding: BindingRow?
     @State private var errorMessage: String?
+    @State private var hotkeyFailures: [String] = []
 
     init(manager: WindowManager) {
         self.manager = manager
@@ -67,6 +68,13 @@ struct BindingsPane: View {
             }
             .buttonStyle(.borderless)
             .padding(8)
+            if !hotkeyFailures.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(hotkeyFailures, id: \.self) { InlineErrorText(message: "Not registered — \($0)") }
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 4)
+            }
             Text("Ballast's hotkeys are paused while the binding editor is open.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -74,19 +82,26 @@ struct BindingsPane: View {
                 .padding(.bottom, 8)
         }
         .disabled(model.configError != nil)
+        .onAppear { hotkeyFailures = manager.hotkeyFailures }
         .sheet(isPresented: $showingAddSheet) {
             BindingEditSheet(existing: nil) { spec, commandText, previousLiteralKey in
                 commitBinding(spec: spec, commandText: commandText, previousLiteralKey: previousLiteralKey)
             }
             .onAppear { manager.setHotkeysSuspended(true) }
-            .onDisappear { manager.setHotkeysSuspended(false) }
+            .onDisappear {
+                manager.setHotkeysSuspended(false)
+                hotkeyFailures = manager.hotkeyFailures
+            }
         }
         .sheet(item: $editingBinding) { row in
             BindingEditSheet(existing: row) { spec, commandText, previousLiteralKey in
                 commitBinding(spec: spec, commandText: commandText, previousLiteralKey: previousLiteralKey)
             }
             .onAppear { manager.setHotkeysSuspended(true) }
-            .onDisappear { manager.setHotkeysSuspended(false) }
+            .onDisappear {
+                manager.setHotkeysSuspended(false)
+                hotkeyFailures = manager.hotkeyFailures
+            }
         }
     }
 
@@ -97,12 +112,13 @@ struct BindingsPane: View {
 
     private func deleteSelected() {
         guard let selection, let row = rows.first(where: { $0.hotkey == selection }) else { return }
-        if let error = manager.editConfig({ editor in editor.set(row.literalKey, nil, in: .bindings) }) {
+        if let error = manager.configStore.edit({ editor in editor.set(row.literalKey, nil, in: .bindings) }) {
             errorMessage = error.description
         } else {
             errorMessage = nil
             self.selection = nil
         }
+        hotkeyFailures = manager.hotkeyFailures
     }
 
     /// Finds another binding, if any, already bound to `hotkey` — by
@@ -126,14 +142,8 @@ struct BindingsPane: View {
             errorMessage = "Already bound to \u{201C}\(conflict.commandText)\u{201D}. Choose a different hotkey."
             return errorMessage
         }
-        let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
-            if let previousLiteralKey, previousLiteralKey != spec {
-                switch editor.set(previousLiteralKey, nil, in: .bindings) {
-                case .failure(let e): return .failure(e)
-                case .success: break
-                }
-            }
-            return editor.set(spec, .string(commandText), in: .bindings)
+        let error = manager.configStore.edit { editor in
+            editor.renameKey(previousLiteralKey ?? spec, to: spec, value: .string(commandText), in: .bindings)
         }
         if let error {
             errorMessage = error.description
@@ -188,7 +198,7 @@ private struct BindingEditSheet: View {
 
             FormRow(title: "Command") {
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField("focus left", text: $commandText)
+                    TextField("Command", text: $commandText, prompt: Text("focus left"))
                         .onTapGesture { showSuggestions = true }
                     if showSuggestions {
                         ScrollView {

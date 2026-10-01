@@ -10,6 +10,7 @@ import ServiceManagement
 /// Only works from inside `Ballast.app`: `SMAppService` looks the plist up in
 /// `Bundle.main`, which is the enclosing app bundle only when the executable
 /// is run from its real path (not through a symlink, not `.build/`).
+@MainActor
 enum LoginItem {
     private static let service = SMAppService.agent(plistName: "dev.ballast.plist")
 

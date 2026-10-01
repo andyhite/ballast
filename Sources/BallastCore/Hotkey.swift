@@ -76,10 +76,26 @@ public struct Hotkey: Hashable, Sendable, CustomStringConvertible {
         if modifiers.contains(.option) { text += "⌥" }
         if modifiers.contains(.shift) { text += "⇧" }
         if modifiers.contains(.command) { text += "⌘" }
-        let named = ["left": "←", "right": "→", "up": "↑", "down": "↓", "return": "↩", "tab": "⇥", "escape": "⎋",
-                     "delete": "⌫", "space": "Space"]
-        return text + (named[keyName] ?? keyName.uppercased())
+        return text + (Self.keySymbols[keyName] ?? keyName.uppercased())
     }
+
+    private static let keySymbols: [String: String] = [
+        "left": "←", "right": "→", "up": "↑", "down": "↓", "return": "↩", "tab": "⇥", "escape": "⎋",
+        "delete": "⌫", "forwarddelete": "⌦", "space": "Space", "home": "↖", "end": "↘",
+        "pageup": "⇞", "pagedown": "⇟", "minus": "-", "equal": "=", "leftbracket": "[", "rightbracket": "]",
+        "semicolon": ";", "quote": "'", "comma": ",", "period": ".", "slash": "/", "backslash": "\\", "grave": "`",
+    ]
+
+    /// Canonical key name for a virtual key code, or `nil` when no hotkey spec can name it.
+    public static func keyName(forKeyCode code: UInt32) -> String? {
+        keyNames[code]
+    }
+
+    private static let keyNames: [UInt32: String] = {
+        var names: [UInt32: String] = [:]
+        for key in keyAliases.values { names[key.code] = key.name }
+        return names
+    }()
 
     /// Parses a hotkey spec such as `"ctrl+alt+h"` or `"hyper+space"`.
     public static func parse(_ spec: String) -> Result<Hotkey, HotkeyParseError> {

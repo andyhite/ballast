@@ -7,6 +7,7 @@ import SwiftUI
 /// Preferences pane so edits made in one tab show up immediately in another.
 /// Also holds the selected tab and Layout scope, so the menu bar can open the
 /// window straight onto one desktop's settings.
+@MainActor
 final class ConfigModel: ObservableObject {
     let manager: WindowManager
     @Published private(set) var config: Config
@@ -15,17 +16,18 @@ final class ConfigModel: ObservableObject {
     @Published var tab: PreferencesTab = .general
     @Published var layoutScope: LayoutScope = .defaults
 
-    private var token: NSObjectProtocol?
+    // nonisolated(unsafe): set once in init, read only by the nonisolated deinit.
+    nonisolated(unsafe) private var token: NSObjectProtocol?
 
     init(manager: WindowManager) {
         self.manager = manager
         config = manager.config
-        configError = manager.configError
+        configError = manager.configStore.error
         desktops = manager.desktops
         token = NotificationCenter.default.addObserver(
             forName: WindowManager.configDidChange, object: nil, queue: .main
         ) { [weak self] _ in
-            self?.refresh()
+            MainActor.assumeIsolated { self?.refresh() }
         }
     }
 
@@ -35,7 +37,7 @@ final class ConfigModel: ObservableObject {
 
     func refresh() {
         config = manager.config
-        configError = manager.configError
+        configError = manager.configStore.error
         desktops = manager.desktops
     }
 }
@@ -117,6 +119,8 @@ struct InlineErrorText: View {
 /// authoritative, possibly server-corrected value) once the drag ends.
 struct CommitSlider: View {
     let title: String
+    /// VoiceOver name when the visible title is empty (the row label sits beside the control).
+    var accessibilityName = ""
     let liveValue: Double
     let range: ClosedRange<Double>
     var step: Double = 0.01
@@ -137,6 +141,7 @@ struct CommitSlider: View {
                     self.dragValue = nil
                 }
             )
+            .accessibilityLabel(title.isEmpty ? accessibilityName : title)
             Text(format(dragValue ?? liveValue))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -150,6 +155,8 @@ struct CommitSlider: View {
 /// deliberate, discrete change, unlike a slider drag).
 struct CommitStepper: View {
     let title: String
+    /// VoiceOver name when the visible title is empty (the row label sits beside the control).
+    var accessibilityName = ""
     let liveValue: Int
     let range: ClosedRange<Int>
     let commit: (Int) -> Void
@@ -165,6 +172,7 @@ struct CommitStepper: View {
                 Text("\(liveValue)").monospacedDigit()
             }
         }
+        .accessibilityLabel(title.isEmpty ? accessibilityName : title)
     }
 }
 

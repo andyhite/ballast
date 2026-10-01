@@ -113,7 +113,7 @@ struct RulesPane: View {
     private func move(by delta: Int) {
         guard let selection, canMove(by: delta) else { return }
         let target = selection + delta
-        if let error = manager.editConfig({ editor in editor.moveRule(from: selection, to: target) }) {
+        if let error = manager.configStore.edit({ editor in editor.moveRule(from: selection, to: target) }) {
             errorMessage = error.description
         } else {
             errorMessage = nil
@@ -123,7 +123,7 @@ struct RulesPane: View {
 
     private func deleteSelected() {
         guard let selection else { return }
-        if let error = manager.editConfig({ editor in editor.removeRule(at: selection) }) {
+        if let error = manager.configStore.edit({ editor in editor.removeRule(at: selection) }) {
             errorMessage = error.description
         } else {
             errorMessage = nil
@@ -133,7 +133,7 @@ struct RulesPane: View {
 
     private func addRule(_ fields: [ConfigField]) {
         var newIndex: Int?
-        let error = manager.editConfig { editor in
+        let error = manager.configStore.edit { editor in
             editor.appendRule(fields).map { index in
                 newIndex = index
                 return ()
@@ -250,10 +250,13 @@ private struct RuleDetailEditor: View {
     @State private var sizeH: String
 
     @State private var errorMessage: String?
+    /// The rule as last loaded or saved by this editor; writes require the config to still hold it at `index`.
+    @State private var baseline: AppRule
 
     init(manager: WindowManager, index: Int, rule: AppRule) {
         self.manager = manager
         self.index = index
+        _baseline = State(initialValue: rule)
         _appID = State(initialValue: rule.match.appID ?? "")
         _appName = State(initialValue: rule.match.appName ?? "")
         _titleRegex = State(initialValue: rule.match.titleRegex?.source ?? "")
@@ -313,28 +316,28 @@ private struct RuleDetailEditor: View {
             Section("Actions") {
                 CommitTextField(title: "Weight", text: $weightText, prompt: "1 (default), up to 1000", commit: commitWeight)
                 FormRow(title: "Manage") {
-                    Picker("", selection: $manage) {
+                    Picker("Manage", selection: $manage) {
                         ForEach(TriState.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
                     .onChange(of: manage) { _, _ in commitManage() }
                 }
                 FormRow(title: "Float") {
-                    Picker("", selection: $float) {
+                    Picker("Float", selection: $float) {
                         ForEach(TriState.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
                     .onChange(of: float) { _, _ in commitFloat() }
                 }
                 FormRow(title: "Sticky") {
-                    Picker("", selection: $sticky) {
+                    Picker("Sticky", selection: $sticky) {
                         ForEach(TriState.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
                     .onChange(of: sticky) { _, _ in commitSticky() }
                 }
                 FormRow(title: "On Self-Move") {
-                    Picker("", selection: $onSelfMove) {
+                    Picker("On Self-Move", selection: $onSelfMove) {
                         Text("Default").tag(SelfMovePolicy?.none)
                         Text("Snap Back").tag(SelfMovePolicy?.some(.snapBack))
                         Text("Adopt").tag(SelfMovePolicy?.some(.adopt))
@@ -343,7 +346,7 @@ private struct RuleDetailEditor: View {
                     .onChange(of: onSelfMove) { _, _ in commitOnSelfMove() }
                 }
                 FormRow(title: "Placement") {
-                    Picker("", selection: $placementKind) {
+                    Picker("Placement", selection: $placementKind) {
                         ForEach(PlacementKind.allCases) { Text($0.rawValue).tag($0) }
                     }
                     .labelsHidden()
@@ -389,10 +392,17 @@ private struct RuleDetailEditor: View {
     }
 
     private func commit(_ key: String, _ value: ConfigValue?) {
-        if let error = manager.editConfig({ editor in editor.set(key, value, in: .rule(index)) }) {
+        // The config may have reloaded with a different rule at this index
+        // (external edit); refuse rather than rewrite someone else's rule.
+        guard manager.config.rules.indices.contains(index), manager.config.rules[index] == baseline else {
+            errorMessage = "This rule changed outside Settings. Select it again to keep editing."
+            return
+        }
+        if let error = manager.configStore.edit({ editor in editor.set(key, value, in: .rule(index)) }) {
             errorMessage = error.description
         } else {
             errorMessage = nil
+            if manager.config.rules.indices.contains(index) { baseline = manager.config.rules[index] }
         }
     }
 

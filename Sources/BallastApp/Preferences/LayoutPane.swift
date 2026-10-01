@@ -70,7 +70,7 @@ struct LayoutPane: View {
             Section("Arrangement & feature") {
                 fieldRow("Arrangement", inherited: overrides?.arrange == nil,
                          builtin: builtin(config.layout.arrange != nil) { $0.arrange.label }) {
-                    Picker("", selection: Binding(
+                    Picker("Arrangement", selection: Binding(
                         get: { effective.arrange },
                         set: { commitDesktopField("arrange", .string($0.rawValue)) }
                     )) {
@@ -80,7 +80,7 @@ struct LayoutPane: View {
                 }
                 fieldRow("Feature", inherited: overrides?.feature == nil,
                          builtin: builtin(config.layout.feature != nil) { $0.feature.label }) {
-                    Picker("", selection: Binding(
+                    Picker("Feature", selection: Binding(
                         get: { effective.feature },
                         set: { commitDesktopField("feature", .string($0.rawValue)) }
                     )) {
@@ -91,14 +91,14 @@ struct LayoutPane: View {
                 fieldRow("Feature Size", inherited: overrides?.featureSize == nil,
                          builtin: builtin(config.layout.featureSize != nil) { "\(Int(($0.featureSize * 100).rounded()))%" }) {
                     CommitSlider(
-                        title: "", liveValue: effective.featureSize, range: 0.1...0.9, step: 0.05,
+                        title: "", accessibilityName: "Feature Size", liveValue: effective.featureSize, range: 0.1...0.9, step: 0.05,
                         format: { "\(Int(($0 * 100).rounded()))%" },
                         commit: { commitFeatureSize($0) }
                     )
                 }
                 fieldRow("Feature Count", inherited: overrides?.featureCount == nil,
                          builtin: builtin(config.layout.featureCount != nil) { "\($0.featureCount)" }) {
-                    CommitStepper(title: "", liveValue: effective.featureCount, range: 1...16) {
+                    CommitStepper(title: "", accessibilityName: "Feature Count", liveValue: effective.featureCount, range: 1...16) {
                         commitFeatureCount($0)
                     }
                 }
@@ -134,7 +134,7 @@ struct LayoutPane: View {
 
             Section("Float") {
                 fieldRow("New Windows", inherited: overrides?.floatPlacement == nil) {
-                    Picker("", selection: Binding(
+                    Picker("New Windows", selection: Binding(
                         get: { effective.floatPlacement },
                         set: { commitDesktopField("float_placement", .string($0.rawValue)) }
                     )) {
@@ -148,7 +148,7 @@ struct LayoutPane: View {
 
             Section("BSP") {
                 fieldRow("Split Direction", inherited: splitInherited) {
-                    Picker("", selection: Binding(
+                    Picker("Split Direction", selection: Binding(
                         get: { effective.split },
                         set: { commitDesktopField("split", $0.map { .string($0.rawValue) } ?? .string("auto")) }
                     )) {
@@ -168,12 +168,12 @@ struct LayoutPane: View {
 
             Section("Gaps") {
                 fieldRow("Inner Gap", inherited: overrides?.gapsInner == nil) {
-                    CommitStepper(title: "", liveValue: Int(effective.gaps.inner), range: 0...200) {
+                    CommitStepper(title: "", accessibilityName: "Inner Gap", liveValue: Int(effective.gaps.inner), range: 0...200) {
                         commitGaps(inner: Double($0), outer: nil)
                     }
                 }
                 fieldRow("Outer Gap", inherited: overrides?.gapsOuter == nil) {
-                    CommitStepper(title: "", liveValue: Int(effective.gaps.outer), range: 0...200) {
+                    CommitStepper(title: "", accessibilityName: "Outer Gap", liveValue: Int(effective.gaps.outer), range: 0...200) {
                         commitGaps(inner: nil, outer: Double($0))
                     }
                 }
@@ -263,22 +263,13 @@ struct LayoutPane: View {
         let inherited = overrides?.weightShareMin == nil && overrides?.weightShareMax == nil
         let symmetric = abs(effective.weightShareMin - (1 - effective.weightShareMax)) < 0.001
         return fieldRow("Weight Share Limit", inherited: inherited) {
-            if symmetric {
-                CommitSlider(
-                    title: "", liveValue: effective.weightShareMax, range: 0.5...0.95, step: 0.05,
-                    format: { "\(Int(($0 * 100).rounded()))% / \(Int(((1 - $0) * 100).rounded()))%" },
-                    commit: { commitWeightShare(max: $0) }
-                )
-            } else {
-                HStack {
-                    Text("min \(Int((effective.weightShareMin * 100).rounded()))% / max \(Int((effective.weightShareMax * 100).rounded()))%")
-                        .foregroundStyle(.secondary)
-                    Slider(value: Binding(
-                        get: { effective.weightShareMax },
-                        set: { commitWeightShare(max: $0) }
-                    ), in: 0.5...0.95, step: 0.05)
-                }
-            }
+            CommitSlider(
+                title: "", accessibilityName: "Weight Share Limit", liveValue: effective.weightShareMax, range: 0.5...0.95, step: 0.05,
+                format: symmetric
+                    ? { "\(Int(($0 * 100).rounded()))% / \(Int(((1 - $0) * 100).rounded()))%" }
+                    : { "max \(Int(($0 * 100).rounded()))% (min \(Int((effective.weightShareMin * 100).rounded()))%)" },
+                commit: { commitWeightShare(max: $0) }
+            )
         }
     }
 
@@ -328,20 +319,20 @@ struct LayoutPane: View {
     private func commitFeatureSize(_ value: Double) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set("feature_size", .float(value), in: .layout) })
+            setError(manager.configStore.edit { $0.set("feature_size", .float(value), in: .layout) })
         case .desktop(let key):
             guard let space = spaceID(for: key) else { return }
-            setError(manager.setSpaceSetting("feature_size", .float(value), space: space))
+            setError(manager.configStore.setSpaceSetting("feature_size", .float(value), space: space))
         }
     }
 
     private func commitFeatureCount(_ value: Int) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set("feature_count", .integer(value), in: .layout) })
+            setError(manager.configStore.edit { $0.set("feature_count", .integer(value), in: .layout) })
         case .desktop(let key):
             guard let space = spaceID(for: key) else { return }
-            setError(manager.setSpaceSetting("feature_count", .integer(value), space: space))
+            setError(manager.configStore.setSpaceSetting("feature_count", .integer(value), space: space))
         }
     }
 
@@ -350,17 +341,27 @@ struct LayoutPane: View {
     private func commitDesktopField(_ key: String, _ value: ConfigValue?) {
         switch scope {
         case .defaults:
-            setError(manager.editConfig { $0.set(key, value, in: .layout) })
+            setError(manager.configStore.edit { $0.set(key, value, in: .layout) })
         case .desktop(let spaceKey):
             let address = config.writeAddress(for: spaceKey)
-            setError(manager.editConfig { $0.set(key, value, in: .space(address)) })
+            setError(manager.configStore.edit { $0.set(key, value, in: .space(address)) })
         }
     }
 
-    private func commitWeightShare(max: Double) {
-        let min = 1 - max
-        commitDesktopField("weight_share_min", .float(min))
-        commitDesktopField("weight_share_max", .float(max))
+    private func commitWeightShare(max: Double) { commitWeightPair(min: 1 - max, max: max) }
+
+    /// Both limits in one transaction: validation rejects min > max, so
+    /// writing them one at a time can fail against the other's old value.
+    private func commitWeightPair(min: Double?, max: Double?) {
+        let section: ConfigSection
+        switch scope {
+        case .defaults: section = .layout
+        case .desktop(let key): section = .space(config.writeAddress(for: key))
+        }
+        setError(manager.configStore.edit { editor in
+            if case .failure(let error) = editor.set("weight_share_min", min.map { .float($0) }, in: section) { return .failure(error) }
+            return editor.set("weight_share_max", max.map { .float($0) }, in: section)
+        })
     }
 
     /// Pure merge used by `commitGaps`/`commitGapsInherit`: an untouched
@@ -426,13 +427,7 @@ struct LayoutPane: View {
         case "Split Direction":
             commitDesktopField("split", inheriting ? nil : .string(effective.split?.rawValue ?? "auto"))
         case "Weight Share Limit":
-            if inheriting {
-                commitDesktopField("weight_share_min", nil)
-                commitDesktopField("weight_share_max", nil)
-            } else {
-                commitDesktopField("weight_share_min", .float(effective.weightShareMin))
-                commitDesktopField("weight_share_max", .float(effective.weightShareMax))
-            }
+            commitWeightPair(min: inheriting ? nil : effective.weightShareMin, max: inheriting ? nil : effective.weightShareMax)
         case "Inner Gap":
             commitGapsInherit(inner: inheriting ? nil : effective.gaps.inner, clearInner: inheriting)
         case "Outer Gap":
@@ -446,12 +441,12 @@ struct LayoutPane: View {
     /// from the inherit toggle without duplicating the scope switch above.
     private func commitFeatureSize0(_ value: Double?) {
         guard case .desktop(let key) = scope, let space = spaceID(for: key) else { return }
-        setError(manager.setSpaceSetting("feature_size", value.map { .float($0) }, space: space))
+        setError(manager.configStore.setSpaceSetting("feature_size", value.map { .float($0) }, space: space))
     }
 
     private func commitFeatureCount0(_ value: Int?) {
         guard case .desktop(let key) = scope, let space = spaceID(for: key) else { return }
-        setError(manager.setSpaceSetting("feature_count", value.map { .integer($0) }, space: space))
+        setError(manager.configStore.setSpaceSetting("feature_count", value.map { .integer($0) }, space: space))
     }
 
     private func commitGapsInherit(inner: Double? = nil, outer: Double? = nil, clearInner: Bool = false, clearOuter: Bool = false) {
@@ -465,13 +460,13 @@ struct LayoutPane: View {
 
     private func removeAllOverrides(_ key: SpaceKey) {
         if let space = spaceID(for: key) {
-            _ = manager.setSpaceSetting("feature_size", nil, space: space)
-            _ = manager.setSpaceSetting("feature_count", nil, space: space)
+            _ = manager.configStore.setSpaceSetting("feature_size", nil, space: space)
+            _ = manager.configStore.setSpaceSetting("feature_count", nil, space: space)
         }
-        setError(manager.editConfig { $0.removeSpaces(for: key) })
+        setError(manager.configStore.edit { $0.removeSpaces(for: key) })
     }
 
     private func removeSpace(_ address: SpaceAddress) {
-        setError(manager.editConfig { $0.removeSpace(address) })
+        setError(manager.configStore.edit { $0.removeSpace(address) })
     }
 }

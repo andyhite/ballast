@@ -33,27 +33,11 @@ struct TOMLTests {
         #expect(t["d"] == .integer(1_000_000))
     }
 
-    @Test("integers: hex, octal, binary")
-    func radixIntegers() throws {
-        let t = try TOML.parse("hex = 0xFF\noct = 0o17\nbin = 0b1010")
-        #expect(t["hex"] == .integer(255))
-        #expect(t["oct"] == .integer(15))
-        #expect(t["bin"] == .integer(10))
-    }
-
-    @Test("integers: hex/octal/binary underscores use radix-aware grouping")
-    func radixIntegerUnderscores() throws {
-        let t = try TOML.parse("a = 0xdead_beef\nb = 0xFF_FF\nc = 0x1_A")
-        #expect(t["a"] == .integer(0xdead_beef))
-        #expect(t["b"] == .integer(0xFF_FF))
-        #expect(t["c"] == .integer(0x1A))
-    }
-
-    @Test("integers: signs are rejected after a radix prefix")
-    func radixIntegerSignRejected() throws {
-        #expect(throws: (any Error).self) { try TOML.parse("a = 0x-1") }
-        #expect(throws: (any Error).self) { try TOML.parse("a = 0o+7") }
-        #expect(throws: (any Error).self) { try TOML.parse("a = 0b-1") }
+    @Test("radix integers are rejected")
+    func radixIntegersRejected() throws {
+        for v in ["0xFF", "0o17", "0b1010", "0x-1", "0o+7", "0b-1"] {
+            #expect(throws: (any Error).self) { try TOML.parse("a = \(v)") }
+        }
     }
 
     @Test("integers: Int64.min parses losslessly, overflow is rejected")
@@ -98,21 +82,11 @@ struct TOMLTests {
         #expect(t["b"] == .boolean(false))
     }
 
-    @Test("datetimes: offset, local date, local time, space separator")
-    func datetimes() throws {
-        let t = try TOML.parse(
-            "a = 1979-05-27T07:32:00Z\nb = 1979-05-27\nc = 07:32:00\nd = 1979-05-27 07:32:00Z"
-        )
-        guard case .datetime(let a)? = t["a"], case .datetime(let b)? = t["b"],
-              case .datetime(let c)? = t["c"], case .datetime(let d)? = t["d"]
-        else {
-            Issue.record("expected datetime values")
-            return
+    @Test("datetimes are rejected")
+    func datetimesRejected() throws {
+        for v in ["1979-05-27T07:32:00Z", "1979-05-27", "07:32:00", "1979-05-27 07:32:00Z"] {
+            #expect(throws: (any Error).self) { try TOML.parse("a = \(v)") }
         }
-        #expect(a == "1979-05-27T07:32:00Z")
-        #expect(b == "1979-05-27")
-        #expect(c == "07:32:00")
-        #expect(d == "1979-05-27 07:32:00Z")
     }
 
     // MARK: - Tables
@@ -433,4 +407,51 @@ struct TOMLTests {
             }
         }
     }
+
+    // MARK: - Edge cases
+
+    @Test("a CRLF document parses, including comments before the line break")
+    func crlfDocument() throws {
+        let t = try TOML.parse("a = 1 # one\r\n# note\r\n[t]\r\nb = \"x\"\r\n")
+        #expect(t["a"] == .integer(1))
+        guard case .table(let inner)? = t["t"] else { Issue.record("t missing"); return }
+        #expect(inner["b"] == .string("x"))
+    }
+
+    @Test("a bare CR inside a comment is rejected")
+    func bareCRInComment() {
+        #expect(throws: (any Error).self) { try TOML.parse("a = 1 # x\ry = 2\n") }
+    }
+
+    @Test("multi-line strings may close with up to two extra quotes, not three")
+    func multilineQuoteClosings() throws {
+        #expect(try TOML.parse("s = \"\"\"a\"\"\"\"")["s"] == .string("a\""))
+        #expect(try TOML.parse("s = \"\"\"a\"\"\"\"\"")["s"] == .string("a\"\""))
+        #expect(try TOML.parse("s = '''a''''")["s"] == .string("a'"))
+        #expect(try TOML.parse("s = '''a'''''")["s"] == .string("a''"))
+        #expect(throws: (any Error).self) { try TOML.parse("s = \"\"\"a\"\"\"\"\"\"") }
+        #expect(throws: (any Error).self) { try TOML.parse("s = '''a''''''") }
+    }
+
+    @Test("a float that overflows is rejected rather than becoming infinity")
+    func floatOverflow() {
+        #expect(throws: (any Error).self) { try TOML.parse("a = 1e400") }
+    }
+
+    @Test("misplaced underscores in numbers are rejected")
+    func underscoreEdges() {
+        for v in ["1__0", "_1", "1_", "1_.5", "1._5", "1e_5"] {
+            #expect(throws: (any Error).self) { try TOML.parse("a = \(v)") }
+        }
+    }
+
+    @Test("dotted keys inside an inline table build nested tables")
+    func inlineTableDottedKeys() throws {
+        let t = try TOML.parse("t = { a.b = 1, a.c = 2, d = 3 }")
+        guard case .table(let outer)? = t["t"], case .table(let a)? = outer["a"] else { Issue.record("shape"); return }
+        #expect(a["b"] == .integer(1))
+        #expect(a["c"] == .integer(2))
+        #expect(outer["d"] == .integer(3))
+    }
+
 }

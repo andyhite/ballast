@@ -21,8 +21,9 @@ public struct ConfigField: Equatable, Sendable {
     }
 }
 
-/// A table this editor can address. `.space`/`.rule` resolve to a specific
-/// `[[space]]`/`[[rule]]` block by parsing the document with `TOML.parse`.
+/// A table this editor can address. `.space` resolves to the `[[space]]`
+/// entry matching its address (parsed with `TOML.parse`); `.rule(n)` is the
+/// nth `[[rule]]` header, counted without parsing.
 public enum ConfigSection: Hashable, Sendable {
     case settings
     case animation
@@ -53,21 +54,15 @@ public struct ConfigEditor: Sendable {
 
     @discardableResult
     public mutating func set(_ key: String, _ value: ConfigValue?, in section: ConfigSection) -> Result<Void, ConfigEditError> {
-        var lines = splitLines(text)
-        guard var blocks = try? parseBlocks(lines) else {
-            return .failure(ConfigEditError("could not parse document"))
-        }
+        guard case (var lines, var blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
         // A key written as its own child table (`[layout.gaps]`,
         // `[space.gaps]`) is replaced as a whole: drop that table, then
         // write the key inline like any other (or leave it removed).
         let droppedChild = childTable(key, of: section, blocks: blocks, lines: lines)
         if let child = droppedChild {
-            let range = blockRangeWithLeadingComment(child, allBlocks: blocks, lines: lines)
+            let range = blockRangeWithLeadingComment(child, lines: lines)
             removeLineRange(range.start...range.end, lines: &lines)
-            guard let reparsed = try? parseBlocks(lines) else {
-                return .failure(ConfigEditError("could not parse document"))
-            }
-            blocks = reparsed
+            blocks = parseBlocks(lines)
         }
         guard let target = resolveSectionRange(section, blocks: blocks, lines: lines) else {
             switch section {
@@ -88,8 +83,8 @@ public struct ConfigEditor: Sendable {
             case .failure(let e): return .failure(e)
             case .success: break
             }
-            guard let blocks2 = try? parseBlocks(lines),
-                  let target2 = resolveSectionRange(section, blocks: blocks2, lines: lines) else {
+            let blocks2 = parseBlocks(lines)
+            guard let target2 = resolveSectionRange(section, blocks: blocks2, lines: lines) else {
                 return .failure(ConfigEditError("failed to create section"))
             }
             let result = setKey(key, value, bodyStart: target2.bodyStart, bodyEnd: target2.bodyEnd, lines: &lines)
@@ -101,22 +96,22 @@ public struct ConfigEditor: Sendable {
         return result
     }
 
-    public func value(_ key: String, in section: ConfigSection) -> ConfigValue? {
-        let lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines),
-              let target = resolveSectionRange(section, blocks: blocks, lines: lines) else { return nil }
-        guard let span = findKeyLineSpan(key, bodyStart: target.bodyStart, bodyEnd: target.bodyEnd, lines: lines) else { return nil }
-        let raw = valueText(onLines: lines, span: span, key: key)
-        guard let raw else { return nil }
-        return parseScalarValue(raw)
+    /// Renames `oldKey` to `newKey` in place (same line, trailing comment kept)
+    /// and sets its value; inserts `newKey` if `oldKey` is absent.
+    @discardableResult
+    public mutating func renameKey(_ oldKey: String, to newKey: String, value: ConfigValue, in section: ConfigSection) -> Result<Void, ConfigEditError> {
+        guard oldKey != newKey, case (var lines, let blocks)? = parsedDocument(),
+              let target = resolveSectionRange(section, blocks: blocks, lines: lines),
+              let span = findKeyLineSpan(oldKey, bodyStart: target.bodyStart, bodyEnd: target.bodyEnd, lines: lines)
+        else { return set(newKey, value, in: section) }
+        replaceValue(newKey, value, span: span, lines: &lines)
+        text = joinLines(lines)
+        return .success(())
     }
 
     @discardableResult
     public mutating func appendRule(_ fields: [ConfigField]) -> Result<Int, ConfigEditError> {
-        var lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines) else {
-            return .failure(ConfigEditError("could not parse document"))
-        }
+        guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
         let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         let insertAfterLine: Int
         var needsBlankBefore = false
@@ -124,7 +119,7 @@ public struct ConfigEditor: Sendable {
             insertAfterLine = entryContentEnd(last, allBlocks: blocks, lines: lines)
             needsBlankBefore = true
         } else if let bindingsBlock = blocks.first(where: { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false }) {
-            insertAfterLine = bindingsBlock.headerLine - 1
+            insertAfterLine = leadingCommentStart(bindingsBlock.headerLine, lines: lines) - 1
             needsBlankBefore = false
         } else {
             insertAfterLine = lines.count
@@ -147,10 +142,7 @@ public struct ConfigEditor: Sendable {
 
     @discardableResult
     public mutating func removeRule(at index: Int) -> Result<Void, ConfigEditError> {
-        var lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines) else {
-            return .failure(ConfigEditError("could not parse document"))
-        }
+        guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
         let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         guard index >= 0, index < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index \(index) out of range"))
@@ -164,10 +156,7 @@ public struct ConfigEditor: Sendable {
 
     @discardableResult
     public mutating func moveRule(from: Int, to: Int) -> Result<Void, ConfigEditError> {
-        let lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines) else {
-            return .failure(ConfigEditError("could not parse document"))
-        }
+        guard let (lines, blocks) = parsedDocument() else { return .failure(Self.parseFailure) }
         let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         guard from >= 0, from < ruleBlocks.count, to >= 0, to < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index out of range"))
@@ -178,14 +167,11 @@ public struct ConfigEditor: Sendable {
         let (fromStart, fromEnd) = entryRangeWithLeadingComment(fromBlock, allBlocks: blocks, lines: lines)
         let movedLines = Array(lines[(fromStart - 1)...(fromEnd - 1)])
 
-        // Remove the moved block first, tracking line-number shift.
+        // Remove the moved block first, then re-insert it at the target.
         var working = lines
         removeLineRange(fromStart...fromEnd, lines: &working)
-        let removedCount = fromEnd - fromStart + 1
 
-        guard let blocks2 = try? parseBlocks(working) else {
-            return .failure(ConfigEditError("failed to move rule"))
-        }
+        let blocks2 = parseBlocks(working)
         let ruleBlocks2 = blocks2.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
         // Determine insertion point in the post-removal document.
         let insertAfterLine: Int
@@ -202,23 +188,20 @@ public struct ConfigEditor: Sendable {
             let (targetStart, _) = entryRangeWithLeadingComment(target, allBlocks: blocks2, lines: working)
             insertAfterLine = targetStart - 1
         }
-        var newLines = movedLines
-        // Drop trailing blank line artifacts from moved block? keep as-is (only header+fields, comment lines).
-        _ = removedCount
-        insert(newLines, after: insertAfterLine, lines: &working)
+        insert(movedLines, after: insertAfterLine, lines: &working)
         text = joinLines(working)
-        newLines = []
         return .success(())
     }
 
     @discardableResult
     public mutating func removeSpace(_ address: SpaceAddress) -> Result<Void, ConfigEditError> {
-        var lines = splitLines(text)
-        guard let blocks = try? parseBlocks(lines) else {
-            return .failure(ConfigEditError("could not parse document"))
-        }
+        guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
         guard let block = findSpaceBlock(address, blocks: blocks, lines: lines) else {
-            return .success(())
+            // A [[space]] whose body can't be parsed might be the one asked for.
+            let unreadable = blocks.contains {
+                $0.header?.tableKind == "space" && $0.header?.isArrayTable == true && spaceBody($0, lines: lines) == nil
+            }
+            return unreadable ? .failure(ConfigEditError("could not read a [[space]] entry")) : .success(())
         }
         let (start, end) = entryRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
         removeLineRange(start...end, lines: &lines)
@@ -242,9 +225,28 @@ public struct ConfigEditor: Sendable {
 
     // MARK: - Line model
 
+    private static let parseFailure = ConfigEditError("could not parse document")
+
+    /// nil when a `[rule.x]`/`[space.x]` child table doesn't directly follow
+    /// its entry or a sibling child: TOML would attach it to whichever entry
+    /// precedes it, and the editor's line-range model can't move it safely.
+    private func parsedDocument() -> (lines: [String], blocks: [Block])? {
+        let lines = splitLines(text)
+        let blocks = parseBlocks(lines)
+        for (i, block) in blocks.enumerated() {
+            guard let h = block.header, !h.isArrayTable, h.path.count > 1,
+                  h.tableKind == "rule" || h.tableKind == "space" else { continue }
+            guard i > 0, let prev = blocks[i - 1].header, prev.tableKind == h.tableKind,
+                  prev.isArrayTable || prev.path.count > 1 else { return nil }
+        }
+        return (lines, blocks)
+    }
+
+    /// Lines without terminators. CRLF is stripped here and restored by
+    /// `joinLines`, so every scan below sees plain text.
     private func splitLines(_ text: String) -> [String] {
         if text.isEmpty { return [] }
-        var lines = text.components(separatedBy: "\n")
+        var lines = text.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
         // Preserve a trailing newline as an implicit property, not a phantom
         // empty final element, unless the source really ends with a blank line.
         if lines.last == "" { lines.removeLast() }
@@ -252,7 +254,8 @@ public struct ConfigEditor: Sendable {
     }
 
     private func joinLines(_ lines: [String]) -> String {
-        lines.isEmpty ? "" : lines.joined(separator: "\n") + "\n"
+        let eol = text.contains("\r\n") ? "\r\n" : "\n"
+        return lines.isEmpty ? "" : lines.joined(separator: eol) + eol
     }
 
     // MARK: - Block model (1-based line numbers throughout)
@@ -269,26 +272,23 @@ public struct ConfigEditor: Sendable {
         let headerLine: Int // 1-based line of the header, 0 if this is the preamble (no header)
         let bodyStart: Int // first line of key/values (headerLine + 1)
         let bodyEnd: Int // last line before the next header (inclusive), or lines.count
-        var endLine: Int { bodyEnd }
     }
 
     /// Splits the document into blocks at table headers. Each block's body
     /// spans from just after its header to just before the next header.
-    private func parseBlocks(_ lines: [String]) throws -> [Block] {
+    private func parseBlocks(_ lines: [String]) -> [Block] {
         var blocks: [Block] = []
         var currentHeader: HeaderInfo?
         var currentHeaderLine = 0
         var bodyStart = 1
-        var i = 0
-        while i < lines.count {
+        for (i, line) in lines.enumerated() {
             let lineNo = i + 1
-            if let header = parseHeaderLine(lines[i]) {
+            if let header = parseHeaderLine(line) {
                 blocks.append(Block(header: currentHeader, headerLine: currentHeaderLine, bodyStart: bodyStart, bodyEnd: lineNo - 1))
                 currentHeader = header
                 currentHeaderLine = lineNo
                 bodyStart = lineNo + 1
             }
-            i += 1
         }
         blocks.append(Block(header: currentHeader, headerLine: currentHeaderLine, bodyStart: bodyStart, bodyEnd: lines.count))
         return blocks
@@ -432,11 +432,14 @@ public struct ConfigEditor: Sendable {
         }
     }
 
+    private func spaceBody(_ block: Block, lines: [String]) -> TOMLTable? {
+        try? TOML.parse(lines[(block.bodyStart - 1)..<max(block.bodyStart - 1, min(block.bodyEnd, lines.count))].joined(separator: "\n"))
+    }
+
     private func findSpaceBlock(_ address: SpaceAddress, blocks: [Block], lines: [String]) -> Block? {
         let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
         for block in spaceBlocks {
-            let bodyText = lines[(block.bodyStart - 1)..<max(block.bodyStart - 1, min(block.bodyEnd, lines.count))].joined(separator: "\n")
-            guard let t = try? TOML.parse(bodyText) else { continue }
+            guard let t = spaceBody(block, lines: lines) else { continue }
             switch address {
             case .uuid(let uuid):
                 guard case .string(let value)? = t["uuid"], value.uppercased() == uuid.uppercased() else { continue }
@@ -456,29 +459,27 @@ public struct ConfigEditor: Sendable {
         case .rule:
             return .failure(ConfigEditError("rule section is not creatable; use appendRule"))
         case .settings:
-            insertSectionHeader("[settings]", before: firstLineIndex(lines), lines: &lines)
+            insertSectionHeader("[settings]", lines: &lines)
             return .success(())
         case .animation, .focusFlash:
             // A [settings.*] subtable goes right after the last existing one, else after [settings].
             let header = section == .animation ? "[settings.animation]" : "[settings.focus_flash]"
-            guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
-            if let anchor = lastSettingsBlock(blocks) {
-                insertBlockAfter(anchor, header: header, blocks: blocks, lines: &lines)
+            if let anchor = lastSettingsBlock(parseBlocks(lines)) {
+                insertBlockAfter(anchor, header: header, lines: &lines)
             } else {
                 // Create [settings] first, then the subtable right after.
-                insertSectionHeader("[settings]", before: firstLineIndex(lines), lines: &lines)
-                guard let blocks2 = try? parseBlocks(lines), let anchor2 = lastSettingsBlock(blocks2) else {
+                insertSectionHeader("[settings]", lines: &lines)
+                guard let anchor2 = lastSettingsBlock(parseBlocks(lines)) else {
                     return .failure(ConfigEditError("failed to create \(header)"))
                 }
-                insertBlockAfter(anchor2, header: header, blocks: blocks2, lines: &lines)
+                insertBlockAfter(anchor2, header: header, lines: &lines)
             }
             return .success(())
         case .layout:
-            guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
-            if let anchor = lastSettingsBlock(blocks) {
-                insertBlockAfter(anchor, header: "[layout]", blocks: blocks, lines: &lines)
+            if let anchor = lastSettingsBlock(parseBlocks(lines)) {
+                insertBlockAfter(anchor, header: "[layout]", lines: &lines)
             } else {
-                insertSectionHeader("[layout]", before: firstLineIndex(lines), lines: &lines)
+                insertSectionHeader("[layout]", lines: &lines)
             }
             return .success(())
         case .bindings:
@@ -488,7 +489,7 @@ public struct ConfigEditor: Sendable {
             insert(newLines, after: lines.count, lines: &lines)
             return .success(())
         case .space(let address):
-            guard let blocks = try? parseBlocks(lines) else { return .failure(ConfigEditError("could not parse document")) }
+            let blocks = parseBlocks(lines)
             let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
             var body = ["[[space]]"]
             switch address {
@@ -499,17 +500,11 @@ public struct ConfigEditor: Sendable {
                 body.append("ordinal = \(ordinal)")
             }
             if let last = spaceBlocks.last {
-                var newLines: [String] = ["", body.removeFirst()]
-                newLines.append(contentsOf: body)
-                insert(newLines, after: entryContentEnd(last, allBlocks: blocks, lines: lines), lines: &lines)
-            } else if let ruleBlocks = firstRuleHeaderLine(blocks) {
-                var newLines = body
-                newLines.append("")
-                insert(newLines, after: ruleBlocks - 1, lines: &lines)
-            } else if let bindingsBlock = blocks.first(where: { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false }) {
-                var newLines = body
-                newLines.append("")
-                insert(newLines, after: bindingsBlock.headerLine - 1, lines: &lines)
+                insert([""] + body, after: entryContentEnd(last, allBlocks: blocks, lines: lines), lines: &lines)
+            } else if let header = firstRuleHeaderLine(blocks)
+                        ?? blocks.first(where: { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false })?.headerLine {
+                // Above the target header's attached comments, not between them and it.
+                insert(body + [""], after: leadingCommentStart(header, lines: lines) - 1, lines: &lines)
             } else {
                 var newLines: [String] = []
                 if !lines.isEmpty { newLines.append("") }
@@ -532,18 +527,24 @@ public struct ConfigEditor: Sendable {
         }
     }
 
-    private func firstLineIndex(_ lines: [String]) -> Int { 1 }
-
-    private mutating func insertSectionHeader(_ header: String, before lineIndex: Int, lines: inout [String]) {
+    /// Inserts a new top-level section at the top of the file, after a leading
+    /// file-header comment block (one separated from the first table by a blank
+    /// line). Comments attached directly to the first table stay with it.
+    private mutating func insertSectionHeader(_ header: String, lines: inout [String]) {
+        var run = 0
+        while run < lines.count, lines[run].trimmingCharacters(in: .whitespaces).hasPrefix("#") { run += 1 }
+        var at = 0
         var newLines = [header]
-        if !lines.isEmpty { newLines.append("") }
-        insert(newLines, after: 0, lines: &lines)
+        if run > 0, run == lines.count || lines[run].trimmingCharacters(in: .whitespaces).isEmpty {
+            at = run == lines.count ? run : run + 1
+            if run == lines.count { newLines.insert("", at: 0) }
+        }
+        if at < lines.count { newLines.append("") }
+        insert(newLines, after: at, lines: &lines)
     }
 
-    private mutating func insertBlockAfter(_ block: Block, header: String, blocks: [Block], lines: inout [String]) {
-        var newLines: [String] = ["", header]
-        insert(newLines, after: contentEnd(block, lines: lines), lines: &lines)
-        newLines = []
+    private mutating func insertBlockAfter(_ block: Block, header: String, lines: inout [String]) {
+        insert(["", header], after: contentEnd(block, lines: lines), lines: &lines)
     }
 
     // MARK: - Line insertion / removal primitives (1-based, `after` = 0 means at start)
@@ -663,7 +664,6 @@ public struct ConfigEditor: Sendable {
         var inTripleDouble = false
         var line = startLine
         var idx = afterEquals
-        var sawValueContent = false
 
         func currentLine() -> String { line <= lines.count ? lines[line - 1] : "" }
 
@@ -697,19 +697,15 @@ public struct ConfigEditor: Sendable {
                 } else {
                     if c == "#" { idx = text.endIndex; break }
                     if c == "'" {
-                        if matchesTriple(text, idx, "'") { inTripleSingle = true; sawValueContent = true; idx = text.index(idx, offsetBy: 2, limitedBy: text.endIndex) ?? text.endIndex }
-                        else { inSingle = true; sawValueContent = true }
+                        if matchesTriple(text, idx, "'") { inTripleSingle = true; idx = text.index(idx, offsetBy: 2, limitedBy: text.endIndex) ?? text.endIndex }
+                        else { inSingle = true }
                     } else if c == "\"" {
-                        if matchesTriple(text, idx, "\"") { inTripleDouble = true; sawValueContent = true; idx = text.index(idx, offsetBy: 2, limitedBy: text.endIndex) ?? text.endIndex }
-                        else { inDouble = true; sawValueContent = true }
+                        if matchesTriple(text, idx, "\"") { inTripleDouble = true; idx = text.index(idx, offsetBy: 2, limitedBy: text.endIndex) ?? text.endIndex }
+                        else { inDouble = true }
                     } else if c == "[" || c == "{" {
                         depth += 1
-                        sawValueContent = true
                     } else if c == "]" || c == "}" {
                         depth -= 1
-                        sawValueContent = true
-                    } else if !c.isWhitespace {
-                        sawValueContent = true
                     }
                 }
                 idx = text.index(after: idx)
@@ -719,7 +715,6 @@ public struct ConfigEditor: Sendable {
             if line >= bodyEnd || line >= lines.count { return line }
             line += 1
             idx = lines[line - 1].startIndex
-            _ = sawValueContent
         }
     }
 
@@ -775,45 +770,6 @@ public struct ConfigEditor: Sendable {
             col += 1
         }
         return nil
-    }
-
-    /// Extracts the raw value substring (post `=`, pre trailing comment) for
-    /// a span that may run across multiple lines; multi-line values return
-    /// nil (only single-line scalars/inline-tables are representable).
-    private func valueText(onLines lines: [String], span: KeySpan, key: String) -> String? {
-        guard span.keyLineIndex == span.valueEndLineIndex else { return nil }
-        let line = lines[span.keyLineIndex - 1]
-        guard let (_, _, afterEquals) = parseKeyLine(line) else { return nil }
-        var end = line.endIndex
-        if let col = span.commentColumn {
-            end = line.index(line.startIndex, offsetBy: col, limitedBy: line.endIndex) ?? line.endIndex
-        }
-        guard afterEquals <= end else { return nil }
-        return String(line[afterEquals..<end]).trimmingCharacters(in: .whitespaces)
-    }
-
-    private func parseScalarValue(_ raw: String) -> ConfigValue? {
-        guard let table = try? TOML.parse("v = \(raw)") else { return nil }
-        guard let v = table["v"] else { return nil }
-        return toConfigValue(v)
-    }
-
-    private func toConfigValue(_ v: TOMLValue) -> ConfigValue? {
-        switch v {
-        case .string(let s): return .string(s)
-        case .integer(let i): return .integer(Int(i))
-        case .float(let f): return .float(f)
-        case .boolean(let b): return .bool(b)
-        case .table(let t):
-            var fields: [ConfigField] = []
-            for (k, val) in t.entries {
-                guard let cv = toConfigValue(val) else { return nil }
-                fields.append(ConfigField(k, cv))
-            }
-            return .inlineTable(fields)
-        default:
-            return nil
-        }
     }
 
     private mutating func replaceValue(_ key: String, _ value: ConfigValue, span: KeySpan, lines: inout [String]) {
@@ -905,27 +861,32 @@ public struct ConfigEditor: Sendable {
         return end
     }
 
-    private func blockRangeWithLeadingComment(_ block: Block, allBlocks: [Block], lines: [String]) -> (start: Int, end: Int) {
-        var start = block.headerLine
-        var probe = block.headerLine - 1
-        while probe >= 1 {
-            let trimmed = lines[probe - 1].trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("#") {
-                start = probe
-                probe -= 1
-            } else {
-                break
-            }
+    /// First line of the contiguous `#` comment run directly above `headerLine`
+    /// (the comments attached to that header); `headerLine` itself if none.
+    private func leadingCommentStart(_ headerLine: Int, lines: [String]) -> Int {
+        var start = headerLine
+        while start > 1, lines[start - 2].trimmingCharacters(in: .whitespaces).hasPrefix("#") {
+            start -= 1
         }
-        let end = contentEnd(block, lines: lines)
+        return start
+    }
+
+    private func blockRangeWithLeadingComment(_ block: Block, lines: [String]) -> (start: Int, end: Int) {
+        var start = leadingCommentStart(block.headerLine, lines: lines)
+        var end = contentEnd(block, lines: lines)
+        let blankAfter = end < lines.count && lines[end].trimmingCharacters(in: .whitespaces).isEmpty
         // No leading comment was attached: if a blank line precedes the
         // block and a blank line also follows it, fold the leading blank
         // into the removal so two separators don't collapse into one after
         // removal (the trailing blank alone still separates the neighbors).
-        if start == block.headerLine, start > 1, end < lines.count,
-           lines[start - 2].trimmingCharacters(in: .whitespaces).isEmpty,
-           lines[end].trimmingCharacters(in: .whitespaces).isEmpty {
-            start -= 1
+        // At the top of the file there is no leading separator, so the
+        // trailing blank goes instead of becoming a stray first line.
+        if start == block.headerLine, blankAfter {
+            if start == 1 {
+                end += 1
+            } else if lines[start - 2].trimmingCharacters(in: .whitespaces).isEmpty {
+                start -= 1
+            }
         }
         return (start, end)
     }
@@ -966,7 +927,7 @@ public struct ConfigEditor: Sendable {
     /// tables so remove/move take the whole entry with it.
     private func entryRangeWithLeadingComment(_ entryBlock: Block, allBlocks: [Block], lines: [String]) -> (start: Int, end: Int) {
         let extended = Block(header: entryBlock.header, headerLine: entryBlock.headerLine, bodyStart: entryBlock.bodyStart, bodyEnd: ownedBodyEnd(for: entryBlock, allBlocks: allBlocks))
-        return blockRangeWithLeadingComment(extended, allBlocks: allBlocks, lines: lines)
+        return blockRangeWithLeadingComment(extended, lines: lines)
     }
 
     // MARK: - Rendering
@@ -1008,13 +969,19 @@ public struct ConfigEditor: Sendable {
 
     private func escapeBasicString(_ s: String) -> String {
         var out = ""
-        for c in s {
-            switch c {
+        for u in s.unicodeScalars {
+            switch u {
             case "\\": out += "\\\\"
             case "\"": out += "\\\""
             case "\n": out += "\\n"
             case "\t": out += "\\t"
-            default: out.append(c)
+            case "\r": out += "\\r"
+            default:
+                if u.value < 0x20 || u.value == 0x7F {
+                    out += String(format: "\\u%04X", u.value)
+                } else {
+                    out.unicodeScalars.append(u)
+                }
             }
         }
         return out

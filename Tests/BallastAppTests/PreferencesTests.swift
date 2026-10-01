@@ -6,6 +6,7 @@ import BallastCore
 /// Preferences Layout and Bindings panes. These exercise the extracted
 /// static helpers directly: no live window manager, AX, hotkey
 /// registration, or user config is touched.
+@MainActor
 @Suite
 struct PreferencesTests {
     // MARK: Layout pane — Defaults-scope gap preservation

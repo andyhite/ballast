@@ -371,13 +371,9 @@ struct ConfigTests {
     func legacyKeysAreErrors() {
         let cases: [(key: String, value: String, message: String)] = [
             ("master_ratio", "0.5", "renamed to feature_size"),
-            ("main_ratio", "0.5", "renamed to feature_size"),
             ("master_count", "2", "renamed to feature_count"),
-            ("main_count", "2", "renamed to feature_count"),
             ("grid_columns", "2", "renamed to columns"),
-            ("stack_columns", "2", "renamed to columns"),
             ("grid_max", "2", "renamed to rows"),
-            ("stack_max", "2", "renamed to rows"),
             ("stack_peek", "12", "renamed to deck_peek"),
             ("bsp_min_ratio", "0.25", "renamed to weight_share_min"),
             ("bsp_max_ratio", "0.75", "renamed to weight_share_max"),
@@ -385,7 +381,6 @@ struct ConfigTests {
             ("stack_both_sides", "true", "removed; use feature = \"center\""),
             ("bsp_shape", "\"dwindle\"", "removed; use arrange = \"dwindle\" | \"balanced\""),
             ("mode", "\"bsp\"", "removed; use arrange and feature"),
-            ("mode_by_count", "{ \"3\" = \"grid\" }", "removed"),
         ]
         for (key, value, message) in cases {
             #expect(Self.messages("[layout]\n\(key) = \(value)") == ["layout.\(key): \(message)"], "[layout] \(key)")
@@ -422,11 +417,10 @@ struct ConfigTests {
             return nil
         }
         let renamed: [(old: String, name: String, new: String)] = [
-            ("group left", "group", "deck"), ("ungroup", "ungroup", "undeck"),
-            ("master-ratio +0.1", "master-ratio", "feature-size"), ("main-ratio +0.1", "main-ratio", "feature-size"),
-            ("master-count 1", "master-count", "feature-count"), ("main-count 1", "main-count", "feature-count"),
-            ("focus-master", "focus-master", "focus-feature"), ("focus-main", "focus-main", "focus-feature"),
-            ("focus master", "focus master", "focus feature"), ("focus main", "focus main", "focus feature"),
+            ("master-ratio +0.1", "master-ratio", "feature-size"),
+            ("master-count 1", "master-count", "feature-count"),
+            ("focus-master", "focus-master", "focus-feature"),
+            ("focus master", "focus master", "focus feature"),
         ]
         for (old, name, new) in renamed {
             #expect(error(old)?.contains("unknown command '\(name)' (renamed to '\(new)')") == true, "\(old): \(error(old) ?? "parsed")")
@@ -669,4 +663,40 @@ struct ConfigTests {
         #expect(resolved.weight == 2)
         #expect(resolved.ruleIndex == 0)
     }
+
+    @Test("a clamp violation names the key the table set, with per-key wording")
+    func clampNamesTheSetKey() {
+        let uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
+        let layoutMin = Self.messages("[layout]\nweight_share_min = 0.95\n")
+        #expect(layoutMin.count == 1 && layoutMin[0].hasPrefix("layout.weight_share_min: must not exceed weight_share_max ("))
+        let layoutMax = Self.messages("[layout]\nweight_share_max = 0.01\n")
+        #expect(layoutMax.count == 1 && layoutMax[0].hasPrefix("layout.weight_share_max: must not be below weight_share_min ("))
+        let spaceMin = Self.messages("[[space]]\nuuid = \"\(uuid)\"\nweight_share_min = 0.95\n")
+        #expect(spaceMin.count == 1 && spaceMin[0].hasPrefix("space[1].weight_share_min: must not exceed weight_share_max ("))
+        let spaceMax = Self.messages("[[space]]\nuuid = \"\(uuid)\"\nweight_share_max = 0.01\n")
+        #expect(spaceMax.count == 1 && spaceMax[0].hasPrefix("space[1].weight_share_max: must not be below weight_share_min ("))
+    }
+
+    @Test("feature_size nan and inf are rejected")
+    func featureSizeNonFinite() {
+        for v in ["nan", "inf", "-inf"] {
+            #expect(Self.messages("[layout]\nfeature_size = \(v)\n").count == 1, "\(v)")
+        }
+    }
+
+    @Test("weight_share bounds 0 and 1 are rejected")
+    func weightShareBounds() {
+        for key in ["weight_share_min", "weight_share_max"] {
+            for v in ["0", "1"] {
+                #expect(Self.messages("[layout]\n\(key) = \(v)\n") == ["layout.\(key): must be within (0, 1)"], "\(key) = \(v)")
+            }
+        }
+    }
+
+    @Test("a [[space]] ordinal of 0 is rejected")
+    func ordinalZero() {
+        let msgs = Self.messages("[[space]]\ndisplay = \"6D147BFB-7E3C-4CCD-9825-F1A5A059052D\"\nordinal = 0\n")
+        #expect(msgs == ["space[1].ordinal: must be ≥ 1"])
+    }
+
 }

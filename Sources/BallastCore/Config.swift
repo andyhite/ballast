@@ -350,7 +350,7 @@ extension Config {
         if let layout = top.table("layout") {
             let overrides = readLayout(layout, allowPlacement: false)
             config.layout = overrides
-            validateClamp(overrides.applied(to: LayoutSettings()), reader: layout)
+            validateClamp(overrides.applied(to: LayoutSettings()), overrides: overrides, reader: layout)
         }
 
         for (index, space) in top.tables("space").enumerated() {
@@ -394,8 +394,7 @@ extension Config {
             }
             let overrides = readLayout(space, allowPlacement: true)
             if overrides.weightShareMin != nil || overrides.weightShareMax != nil {
-                let clampKey = overrides.weightShareMin != nil ? "weight_share_min" : "weight_share_max"
-                validateClamp(overrides.applied(to: config.layout.applied(to: LayoutSettings())), reader: space, key: clampKey)
+                validateClamp(overrides.applied(to: config.layout.applied(to: LayoutSettings())), overrides: overrides, reader: space)
             }
             config.spaces[address] = overrides
         }
@@ -488,9 +487,14 @@ extension Config {
         return o
     }
 
-    private static func validateClamp(_ s: LayoutSettings, reader: Reader, key: String = "weight_share_min") {
-        if s.weightShareMin > s.weightShareMax {
-            reader.error(key, "must not exceed weight_share_max")
+    /// Reports on the key the table actually set (min wins if both are), so the
+    /// message never names a key the user didn't write.
+    private static func validateClamp(_ s: LayoutSettings, overrides: LayoutOverrides, reader: Reader) {
+        guard s.weightShareMin > s.weightShareMax else { return }
+        if overrides.weightShareMin != nil {
+            reader.error("weight_share_min", "must not exceed weight_share_max (\(s.weightShareMax))")
+        } else {
+            reader.error("weight_share_max", "must not be below weight_share_min (\(s.weightShareMin))")
         }
     }
 

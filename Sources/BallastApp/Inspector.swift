@@ -1,5 +1,5 @@
 import AppKit
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import BallastCore
 import SwiftUI
 
@@ -7,6 +7,7 @@ import SwiftUI
 /// focused window floats or tiles, its Space/display and a couple of
 /// one-click rule shortcuts. A non-activating panel so opening or reading it
 /// never steals focus from the inspected window.
+@MainActor
 enum InspectorWindow {
     private static var panel: NSPanel?
     private static var model: InspectorModel?
@@ -54,6 +55,7 @@ enum InspectorWindow {
 
 /// Stops the model's observers while the panel is closed; restarted by
 /// `InspectorWindow.show`.
+@MainActor
 private final class InspectorPanelDelegate: NSObject, NSWindowDelegate {
     private let model: InspectorModel
     init(model: InspectorModel) { self.model = model }
@@ -105,6 +107,7 @@ private enum SpaceResolution {
 /// Refreshes `snapshot` for the frontmost app's focused window, coalesced to
 /// at most one refresh per main run-loop turn, and only while observing
 /// (i.e. while the panel is visible).
+@MainActor
 final class InspectorModel: ObservableObject {
     @Published private(set) var snapshot = InspectorSnapshot.empty
     @Published var editError: String?
@@ -126,13 +129,13 @@ final class InspectorModel: ObservableObject {
         let center = NotificationCenter.default
         let workspace = NSWorkspace.shared.notificationCenter
         tokens.append((center, center.addObserver(forName: WindowManager.stateDidChange, object: manager, queue: .main) { [weak self] _ in
-            self?.scheduleRefresh()
+            MainActor.assumeIsolated { self?.scheduleRefresh() }
         }))
         tokens.append((center, center.addObserver(forName: WindowManager.configDidChange, object: manager, queue: .main) { [weak self] _ in
-            self?.scheduleRefresh()
+            MainActor.assumeIsolated { self?.scheduleRefresh() }
         }))
         tokens.append((workspace, workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.scheduleRefresh()
+            MainActor.assumeIsolated { self?.scheduleRefresh() }
         }))
     }
 
@@ -151,7 +154,11 @@ final class InspectorModel: ObservableObject {
         }
     }
 
+    private var generation = 0
+
     func refresh() {
+        generation += 1
+        let token = generation
         editError = nil
         var target = NSWorkspace.shared.frontmostApplication
         if target?.processIdentifier == getpid() {
@@ -177,7 +184,10 @@ final class InspectorModel: ObservableObject {
         // A hung target app only blocks its own worker, never the panel.
         manager.applier.perform(pid: pid) { [weak self] in
             guard let focused = AX.element(axApp, kAXFocusedWindowAttribute) else {
-                DispatchQueue.main.async { self?.mergeNoFocus(pid: pid, bundleID: bundleID, appName: appName) }
+                DispatchQueue.main.async {
+                    guard let self, self.generation == token else { return }
+                    self.mergeNoFocus(pid: pid, bundleID: bundleID, appName: appName)
+                }
                 return
             }
             let closeButton = AX.element(focused, "AXCloseButton")
@@ -197,7 +207,8 @@ final class InspectorModel: ObservableObject {
                 nativeFullScreen: AX.bool(focused, "AXFullScreen") == true,
                 frame: AX.frame(focused))
             DispatchQueue.main.async {
-                self?.merge(pid: pid, bundleID: bundleID, appName: appName, element: focused, raw: raw)
+                guard let self, self.generation == token else { return }
+                self.merge(pid: pid, bundleID: bundleID, appName: appName, element: focused, raw: raw)
             }
         }
     }
@@ -249,7 +260,7 @@ final class InspectorModel: ObservableObject {
 
         snapshot = InspectorSnapshot(
             sections: sections, emptyMessage: nil, windowTitle: raw.title,
-            bundleID: bundleID, appName: appName, canEditRule: manager.configError == nil && bundleID != nil)
+            bundleID: bundleID, appName: appName, canEditRule: manager.configStore.error == nil && bundleID != nil)
     }
 
     private func ballastRows(record: WindowRecord?, facts: WindowFacts, role: String?, nativeFullScreen: Bool) -> [InspectorSnapshot.Row] {
@@ -452,7 +463,7 @@ final class InspectorModel: ObservableObject {
 
     func floatTitled() {
         guard let bundleID = snapshot.bundleID, let title = snapshot.windowTitle, !title.isEmpty else { return }
-        let error = manager.editConfig { editor in
+        let error = manager.configStore.edit { editor in
             editor.appendRule([
                 ConfigField("app_id", .string(bundleID)),
                 ConfigField("title_substring", .string(title)),
@@ -465,7 +476,7 @@ final class InspectorModel: ObservableObject {
     func setAlwaysFloat(_ float: Bool) {
         guard let bundleID = snapshot.bundleID else { return }
         let existingIndex = appOnlyRuleIndex(bundleID: bundleID)
-        let error = manager.editConfig { editor -> Result<Void, ConfigEditError> in
+        let error = manager.configStore.edit { editor -> Result<Void, ConfigEditError> in
             if let existingIndex {
                 return editor.set("float", .bool(float), in: .rule(existingIndex))
             }

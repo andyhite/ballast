@@ -59,7 +59,7 @@ struct EngineTests {
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "com.ghostty.app"), space: 1)
 
         #expect(engine.arrangement(for: 1) == .fixed)
-        let state = engine.spacesForTesting[1]!
+        let state = engine.spaces[1]!
         #expect(state.liveOrder.first == 2)
         let layout = engine.layout(space: 1, area: Self.area)
         // Ghostty occupies the feature region: it should be the widest tile.
@@ -75,20 +75,20 @@ struct EngineTests {
             _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
             _ = engine.focus(id)
         }
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 3, 2])
+        #expect(engine.spaces[1]!.liveOrder == [1, 3, 2])
         _ = engine.focus(2) // focus history never moves the main
         _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 1)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 4, 3, 2])
+        #expect(engine.spaces[1]!.liveOrder == [1, 4, 3, 2])
         _ = engine.removeWindow(3)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 4, 2])
+        #expect(engine.spaces[1]!.liveOrder == [1, 4, 2])
         // The main closing hands its slot to the top of the stack.
         _ = engine.removeWindow(1)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2])
+        #expect(engine.spaces[1]!.liveOrder == [4, 2])
 
         // Two main windows: the newcomer lands right after both.
         _ = engine.perform(.featureCount(1), space: 1, areas: Self.areas)
         _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [4, 2, 5])
+        #expect(engine.spaces[1]!.liveOrder == [4, 2, 5])
     }
 
     @Test("a newcomer tops the stack after heavier stack windows; on a manual Space, right after the main")
@@ -100,15 +100,15 @@ struct EngineTests {
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "heavy"), space: 1)
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(), space: 1)
         _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 1)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 2, 4, 3])
+        #expect(engine.spaces[1]!.liveOrder == [1, 2, 4, 3])
 
         // Manual: window 3 is main; the newcomer goes right under it.
         let swapped = engine.swap(1, 3, on: 1)
         #expect(swapped)
-        let manual = engine.spacesForTesting[1]!.liveOrder
+        let manual = engine.spaces[1]!.liveOrder
         #expect(manual.first == 3)
         _ = engine.addWindow(5, pid: 5, facts: WindowFacts(), space: 1)
-        let order = engine.spacesForTesting[1]!.liveOrder
+        let order = engine.spaces[1]!.liveOrder
         #expect(order.first == 3)
         #expect(order[1] == 5)
     }
@@ -123,7 +123,7 @@ struct EngineTests {
         // Manually promote window 2 to main via swap.
         let swapped1 = engine.swap(1, 2, on: 1)
         #expect(swapped1)
-        #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
+        #expect(engine.spaces[1]!.liveOrder.first == 2)
 
         // Newcomer with a much higher weight joins; manual main must stick.
         var config = Self.baseConfig()
@@ -131,7 +131,7 @@ struct EngineTests {
         _ = engine.applyConfig(config)
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(bundleID: "heavy"), space: 1)
 
-        #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
+        #expect(engine.spaces[1]!.liveOrder.first == 2)
     }
 
     @Test("manual arrangement survives applyConfig with changed weights/mode")
@@ -141,18 +141,18 @@ struct EngineTests {
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(), space: 1)
         let swapped2 = engine.swap(1, 2, on: 1)
         #expect(swapped2)
-        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.spaces[1]!.manual)
 
         var newConfig = Self.baseConfig()
         newConfig.layout.arrange = .dwindle
         newConfig.rules = [AppRule(match: RuleMatch(appID: "x"), actions: RuleActions(weight: 50))]
         _ = engine.applyConfig(newConfig)
 
-        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.spaces[1]!.manual)
         // Weights changed: the ideal order now puts the heavy window 1 first...
-        #expect(engine.spacesForTesting[1]!.idealOrder.first == 1)
+        #expect(engine.spaces[1]!.idealOrder.first == 1)
         // ...but manual arrangement still wins for the live order.
-        #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
+        #expect(engine.spaces[1]!.liveOrder.first == 2)
     }
 
     @Test("perform(.reset) restores pure weight order and ideal BSP tree, keeps the arrangement")
@@ -166,15 +166,15 @@ struct EngineTests {
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "heavy"), space: 1)
         let swapped3 = engine.swap(1, 2, on: 1) // manual: window 1 now first despite lower weight
         #expect(swapped3)
-        #expect(engine.spacesForTesting[1]!.liveOrder.first == 1)
+        #expect(engine.spaces[1]!.liveOrder.first == 1)
 
         _ = engine.focus(1)
         _ = engine.perform(.resize(0.1), space: 1, areas: Self.areas) // pin a manual split ratio
-        #expect(engine.spacesForTesting[1]!.tree != BSPNode.ideal(engine.spacesForTesting[1]!.idealOrder, axis: nil))
+        #expect(engine.spaces[1]!.tree != BSPNode.ideal(engine.spaces[1]!.idealOrder, axis: nil))
         let outcome = engine.perform(.reset, space: 1, areas: Self.areas)
         #expect(outcome.dirty.contains(1))
 
-        let state = engine.spacesForTesting[1]!
+        let state = engine.spaces[1]!
         #expect(!state.manual)
         #expect(state.liveOrder.first == 2) // heavy weight wins again
         #expect(state.tree == BSPNode.ideal(state.idealOrder, axis: nil))
@@ -199,7 +199,7 @@ struct EngineTests {
         #expect(outcome.dirty == [1])
         #expect(outcome.action == .relayout(1))
         #expect(engine.layout(space: 1, area: Self.area) == clean)
-        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.spaces[1]!.manual)
         #expect(engine.windows[4]?.minSize == CGSize(width: 300, height: 300))
     }
     // MARK: - Config reload does not reset manual/monocle/mode (Rift bug)
@@ -218,8 +218,8 @@ struct EngineTests {
         newConfig.layout.arrange = .adaptive // config default changes
         _ = engine.applyConfig(newConfig)
 
-        #expect(engine.spacesForTesting[1]!.monocle)
-        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.spaces[1]!.monocle)
+        #expect(engine.spaces[1]!.manual)
         #expect(abs(engine.settings(for: 1).featureSize - 0.7) < 1e-9)
         #expect(engine.arrangement(for: 1) == .adaptive)
 
@@ -349,12 +349,12 @@ struct EngineTests {
         // new ordinal (1), which has no override -> default arrangement.
         #expect(dirty.contains(2))
         #expect(engine.arrangement(for: 2) == .fixed)
-        #expect(engine.spacesForTesting[2]!.manual)
-        #expect(engine.spacesForTesting[2]!.liveOrder.first == 2)
+        #expect(engine.spaces[2]!.manual)
+        #expect(engine.spaces[2]!.liveOrder.first == 2)
 
         // The deleted Space's (id 1) state is dropped, and its window no longer points at it.
-        #expect(engine.spacesForTesting[1] == nil)
-        #expect(engine.windowsForTesting[3]?.space == nil)
+        #expect(engine.spaces[1] == nil)
+        #expect(engine.windows[3]?.space == nil)
     }
 
     @Test("a uuid-addressed override stays with its Space when a sibling is deleted; a positional one does not")
@@ -443,7 +443,7 @@ struct EngineTests {
         for id in 1...3 as ClosedRange<WindowID> {
             _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
         }
-        let order = engine.spacesForTesting[1]!.liveOrder
+        let order = engine.spaces[1]!.liveOrder
         let feature = order[0], older = order[1], previous = order[2]
         _ = engine.focus(older)
         _ = engine.focus(previous)
@@ -495,7 +495,7 @@ struct EngineTests {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 3) // fullscreen space on display A
         #expect(!engine.isTiled(1))
-        #expect(engine.spacesForTesting[3] == nil || engine.spacesForTesting[3]!.members.isEmpty)
+        #expect(engine.spaces[3] == nil || engine.spaces[3]!.members.isEmpty)
     }
 
     @Test("manage = false windows are never tiled nor focus-tracked")
@@ -506,7 +506,7 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "unmanaged"), space: 1)
         #expect(!engine.isTiled(1))
         _ = engine.focus(1)
-        #expect(engine.spacesForTesting[1] == nil || !engine.spacesForTesting[1]!.focus.entries.contains(1))
+        #expect(engine.spaces[1] == nil || !engine.spaces[1]!.focus.entries.contains(1))
     }
 
     @Test("non-standard subrole floats by default unless a rule says float = false")
@@ -618,7 +618,7 @@ struct EngineTests {
         // Window 3 floats above the tiled Space and takes focus.
         _ = engine.focus(3)
         _ = engine.perform(.toggleFloat, space: 1, areas: Self.areas)
-        #expect(engine.windowsForTesting[3]?.isFloating == true)
+        #expect(engine.windows[3]?.isFloating == true)
 
         #expect(engine.layout(space: 1, area: Self.area).raise == nil)
 
@@ -638,7 +638,7 @@ struct EngineTests {
 
         let dirty = engine.adoptFrame(1, CGRect(x: 10, y: 10, width: 20, height: 20))
         #expect(dirty.isEmpty)
-        #expect(engine.spacesForTesting[1]?.frameOverrides[1] == nil)
+        #expect(engine.spaces[1]?.frameOverrides[1] == nil)
     }
 
     @Test("monocle never raises a tiled member over a focused unmanaged window on the same Space")
@@ -805,7 +805,7 @@ struct EngineTests {
         var engine = Self.gridEngine(count: 4)
         _ = engine.focus(2)
         #expect(engine.perform(.swap(.down), space: 1, areas: Self.areas).dirty == [1])
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 3, 2, 4])
+        #expect(engine.spaces[1]!.liveOrder == [1, 3, 2, 4])
         let layout = engine.layout(space: 1, area: Self.area)
         #expect(layout.covered[2] == nil)
         #expect(layout.raise == 2)
@@ -894,7 +894,7 @@ struct EngineTests {
         var engine = Self.gridEngine(count: 4)
         _ = engine.focus(3)
         _ = engine.addWindow(5, pid: 3, facts: WindowFacts(), space: 1)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1, 5, 2, 3, 4])
+        #expect(engine.spaces[1]!.liveOrder == [1, 5, 2, 3, 4])
         var layout = engine.layout(space: 1, area: Self.area)
         #expect(layout.covered[5] == nil && layout.covered[3] != nil)
         // Raising window 3 would hand it its app's focus back, over the new window.
@@ -1007,7 +1007,7 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
         _ = engine.perform(.featureSize(0), space: 1, areas: Self.areas)
-        #expect(engine.spacesForTesting[1]?.featureSizeOverride == 0.6)
+        #expect(engine.spaces[1]?.featureSizeOverride == 0.6)
     }
 
     @Test("shrinking an already-low but valid feature size never grows it")
@@ -1051,9 +1051,9 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
         _ = engine.perform(.featureSize(-1.0), space: 1, areas: Self.areas)
-        let first = engine.spacesForTesting[1]?.featureSizeOverride
+        let first = engine.spaces[1]?.featureSizeOverride
         _ = engine.perform(.featureSize(-1.0), space: 1, areas: Self.areas)
-        let second = engine.spacesForTesting[1]?.featureSizeOverride
+        let second = engine.spaces[1]?.featureSizeOverride
         #expect(first == second)
     }
 
@@ -1071,8 +1071,8 @@ struct EngineTests {
         let dirty = engine.setHidden(1, true)
         #expect(dirty.contains(1))
         #expect(!engine.isTiled(1))
-        #expect(engine.spacesForTesting[1]?.members.contains(1) == false)
-        #expect(engine.windowsForTesting[1]?.minimized == false)
+        #expect(engine.spaces[1]?.members.contains(1) == false)
+        #expect(engine.windows[1]?.minimized == false)
 
         // Removing the focused window must not fall back to the hidden one.
         let removal = engine.removeWindow(2)
@@ -1081,7 +1081,7 @@ struct EngineTests {
         // Unhiding restores tiling and does not touch minimized state.
         _ = engine.setMinimized(1, true)
         _ = engine.setHidden(1, false)
-        #expect(engine.windowsForTesting[1]?.minimized == true)
+        #expect(engine.windows[1]?.minimized == true)
         #expect(!engine.isTiled(1)) // still minimized
         _ = engine.setMinimized(1, false)
         #expect(engine.isTiled(1))
@@ -1095,10 +1095,10 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
 
         _ = engine.perform(.featureCount(Int.max), space: 1, areas: Self.areas)
-        #expect(engine.spacesForTesting[1]?.featureCountOverride == 16)
+        #expect(engine.spaces[1]?.featureCountOverride == 16)
 
         _ = engine.perform(.featureCount(Int.min), space: 1, areas: Self.areas)
-        #expect(engine.spacesForTesting[1]?.featureCountOverride == 1)
+        #expect(engine.spaces[1]?.featureCountOverride == 1)
     }
 
     // MARK: - SettingsChange (config write-back)
@@ -1111,12 +1111,12 @@ struct EngineTests {
 
         let sizeOutcome = engine.perform(.featureSize(0.1), space: 1, areas: Self.areas)
         #expect(sizeOutcome.settings?.space == 1)
-        #expect(sizeOutcome.settings?.featureSize == engine.spacesForTesting[1]?.featureSizeOverride)
+        #expect(sizeOutcome.settings?.featureSize == engine.spaces[1]?.featureSizeOverride)
         #expect(sizeOutcome.settings?.featureCount == nil)
 
         let resizeOutcome = engine.perform(.resize(0.05), space: 1, areas: Self.areas)
         #expect(resizeOutcome.settings?.space == 1)
-        #expect(resizeOutcome.settings?.featureSize == engine.spacesForTesting[1]?.featureSizeOverride)
+        #expect(resizeOutcome.settings?.featureSize == engine.spaces[1]?.featureSizeOverride)
 
         let balanceOutcome = engine.perform(.balance, space: 1, areas: Self.areas)
         #expect(balanceOutcome.settings == SettingsChange(space: 1, featureSize: 0.5))
@@ -1143,7 +1143,7 @@ struct EngineTests {
 
         let outcome = engine.perform(.featureCount(1), space: 1, areas: Self.areas)
         #expect(outcome.settings?.space == 1)
-        #expect(outcome.settings?.featureCount == engine.spacesForTesting[1]?.featureCountOverride)
+        #expect(outcome.settings?.featureCount == engine.spaces[1]?.featureCountOverride)
         #expect(outcome.settings?.featureSize == nil)
     }
 
@@ -1170,8 +1170,8 @@ struct EngineTests {
         config.layout.arrange = .dwindle
         var engine = Self.makeEngine(config: config)
         for id: WindowID in 1...3 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
-        let feature = engine.spacesForTesting[1]!.liveOrder[0]
-        let other = engine.spacesForTesting[1]!.liveOrder[1]
+        let feature = engine.spaces[1]!.liveOrder[0]
+        let other = engine.spaces[1]!.liveOrder[1]
 
         _ = engine.focus(feature)
         #expect(engine.perform(.resize(0.05), space: 1, areas: Self.areas).settings?.featureSize != nil)
@@ -1179,7 +1179,7 @@ struct EngineTests {
         let outcome = engine.perform(.resize(0.05), space: 1, areas: Self.areas)
         #expect(outcome.settings == nil)
         #expect(outcome.message == nil)
-        #expect(engine.spacesForTesting[1]!.manual)
+        #expect(engine.spaces[1]!.manual)
     }
 
     @Test("clearSettingOverrides clears only the requested fields")
@@ -1188,15 +1188,15 @@ struct EngineTests {
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
         _ = engine.perform(.featureSize(0.1), space: 1, areas: Self.areas)
         _ = engine.perform(.featureCount(1), space: 1, areas: Self.areas)
-        #expect(engine.spacesForTesting[1]?.featureSizeOverride != nil)
-        #expect(engine.spacesForTesting[1]?.featureCountOverride != nil)
+        #expect(engine.spaces[1]?.featureSizeOverride != nil)
+        #expect(engine.spaces[1]?.featureCountOverride != nil)
 
         engine.clearSettingOverrides(1, featureSize: true, featureCount: false)
-        #expect(engine.spacesForTesting[1]?.featureSizeOverride == nil)
-        #expect(engine.spacesForTesting[1]?.featureCountOverride != nil)
+        #expect(engine.spaces[1]?.featureSizeOverride == nil)
+        #expect(engine.spaces[1]?.featureCountOverride != nil)
 
         engine.clearSettingOverrides(1, featureSize: false, featureCount: true)
-        #expect(engine.spacesForTesting[1]?.featureCountOverride == nil)
+        #expect(engine.spaces[1]?.featureCountOverride == nil)
 
         // Unknown Space: no-op, does not trap.
         engine.clearSettingOverrides(999, featureSize: true, featureCount: true)
@@ -1213,12 +1213,12 @@ struct EngineTests {
         _ = engine.addWindow(2, pid: 2, facts: WindowFacts(bundleID: "term"), space: 1)
         _ = engine.addWindow(3, pid: 3, facts: WindowFacts(bundleID: "mail"), space: 1)
         let before = engine.layout(space: 1, area: Self.area).frames[2]!
-        #expect(engine.spacesForTesting[1]!.liveOrder.first == 2)
+        #expect(engine.spaces[1]!.liveOrder.first == 2)
 
         // A new tab of window 2's group is tracked, then window 2 drops out of the app's window list.
         _ = engine.addWindow(4, pid: 2, facts: WindowFacts(bundleID: "term"), space: 1)
         _ = engine.swapTab(hiding: 2, showing: 4)
-        var order = engine.spacesForTesting[1]!.liveOrder
+        var order = engine.spaces[1]!.liveOrder
         #expect(order.first == 4)
         #expect(Set(order) == [1, 3, 4])
         #expect(engine.layout(space: 1, area: Self.area).frames[4] == before)
@@ -1226,7 +1226,7 @@ struct EngineTests {
 
         // Back to the first tab: no window is added or dropped, only the tile changes hands.
         _ = engine.swapTab(hiding: 4, showing: 2)
-        order = engine.spacesForTesting[1]!.liveOrder
+        order = engine.spaces[1]!.liveOrder
         #expect(order.first == 2)
         #expect(Set(order) == [1, 2, 3])
         #expect(engine.layout(space: 1, area: Self.area).frames[2] == before)
@@ -1237,14 +1237,14 @@ struct EngineTests {
         var engine = Self.makeEngine()
         for id: WindowID in 1...4 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
         _ = engine.swap(1, 3, on: 1) // manual: order now starts 3, ...
-        let order = engine.spacesForTesting[1]!.liveOrder
+        let order = engine.spaces[1]!.liveOrder
         let slot = order.firstIndex(of: 2)!
         let frame = engine.layout(space: 1, area: Self.area).frames[2]!
 
         _ = engine.addWindow(5, pid: 2, facts: WindowFacts(), space: 1)
         _ = engine.swapTab(hiding: 2, showing: 5)
 
-        let after = engine.spacesForTesting[1]!.liveOrder
+        let after = engine.spaces[1]!.liveOrder
         #expect(after.firstIndex(of: 5) == slot)
         #expect(!after.contains(2))
         #expect(after.filter { $0 != 5 } == order.filter { $0 != 2 })
@@ -1259,11 +1259,11 @@ struct EngineTests {
         _ = engine.focus(2)
 
         _ = engine.setBackgroundTab(2, true)
-        #expect(engine.spacesForTesting[1]!.liveOrder == [1])
+        #expect(engine.spaces[1]!.liveOrder == [1])
         #expect(engine.layout(space: 1, area: Self.area).frames[2] == nil)
 
         _ = engine.setBackgroundTab(2, false)
-        #expect(Set(engine.spacesForTesting[1]!.liveOrder) == [1, 2])
+        #expect(Set(engine.spaces[1]!.liveOrder) == [1, 2])
     }
 
     // MARK: - Effective settings
@@ -1361,9 +1361,139 @@ struct EngineTests {
     }
 }
 
-extension Engine {
-    /// Test-only accessor for the private(set) `spaces` dictionary (already public API).
-    var spacesForTesting: [SpaceID: SpaceState] { spaces }
-    /// Test-only accessor for the private(set) `windows` dictionary (already public API).
-    var windowsForTesting: [WindowID: WindowRecord] { windows }
+@Suite("Engine review regressions")
+struct EngineReviewTests {
+    typealias E = EngineTests
+
+    static func area(_ engine: Engine, _ id: WindowID) -> Double {
+        let f = engine.layout(space: 1, area: E.area).frames[id] ?? .zero
+        return Double(f.width * f.height)
+    }
+
+    static func bspEngine(_ arrange: Arrangement, windows count: Int) -> Engine {
+        var config = E.baseConfig()
+        config.layout.arrange = arrange
+        config.layout.feature = .left
+        var engine = E.makeEngine(config: config)
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.focus(1)
+        for id in 2...WindowID(count) { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        return engine
+    }
+
+    @Test("BSP grow with a feature never shrinks the tile and never pins manual silently", arguments: [Arrangement.dwindle, .balanced])
+    func resizeWithFeature(arrange: Arrangement) {
+        for count in [3, 4] {
+            let base = Self.bspEngine(arrange, windows: count)
+            let feature = base.spaces[1]!.liveOrder[0]
+            for id in base.spaces[1]!.members where id != feature {
+                var engine = base
+                _ = engine.focus(id)
+                let before = Self.area(engine, id)
+                let out = engine.perform(.resize(0.1), space: 1, areas: E.areas)
+                if out.message != nil {
+                    #expect(!engine.spaces[1]!.manual)
+                } else {
+                    #expect(engine.spaces[1]!.manual)
+                    #expect(Self.area(engine, id) > before)
+                }
+            }
+        }
+    }
+
+    @Test("reset keeps the feature size and count overrides")
+    func resetKeepsFeatureOverrides() {
+        var engine = E.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.perform(.featureSize(0.1), space: 1, areas: E.areas)
+        _ = engine.perform(.featureCount(1), space: 1, areas: E.areas)
+        _ = engine.perform(.reset, space: 1, areas: E.areas)
+        #expect(engine.spaces[1]?.featureSizeOverride != nil)
+        #expect(engine.spaces[1]?.featureCountOverride != nil)
+    }
+
+    @Test("a native tab swap of a deck non-holder keeps the manual BSP tree and ratios")
+    func swapTabKeepsTreeForDeckedWindow() {
+        var config = E.baseConfig()
+        config.layout.arrange = .dwindle
+        config.layout.feature = .off
+        var engine = E.makeEngine(config: config)
+        for id: WindowID in 1...3 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        _ = engine.focus(1)
+        _ = engine.perform(.resize(0.1), space: 1, areas: E.areas)
+        _ = engine.focus(3)
+        for d in Direction.allCases where engine.spaces[1]!.decks.isEmpty {
+            _ = engine.perform(.deck(d), space: 1, areas: E.areas)
+        }
+        guard let (holder, list) = engine.spaces[1]!.decks.first, let joiner = list.first(where: { $0 != holder }) else {
+            Issue.record("no deck formed")
+            return
+        }
+        _ = engine.addWindow(4, pid: 4, facts: WindowFacts(), space: 1)
+        _ = engine.setBackgroundTab(4, true)
+        let tree = engine.spaces[1]!.tree
+        _ = engine.swapTab(hiding: joiner, showing: 4)
+        #expect(engine.spaces[1]!.tree == tree)
+        #expect(engine.spaces[1]!.decks.values.contains { $0.contains(4) && !$0.contains(joiner) })
+    }
+
+    @Test("feature size adjustments snap to 4 decimals and stay strictly inside the bounds")
+    func featureSizeSnaps() {
+        var engine = E.makeEngine()
+        _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
+        _ = engine.perform(.featureSize(0.05), space: 1, areas: E.areas)
+        _ = engine.perform(.featureSize(0.05), space: 1, areas: E.areas)
+        #expect(engine.spaces[1]?.featureSizeOverride == 0.7)
+        _ = engine.perform(.featureSize(5), space: 1, areas: E.areas)
+        #expect(engine.spaces[1]?.featureSizeOverride == 0.95.nextDown)
+        _ = engine.perform(.featureSize(-5), space: 1, areas: E.areas)
+        #expect(engine.spaces[1]?.featureSizeOverride == 0.05.nextUp)
+    }
+
+    @Test("balance leaves ratios alone on splits whose one side is entirely featured")
+    func balanceKeepsHiddenSideRatios() {
+        let tree = BSPNode.split(BSPSplit(axis: nil, first: .leaf(1), second: .leaf(2)))
+        guard case .split(let s) = tree.balanced(hiding: [1]) else { Issue.record("not a split"); return }
+        #expect(s.ratio == nil)
+    }
+
+    @Test("Cascade.frame: first free slot, tolerance, wrap, and an oversize outer gap")
+    func cascadeFrame() {
+        let area = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let size = CGSize(width: 400, height: 300)
+        #expect(Cascade.frame(size: size, in: area, outerGap: 10, occupied: []).origin == CGPoint(x: 10, y: 10))
+        #expect(Cascade.frame(size: size, in: area, outerGap: 10, occupied: [CGPoint(x: 11, y: 10.5)]).origin
+                == CGPoint(x: 38, y: 38))
+        let all = (0...40).map { CGPoint(x: 10 + 28 * CGFloat($0), y: 10 + 28 * CGFloat($0)) }
+        #expect(Cascade.frame(size: size, in: area, outerGap: 10, occupied: all).origin == CGPoint(x: 10, y: 10))
+        let tight = Cascade.frame(size: size, in: CGRect(x: 0, y: 0, width: 100, height: 100), outerGap: 80, occupied: [])
+        #expect(tight.origin.x.isFinite && tight.origin.y.isFinite && tight.width <= 100 && tight.height <= 100)
+    }
+
+    @Test("initialFrame: center, mouse, rect and size-only placement, clamped into the area")
+    func initialFrames() {
+        func engine(_ actions: RuleActions) -> Engine {
+            var config = E.baseConfig()
+            var a = actions
+            a.float = true
+            config.rules = [AppRule(match: RuleMatch(appID: "x"), actions: a)]
+            var e = E.makeEngine(config: config)
+            _ = e.addWindow(1, pid: 1, facts: WindowFacts(bundleID: "x"), space: 1)
+            return e
+        }
+        let half = CGSize(width: 0.5, height: 0.5)
+        let current = CGRect(x: 900, y: 700, width: 10, height: 10)
+        let area = E.area
+        #expect(engine(RuleActions(placement: .center, size: half)).initialFrame(for: 1, current: current, area: area, mouse: .zero)
+                == CGRect(x: 250, y: 200, width: 500, height: 400))
+        #expect(engine(RuleActions(placement: .mouse, size: half))
+                    .initialFrame(for: 1, current: current, area: area, mouse: CGPoint(x: 990, y: 790))
+                == CGRect(x: 500, y: 400, width: 500, height: 400))
+        #expect(engine(RuleActions(placement: .rect(x: 0.1, y: 0.2, w: 0.5, h: 0.5)))
+                    .initialFrame(for: 1, current: current, area: area, mouse: .zero)
+                == CGRect(x: 100, y: 160, width: 500, height: 400))
+        #expect(engine(RuleActions(size: half)).initialFrame(for: 1, current: current, area: area, mouse: .zero)
+                == CGRect(x: 500, y: 400, width: 500, height: 400))
+        #expect(engine(RuleActions()).initialFrame(for: 1, current: current, area: area, mouse: .zero) == nil)
+    }
 }

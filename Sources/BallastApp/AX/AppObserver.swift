@@ -1,14 +1,10 @@
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import BallastCore
-
-protocol AppObserverDelegate: AnyObject {
-    /// Main thread. `element` is the element the notification is about.
-    func appObserver(_ observer: AppObserver, received notification: String, element: AXUIElement)
-}
 
 /// Subscribes to Accessibility notifications of one process. Callbacks arrive
 /// on the main run loop. No polling: everything is push-based.
-final class AppObserver {
+// @unchecked Sendable: lets are immutable; `observer`/`onNotification` are only touched on the main thread.
+final class AppObserver: @unchecked Sendable {
     static let appNotifications = [
         kAXWindowCreatedNotification, kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
     ]
@@ -25,7 +21,9 @@ final class AppObserver {
     let name: String?
     private let notifications: [String]
     private var observer: AXObserver?
-    weak var delegate: AppObserverDelegate?
+    /// Main thread. `element` is the element the notification is about.
+    /// Capture the owner weakly: the owner holds this observer.
+    var onNotification: (@MainActor (AppObserver, String, AXUIElement) -> Void)?
 
     init(pid: pid_t, bundleID: String?, name: String?, notifications: [String] = AppObserver.appNotifications) {
         self.pid = pid
@@ -38,40 +36,66 @@ final class AppObserver {
 
     deinit { stop() }
 
-    /// Creates the observer and subscribes app-level notifications. Returns
-    /// false when the process is not accessible yet (still launching) so the
-    /// caller can retry a bounded number of times.
+    /// Creates the observer and subscribes app-level notifications, then
+    /// installs it. Main thread; blocks on AX, so only for the Dock. Apps
+    /// use `subscribe()` on their worker plus `install(_:)`.
     func start() -> Bool {
         guard observer == nil else { return true }
+        guard let created = subscribe() else { return false }
+        install(created)
+        return true
+    }
+
+    /// Creates an observer and subscribes app-level notifications. Any
+    /// thread (AX round trips, up to the messaging timeout each). Returns nil
+    /// when the process is not accessible yet (still launching), so the
+    /// caller can retry a bounded number of times. Stops at the first
+    /// `.cannotComplete`: an unresponsive process would time out on every
+    /// remaining call too.
+    func subscribe() -> AXObserver? {
         var created: AXObserver?
-        guard AXObserverCreate(pid, axObserverCallback, &created) == .success, let created else { return false }
+        guard AXObserverCreate(pid, axObserverCallback, &created) == .success, let created else { return nil }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         var subscribed = 0
         for name in notifications {
             let result = AXObserverAddNotification(created, app, name as CFString, refcon)
+            if result == .cannotComplete { return nil }
             if result == .success || result == .notificationAlreadyRegistered { subscribed += 1 }
         }
-        guard subscribed > 0 else { return false }
+        return subscribed > 0 ? created : nil
+    }
+
+    /// Main thread: starts delivering `created`'s notifications on the main run loop.
+    func install(_ created: AXObserver) {
+        guard observer == nil else { return }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(created), .commonModes)
         observer = created
-        return true
     }
+
+    /// The installed observer; read on main, hand to workers for `register(window:in:)`.
+    var installed: AXObserver? { observer }
 
     /// Subscribes per-window notifications. Returns false when the essential
     /// destroyed notification could not be registered (the window would
     /// otherwise become a phantom tile).
     func observe(window: AXUIElement) -> Bool {
         guard let observer else { return false }
+        return register(window: window, in: observer)
+    }
+
+    /// Any thread. The destroyed notification goes first and a failure
+    /// there returns immediately; a process that cannot complete it would
+    /// time out on each of the other five too.
+    func register(window: AXUIElement, in observer: AXObserver) -> Bool {
         AXUIElementSetMessagingTimeout(window, AX.messagingTimeout)
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-        var destroyedRegistered = false
         for name in Self.windowNotifications {
             let result = AXObserverAddNotification(observer, window, name as CFString, refcon)
-            if name == kAXUIElementDestroyedNotification {
-                destroyedRegistered = result == .success || result == .notificationAlreadyRegistered
-            }
+            let ok = result == .success || result == .notificationAlreadyRegistered
+            if name == kAXUIElementDestroyedNotification, !ok { return false }
+            if result == .cannotComplete { break }
         }
-        return destroyedRegistered
+        return true
     }
 
     func unobserve(window: AXUIElement) {
@@ -91,7 +115,8 @@ final class AppObserver {
     var focusedWindow: AXUIElement? { AX.element(app, kAXFocusedWindowAttribute) }
 
     fileprivate func deliver(_ notification: String, element: AXUIElement) {
-        delegate?.appObserver(self, received: notification, element: element)
+        // Callback runs on the main run loop (see `install`).
+        MainActor.assumeIsolated { onNotification?(self, notification, element) }
     }
 }
 

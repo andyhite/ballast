@@ -1,4 +1,4 @@
-import ApplicationServices
+@preconcurrency import ApplicationServices
 import BallastCore
 import Foundation
 
@@ -7,7 +7,8 @@ import Foundation
 /// plain frame requests; never touches engine state; reports results back to
 /// the main thread.
 final class FrameApplier {
-    struct Request {
+    // @unchecked Sendable: AXUIElement is a thread-safe CF object; everything else is a value.
+    struct Request: @unchecked Sendable {
         let window: WindowID
         let pid: pid_t
         let element: AXUIElement
@@ -18,14 +19,17 @@ final class FrameApplier {
 
     /// Outcome of one request, delivered on the main thread.
     struct Outcome {
-        /// Frame read back after applying; nil when AX could not be read.
+        /// Frame read back after applying; nil when the request was
+        /// superseded (`completed == false`) or AX could not read the
+        /// window (`completed == true`).
         let actual: CGRect?
-        /// False when a newer request superseded this one mid-way: `actual`
-        /// is then an intermediate frame and says nothing about constraints.
+        /// False when a newer request superseded this one, before or
+        /// mid-animation: it says nothing about the window, its constraints
+        /// or whether it can be read. True when the request ran to its end.
         let completed: Bool
     }
 
-    typealias Completion = (WindowID, CGRect, Outcome) -> Void
+    typealias Completion = @MainActor (WindowID, CGRect, Outcome) -> Void
 
     private var queues: [pid_t: DispatchQueue] = [:]
     private let generations = Generations()
@@ -37,18 +41,16 @@ final class FrameApplier {
         let q = queue(for: request.pid)
         q.async {
             Self.run(request, generation: generation, generations: generations, queue: q) { result in
-                DispatchQueue.main.async { completion(request.window, request.target, result) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { completion(request.window, request.target, result) } }
             }
         }
     }
 
     /// Runs arbitrary AX work (focus, raise, attribute writes) on the app's worker.
-    func perform(pid: pid_t, _ work: @escaping () -> Void) {
+    func perform(pid: pid_t, _ work: @escaping @Sendable () -> Void) {
         queue(for: pid).async(execute: work)
     }
 
-    /// Stops any in-flight animation for `window` at its next frame.
-    func cancel(_ window: WindowID) { _ = generations.next(window) }
 
     func forget(pid: pid_t) { queues[pid] = nil }
 
@@ -70,10 +72,10 @@ final class FrameApplier {
     /// the window can't be read.
     private static func run(
         _ r: Request, generation: UInt64, generations: Generations, queue: DispatchQueue,
-        completion: @escaping (Outcome) -> Void
+        completion: @escaping @Sendable (Outcome) -> Void
     ) {
         // Checked before any AX read: a request already superseded while it
-        // waited on the app's serial queue (by a newer apply, `cancel`, or
+        // waited on the app's serial queue (by a newer apply or
         // `forget(window:)` on untrack) must not pay an AX round-trip — up
         // to the 1s messaging timeout on an unresponsive app — just to have
         // its result discarded.
@@ -81,7 +83,7 @@ final class FrameApplier {
             completion(Outcome(actual: nil, completed: false))
             return
         }
-        guard let start = AX.frame(r.element) else { completion(Outcome(actual: nil, completed: false)); return }
+        guard let start = AX.frame(r.element) else { completion(Outcome(actual: nil, completed: true)); return }
         if start.approximatelyEquals(r.target, tolerance: 0.5) {
             completion(Outcome(actual: start, completed: true))
             return
@@ -107,7 +109,7 @@ final class FrameApplier {
         _ r: Request, animation anim: (duration: Double, easing: Easing, frameInterval: Double),
         generation: UInt64, generations: Generations, queue: DispatchQueue,
         begin: UInt64, total: Double, start: CGRect, current: CGRect, frameIndex: Double,
-        completion: @escaping (Outcome) -> Void
+        completion: @escaping @Sendable (Outcome) -> Void
     ) {
         let deadlineNanos = begin + UInt64(min(frameIndex * anim.frameInterval * 1_000_000_000, total))
         let now = DispatchTime.now().uptimeNanoseconds
@@ -142,7 +144,7 @@ final class FrameApplier {
     /// Applies the final frame, corrects for a WindowServer position nudge on growth,
     /// and reads back the result. Shared by the no-animation path and the animation's
     /// last frame.
-    private static func finish(_ r: Request, current: CGRect, completion: @escaping (Outcome) -> Void) {
+    private static func finish(_ r: Request, current: CGRect, completion: @escaping @Sendable (Outcome) -> Void) {
         set(r.element, from: current, to: r.target)
         var actual = AX.frame(r.element)
         // Growing windows can be pushed back on-screen by the WindowServer
@@ -154,16 +156,33 @@ final class FrameApplier {
         completion(Outcome(actual: actual, completed: true))
     }
 
+    /// A single AX attribute write.
+    enum Write: Equatable {
+        case size(CGSize)
+        case position(CGPoint)
+    }
+
     /// Shrinks each axis to min(old, new) first, moves, then grows to the
     /// target size. Pure-shrink and pure-grow transitions collapse to their
     /// original single-extra-write sequence. Either way the window never
     /// extends past its old frame or its destination mid-transition (so it
     /// can't clip off the display or spill onto a neighbouring one).
-    private static func set(_ element: AXUIElement, from: CGRect, to: CGRect) {
+    static func writes(from: CGRect, to: CGRect) -> [Write] {
         let interim = CGSize(width: min(from.width, to.width), height: min(from.height, to.height))
-        if !interim.equalTo(from.size) { AX.setSize(element, interim) }
-        if !from.origin.equalTo(to.origin) { AX.setPosition(element, to.origin) }
-        if !interim.equalTo(to.size) { AX.setSize(element, to.size) }
+        var writes: [Write] = []
+        if !interim.equalTo(from.size) { writes.append(.size(interim)) }
+        if !from.origin.equalTo(to.origin) { writes.append(.position(to.origin)) }
+        if !interim.equalTo(to.size) { writes.append(.size(to.size)) }
+        return writes
+    }
+
+    private static func set(_ element: AXUIElement, from: CGRect, to: CGRect) {
+        for write in writes(from: from, to: to) {
+            switch write {
+            case .size(let size): AX.setSize(element, size)
+            case .position(let origin): AX.setPosition(element, origin)
+            }
+        }
     }
 }
 
@@ -174,7 +193,7 @@ final class FrameApplier {
 /// carrying generation 1 would pass `isCurrent` again. With a global
 /// counter, removing an id makes every outstanding generation for it stale
 /// forever, and any later generation is strictly larger than every old one.
-private final class Generations: @unchecked Sendable {
+final class Generations: @unchecked Sendable {
     private let lock = NSLock()
     private var values: [WindowID: UInt64] = [:]
     private var counter: UInt64 = 0

@@ -4,7 +4,7 @@
 # docs/SMOKE_TEST.md in the config. Steps that need a human (Mission Control
 # drag, Reduce Motion toggle, eyeballing animation) pause with a prompt.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit
 
 BALLAST=${BALLAST:-.build/debug/ballast}
 CONFIG=""

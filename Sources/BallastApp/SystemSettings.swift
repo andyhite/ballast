@@ -5,11 +5,11 @@ import Foundation
 /// Read-only: nothing in this file writes to any preference domain.
 public enum SystemSettings {
 
-    private static let spacesDomain = "com.apple.spaces" as CFString
-    private static let dockDomain = "com.apple.dock" as CFString
-    private static let windowManagerDomain = "com.apple.WindowManager" as CFString
-    private static let currentUser = kCFPreferencesCurrentUser
-    private static let anyHost = kCFPreferencesAnyHost
+    nonisolated(unsafe) private static let spacesDomain = "com.apple.spaces" as CFString
+    nonisolated(unsafe) private static let dockDomain = "com.apple.dock" as CFString
+    nonisolated(unsafe) private static let windowManagerDomain = "com.apple.WindowManager" as CFString
+    nonisolated(unsafe) private static let currentUser = kCFPreferencesCurrentUser
+    nonisolated(unsafe) private static let anyHost = kCFPreferencesAnyHost
 
     /// Forces a fresh read of `domain` before copying a value out of it.
     private static func freshBool(_ key: String, domain: CFString, default defaultValue: Bool) -> Bool {

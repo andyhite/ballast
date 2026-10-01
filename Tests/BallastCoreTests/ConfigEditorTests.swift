@@ -71,24 +71,16 @@ struct ConfigEditorTests {
 
     @Test("replace collapses a multi-line array value to one line")
     func replaceMultiLineValue() {
-        let text = """
-        [layout]
-        arrange = "dwindle"
-        # trailing marker
-        """
-        // Simulate a multi-line inline table under a custom section by using .settings/.animation not
-        // applicable; instead verify direct multi-line scan via a synthetic bindings-like key using layout gaps.
         var editor = ConfigEditor(text: """
         [layout]
-        gaps = {
-            inner = 8,
-            outer = 8
-        }
+        tags = [
+            1,
+            2
+        ]
         arrange = "dwindle"
         """)
-        expectSuccess(editor.set("gaps", .inlineTable([ConfigField("inner", .integer(4)), ConfigField("outer", .integer(4))]), in: .layout))
-        #expect(editor.text == "[layout]\ngaps = { inner = 4, outer = 4 }\narrange = \"dwindle\"\n")
-        _ = text
+        expectSuccess(editor.set("tags", .integer(4), in: .layout))
+        #expect(editor.text == "[layout]\ntags = 4\narrange = \"dwindle\"\n")
     }
 
     // MARK: - Insert
@@ -186,20 +178,6 @@ struct ConfigEditorTests {
         #expect(editor.text == "[layout]\nfeature_count = 1\n")
     }
 
-    // MARK: - Read value
-
-    @Test("value reads back an existing scalar")
-    func valueReadsScalar() {
-        let editor = ConfigEditor(text: "[layout]\nfeature_size = 0.6\n")
-        #expect(editor.value("feature_size", in: .layout) == .float(0.6))
-    }
-
-    @Test("value returns nil for a missing key")
-    func valueMissingKey() {
-        let editor = ConfigEditor(text: "[layout]\narrange = \"dwindle\"\n")
-        #expect(editor.value("feature_size", in: .layout) == nil)
-    }
-
     // MARK: - Spaces
 
     @Test("set on a missing space creates its [[space]] block after the last one")
@@ -218,14 +196,15 @@ struct ConfigEditorTests {
     @Test("removeSpace deletes the whole block and space reverts to layout defaults")
     func removeSpaceBlock() {
         var editor = ConfigEditor(text: Self.example)
-        let key = SpaceAddress.position(display: "640D0BA8-EB6C-4108-AA7B-E641F7C1826E", ordinal: 1)
-        expectSuccess(editor.removeSpace(key))
-        switch editor.validated() {
-        case .success(let config):
-            #expect(config.spaces[key] == nil)
-        case .failure(let e):
-            Issue.record("expected success, got \(e)")
+        let key = SpaceAddress.uuid("06577405-6B31-4676-9725-A2F69D4232F4")
+        func hasKey(_ text: String) -> Bool? {
+            if case .success(let config) = Config.parse(text) { return config.spaces[key] != nil }
+            return nil
         }
+        #expect(hasKey(editor.text) == true)
+        expectSuccess(editor.removeSpace(key))
+        #expect(editor.text != Self.example)
+        #expect(hasKey(editor.text) == false)
     }
 
     @Test("removeSpace on an absent space is a no-op")
@@ -667,6 +646,147 @@ struct ConfigEditorTests {
         expectSuccess(editor.set("duration_ms", nil, in: .animation))
         #expect(editor.text == text)
         #expect(!editor.text.contains("[settings.animation]"))
+    }
+
+    // MARK: - CRLF
+
+    static let crlfExample = example.replacingOccurrences(of: "\n", with: "\r\n")
+
+    /// True when every line break in `s` is CRLF.
+    static func isPureCRLF(_ s: String) -> Bool {
+        !s.replacingOccurrences(of: "\r\n", with: "").contains("\n")
+    }
+
+    @Test("removeSpace on a CRLF document finds the last [[space]] and keeps CRLF endings")
+    func crlfRemoveSpace() {
+        let key = SpaceAddress.position(display: "6D147BFB-7E3C-4CCD-9825-F1A5A059052D", ordinal: 5)
+        var lf = ConfigEditor(text: Self.example)
+        var crlf = ConfigEditor(text: Self.crlfExample)
+        expectSuccess(lf.removeSpace(key))
+        expectSuccess(crlf.removeSpace(key))
+        #expect(crlf.text != Self.crlfExample)
+        #expect(Self.isPureCRLF(crlf.text))
+        #expect(crlf.text == lf.text.replacingOccurrences(of: "\n", with: "\r\n"))
+        if case .success(let config) = crlf.validated() { #expect(config.spaces[key] == nil) }
+        else { Issue.record("CRLF result no longer validates") }
+    }
+
+    @Test("set on an existing [[space]] in a CRLF document edits it instead of appending a duplicate")
+    func crlfSetExistingSpace() {
+        let key = SpaceAddress.position(display: "6D147BFB-7E3C-4CCD-9825-F1A5A059052D", ordinal: 5)
+        var editor = ConfigEditor(text: Self.crlfExample)
+        expectSuccess(editor.set("arrange", .string("dwindle"), in: .space(key)))
+        #expect(Self.isPureCRLF(editor.text))
+        #expect(editor.text.components(separatedBy: "[[space]]").count == Self.example.components(separatedBy: "[[space]]").count)
+        switch editor.validated() {
+        case .success(let config): #expect(config.spaces[key]?.arrange == .dwindle)
+        case .failure(let e): Issue.record("expected success, got \(e)")
+        }
+    }
+
+    @Test("a no-op set on a CRLF document is byte-identical")
+    func crlfNoOp() {
+        var editor = ConfigEditor(text: Self.crlfExample)
+        expectSuccess(editor.set("feature_size", .float(0.6), in: .layout))
+        #expect(editor.text == Self.crlfExample)
+    }
+
+    // MARK: - Insertion next to comments
+
+    @Test("a new [[space]] goes above the comments attached to [bindings], and removing it keeps them")
+    func createSpaceAboveBindingsComments() {
+        let text = "# top\n\n# About bindings\n[bindings]\n\"alt+h\" = \"focus left\"\n"
+        let uuid = SpaceAddress.uuid("06577405-6B31-4676-9725-A2F69D4232F4")
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("arrange", .string("float"), in: .space(uuid)))
+        #expect(editor.text.contains("\n# About bindings\n[bindings]"))
+        #expect(editor.text.range(of: "[[space]]")!.lowerBound < editor.text.range(of: "# About bindings")!.lowerBound)
+        expectSuccess(editor.removeSpace(uuid))
+        #expect(editor.text == text)
+    }
+
+    @Test("a first appended rule goes above the comments attached to [bindings], and removing it keeps them")
+    func appendRuleAboveBindingsComments() {
+        let text = "# About bindings\n[bindings]\n\"alt+h\" = \"focus left\"\n"
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.appendRule([ConfigField("app_id", .string("com.a")), ConfigField("float", .bool(true))]))
+        #expect(editor.text.hasPrefix("[[rule]]\n"))
+        #expect(editor.text.contains("\n# About bindings\n[bindings]"))
+        expectSuccess(editor.removeRule(at: 0))
+        #expect(editor.text == text)
+    }
+
+    @Test("a new top-of-file section goes after the file's header comment")
+    func firstSectionKeepsHeaderComment() {
+        var editor = ConfigEditor(text: "# Ballast config\n# more\n\n[layout]\narrange = \"dwindle\"\n")
+        expectSuccess(editor.set("focus_follows_mouse", .bool(true), in: .settings))
+        #expect(editor.text == "# Ballast config\n# more\n\n[settings]\nfocus_follows_mouse = true\n\n[layout]\narrange = \"dwindle\"\n")
+    }
+
+    @Test("a comment attached directly to the first table stays with it")
+    func firstSectionKeepsAttachedComment() {
+        var editor = ConfigEditor(text: "# about layout\n[layout]\narrange = \"dwindle\"\n")
+        expectSuccess(editor.set("focus_follows_mouse", .bool(true), in: .settings))
+        #expect(editor.text == "[settings]\nfocus_follows_mouse = true\n\n# about layout\n[layout]\narrange = \"dwindle\"\n")
+    }
+
+    // MARK: - Refusals
+
+    @Test("a [rule.size] that doesn't follow its [[rule]] refuses the edit instead of re-parenting it")
+    func nonAdjacentChildTableRefused() {
+        let text = "[[rule]]\napp_id = \"com.a\"\nfloat = true\n\n[bindings]\n\n[rule.size]\nw = 0.5\nh = 0.5\n"
+        var editor = ConfigEditor(text: text)
+        let result = editor.appendRule([ConfigField("app_id", .string("com.b")), ConfigField("float", .bool(true))])
+        #expect(result == .failure(ConfigEditError("could not parse document")))
+        #expect(editor.text == text)
+    }
+
+    @Test("removeSpace fails when a [[space]] body can't be parsed")
+    func removeSpaceUnreadableBody() {
+        let text = "[[space]]\nuuid = \n"
+        var editor = ConfigEditor(text: text)
+        if case .success = editor.removeSpace(.uuid("06577405-6B31-4676-9725-A2F69D4232F4")) {
+            Issue.record("expected failure")
+        }
+        #expect(editor.text == text)
+    }
+
+    // MARK: - Escaping
+
+    @Test("strings with control characters round-trip through the editor and TOML.parse")
+    func escapesControlCharacters() throws {
+        let s = "a\r\nb\rc\u{1}d\u{7F}e\"f\\g\th\ni é😀"
+        var editor = ConfigEditor(text: "")
+        expectSuccess(editor.appendRule([ConfigField("title_substring", .string(s))]))
+        let parsed = try TOML.parse(editor.text)
+        guard case .array(let rules)? = parsed["rule"], case .table(let rule)? = rules.first else {
+            Issue.record("rule missing"); return
+        }
+        #expect(rule["title_substring"] == .string(s))
+    }
+
+    // MARK: - renameKey
+
+    @Test("renameKey rewrites the key in place and keeps the trailing comment")
+    func renameKeyInPlace() {
+        let text = "[bindings]\n\"alt+h\" = \"focus left\"   # west\n\"alt+j\" = \"focus down\"\n"
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.renameKey("alt+h", to: "alt+a", value: .string("focus down"), in: .bindings))
+        #expect(editor.text == "[bindings]\n\"alt+a\" = \"focus down\"   # west\n\"alt+j\" = \"focus down\"\n")
+    }
+
+    @Test("renameKey with an absent old key inserts the new key")
+    func renameKeyAbsentInserts() {
+        var editor = ConfigEditor(text: "[bindings]\n\"alt+h\" = \"focus left\"\n")
+        expectSuccess(editor.renameKey("alt+x", to: "alt+j", value: .string("focus down"), in: .bindings))
+        #expect(editor.text == "[bindings]\n\"alt+h\" = \"focus left\"\n\"alt+j\" = \"focus down\"\n")
+    }
+
+    @Test("renameKey to the same key just sets the value")
+    func renameKeySameKeySets() {
+        var editor = ConfigEditor(text: "[bindings]\n\"alt+h\" = \"focus left\" # c\n")
+        expectSuccess(editor.renameKey("alt+h", to: "alt+h", value: .string("focus right"), in: .bindings))
+        #expect(editor.text == "[bindings]\n\"alt+h\" = \"focus right\" # c\n")
     }
 
 }

@@ -12,8 +12,9 @@ import os
 public enum Notifier {
     private static let logger = Logger(subsystem: "dev.ballast", category: "notifier")
     private static let authorizationLock = NSLock()
-    private static var authorizationState: AuthorizationState = .notRequested
-    private static var pendingRequests: [UNNotificationRequest] = []
+    // Guarded by authorizationLock.
+    nonisolated(unsafe) private static var authorizationState: AuthorizationState = .notRequested
+    nonisolated(unsafe) private static var pendingRequests: [UNNotificationRequest] = []
 
     private enum AuthorizationState {
         case notRequested

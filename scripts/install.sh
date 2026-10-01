@@ -73,7 +73,9 @@ refuse_if_foreign_instance() {
 if [ "${1:-}" = "--uninstall" ]; then
   refuse_if_foreign_instance
   [ -x "$exe" ] && stop_login_item
-  [ "$(readlink "$bin_dir/ballast" 2>/dev/null)" = "$exe" ] && rm -f "$bin_dir/ballast"
+  if [ "$(readlink "$bin_dir/ballast" 2>/dev/null)" = "$exe" ] && ! rm -f "$bin_dir/ballast" 2>/dev/null; then
+    echo "could not remove $bin_dir/ballast; remove it yourself: sudo rm -f $bin_dir/ballast" >&2
+  fi
   rm -rf "$app_dest"
   echo "uninstalled (config in ~/.config/ballast and the Accessibility entry are left alone)"
   exit 0
@@ -103,8 +105,8 @@ if [ -w "$bin_dir" ]; then
   ln -sf "$exe" "$bin_dir/ballast"
   echo "linked $bin_dir/ballast"
 else
-  echo "$bin_dir is not writable; link the CLI yourself:"
-  echo "  sudo ln -sf $exe $bin_dir/ballast"
+  echo "$bin_dir is not writable (or missing); link the CLI yourself:"
+  echo "  sudo mkdir -p $bin_dir && sudo ln -sf $exe $bin_dir/ballast"
 fi
 
 if $first_install; then

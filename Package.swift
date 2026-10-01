@@ -23,6 +23,5 @@ let package = Package(
         .executableTarget(name: "ballast", dependencies: ["BallastApp"]),
         .testTarget(name: "BallastCoreTests", dependencies: ["BallastCore"]),
         .testTarget(name: "BallastAppTests", dependencies: ["BallastApp", "BallastCore"]),
-    ],
-    swiftLanguageModes: [.v5]
+    ]
 )

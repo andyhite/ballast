@@ -589,6 +589,16 @@ struct FeatureLayoutTests {
         #expect(frames[6] == CGRect(x: 0, y: 250, width: 250, height: 250))
     }
 
+    @Test("adaptive and custom grids push the feature boundary to their windows' minimum width")
+    func nonFixedGridsReserveMinSize() {
+        let minSize: (WindowID) -> CGSize = { $0 == 2 ? CGSize(width: 650, height: 0) : .zero }
+        let adaptive = Self.plan([1, 2], size: 0.6, grid: .adaptive, minSize: minSize).frames
+        #expect(abs(adaptive[2]!.width - 650) < 0.001)
+        var region: CGRect?
+        _ = Self.plan([1, 2], size: 0.6, grid: .custom({ r in region = r; return TilePlan() }), minSize: minSize)
+        #expect(abs((region?.width ?? 0) - 650) < 0.001)
+    }
+
     // MARK: - Custom grid renderer
 
     @Test("a custom grid renderer is called once with the grid region's rect and its plan is merged in")

@@ -3,37 +3,56 @@ import BallastCore
 import Darwin
 
 /// `ballast [run|doctor|spaces|check-config|send|login-item|help] [--config PATH]`
+@MainActor
 public enum BallastCLI {
     /// Distributed notification carrying a command string to the running instance.
     public static let commandNotification = Notification.Name("dev.ballast.command")
 
-    public static func main(_ arguments: [String]) -> Int32 {
-        var args = arguments
+    public static func main(_ arguments: [String], env: [String: String] = ProcessInfo.processInfo.environment) -> Int32 {
+        var args: [String] = []
         var configOverride: String?
-        if let i = args.firstIndex(of: "--config") {
-            guard args.indices.contains(i + 1) else { return fail("--config needs a path") }
-            configOverride = args[i + 1]
-            args.removeSubrange(i...(i + 1))
+        var i = 0
+        while i < arguments.count {
+            let arg = arguments[i]
+            if arg == "--config" {
+                guard i + 1 < arguments.count else { return fail("--config needs a path") }
+                configOverride = arguments[i + 1]
+                i += 2
+                continue
+            }
+            if arg.hasPrefix("--config=") {
+                configOverride = String(arg.dropFirst("--config=".count))
+                if configOverride?.isEmpty == true { return fail("--config needs a path") }
+            } else {
+                args.append(arg)
+            }
+            i += 1
         }
-        let configURL = configOverride.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? defaultConfigURL()
+        let configURL = configOverride.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            ?? defaultConfigURL(env: env)
         let verb = args.first ?? "run"
         let rest = Array(args.dropFirst())
+        func noArgs(_ body: () -> Int32) -> Int32 {
+            rest.isEmpty ? body() : fail("'\(verb)' takes no arguments\n\n\(usage(configURL))")
+        }
 
         switch verb {
-        case "run": return run(configURL: configURL)
-        case "doctor": return doctor()
-        case "spaces": return spaces(configURL: configURL)
+        case "run": return noArgs { run(configURL: configURL) }
+        case "doctor": return noArgs { doctor() }
+        case "spaces": return noArgs { spaces(configURL: configURL) }
         case "check-config":
+            guard rest.count <= 1 else { return fail("check-config takes at most one PATH\n\n\(usage(configURL))") }
             return checkConfig(rest.first.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) } ?? configURL)
         case "send": return send(rest.joined(separator: " "))
-        case "login-item": return loginItem(rest.first ?? "status")
+        case "login-item":
+            guard rest.count <= 1 else { return fail("login-item takes on, off or status\n\n\(usage(configURL))") }
+            return loginItem(rest.first ?? "status")
         case "help", "-h", "--help": print(usage(configURL)); return 0
         default: return fail("unknown subcommand '\(verb)'\n\n\(usage(configURL))")
         }
     }
 
-    static func defaultConfigURL() -> URL {
-        let env = ProcessInfo.processInfo.environment
+    static func defaultConfigURL(env: [String: String] = ProcessInfo.processInfo.environment) -> URL {
         if let explicit = env["BALLAST_CONFIG"], !explicit.isEmpty {
             return URL(fileURLWithPath: (explicit as NSString).expandingTildeInPath)
         }
@@ -50,16 +69,19 @@ public enum BallastCLI {
     private static var manager: WindowManager?
     private static var lockFileDescriptor: Int32 = -1
 
+    private static var lockDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/dev.ballast")
+    }
+
+    private static var lockPath: String { lockDirectory.appendingPathComponent("run.lock").path }
+
     /// Takes an exclusive, non-blocking flock on a well-known cache file so
     /// only one `ballast run` can manage windows at a time. The descriptor
     /// is kept open for the life of the process; the lock releases when the
     /// process exits.
     private static func acquireSingleInstanceLock() -> Bool {
-        let cacheDir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/dev.ballast")
         try? FileManager.default.createDirectory(
-            at: cacheDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let lockPath = cacheDir.appendingPathComponent("run.lock").path
+            at: lockDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
         // Cannot even attempt the lock (full disk, missing/unmounted cache
         // directory, permission denied): treat as lock-held rather than
@@ -71,6 +93,15 @@ public enum BallastCLI {
         }
         lockFileDescriptor = fd
         return true
+    }
+
+    /// `true` when some process holds the run lock: a shared lock cannot be
+    /// taken while the instance's exclusive one is held.
+    private static func instanceIsRunning() -> Bool {
+        let fd = open(lockPath, O_RDONLY)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        return flock(fd, LOCK_SH | LOCK_NB) != 0
     }
 
     private static func run(configURL: URL) -> Int32 {
@@ -92,13 +123,13 @@ public enum BallastCLI {
     }
 
     private static func doctor() -> Int32 {
-        let report = Doctor.run(context: .cli)
+        let report = Doctor.run(cli: true)
         print(report.render())
-        return report.canManage && report.accessibilityGranted ? 0 : 1
+        return report.canManage ? 0 : 1
     }
 
     private static func spaces(configURL: URL) -> Int32 {
-        let provider: any SpaceProvider
+        let provider: SkyLightSpaceProvider
         switch SkyLightSpaceProvider.make() {
         case .success(let p): provider = p
         case .failure(let missing): return fail("unsupported macOS: \(missing)")
@@ -130,7 +161,10 @@ public enum BallastCLI {
     }
 
     private static func checkConfig(_ url: URL) -> Int32 {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return fail("cannot read \(url.path)") }
+        let text: String
+        do { text = try String(contentsOf: url, encoding: .utf8) } catch {
+            return fail("cannot read \(url.path): \(error.localizedDescription)")
+        }
         switch Config.parse(text) {
         case .success(let config):
             print("OK \(url.path): \(config.spaces.count) space overrides, \(config.rules.count) rules, \(config.bindings.count) bindings")
@@ -144,6 +178,7 @@ public enum BallastCLI {
         if case .failure(let error) = Command.parse(text) {
             return fail("\(error.message)\ncommands:\n  " + Command.reference.joined(separator: "\n  "))
         }
+        guard instanceIsRunning() else { return fail("no running Ballast instance (start it with `ballast run` or open Ballast.app)") }
         DistributedNotificationCenter.default().postNotificationName(
             commandNotification, object: text, userInfo: nil, deliverImmediately: true)
         return 0

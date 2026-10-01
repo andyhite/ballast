@@ -245,7 +245,7 @@ extension BSPNode {
             s.second = s.second.balanced(hiding: hidden)
             let firstCount = s.first.leaves.filter { !hidden.contains($0) }.count
             let secondCount = s.second.leaves.filter { !hidden.contains($0) }.count
-            if firstCount + secondCount > 0 { s.ratio = Double(firstCount) / Double(firstCount + secondCount) }
+            if firstCount > 0 && secondCount > 0 { s.ratio = Double(firstCount) / Double(firstCount + secondCount) }
             return .split(s)
         }
     }
@@ -420,21 +420,22 @@ extension BSPNode {
 
     private func resized(_ id: WindowID, delta: Double, context: BSPLayoutContext, hidden: Set<WindowID>) -> BSPNode {
         guard case .split(var s) = self else { return self }
-        if !hidden.isEmpty {
-            let firstGone = s.first.leaves.allSatisfy(hidden.contains)
-            let secondGone = s.second.leaves.allSatisfy(hidden.contains)
-            if firstGone || secondGone {
-                // Not drawn: only the side still showing matters.
-                if secondGone { s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden) }
-                else { s.second = s.second.resized(id, delta: delta, context: context, hidden: hidden) }
-                return .split(s)
-            }
+        // Judge against what is drawn: hidden leaves are pruned from each side.
+        let drawnFirst = s.first.without(hidden), drawnSecond = s.second.without(hidden)
+        guard let first = drawnFirst, let second = drawnSecond else {
+            // Not drawn: only the side still showing matters.
+            if drawnSecond == nil { s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden) }
+            else { s.second = s.second.resized(id, delta: delta, context: context, hidden: hidden) }
+            return .split(s)
         }
-        let current = Self.effectiveRatio(s, weight: context.weight, minRatio: context.minRatio, maxRatio: context.maxRatio)
+        var drawn = s
+        drawn.first = first
+        drawn.second = second
+        let current = Self.effectiveRatio(drawn, weight: context.weight, minRatio: context.minRatio, maxRatio: context.maxRatio)
         let lo = min(context.minRatio, context.maxRatio), hi = max(context.minRatio, context.maxRatio)
-        if s.first == .leaf(id) {
+        if first == .leaf(id) {
             s.ratio = min(max(current + delta, lo), hi)
-        } else if s.second == .leaf(id) {
+        } else if second == .leaf(id) {
             s.ratio = min(max(current - delta, lo), hi)
         } else if s.first.contains(id) {
             s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden)

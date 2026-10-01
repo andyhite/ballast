@@ -109,8 +109,12 @@ There is no prebuilt download yet. Build Ballast from source.
    restart it.
 4. **Check the setup:**
    ```sh
-   ballast doctor         # every line should be ✓
+   ballast doctor         # every line ✓, or ! for the terminal's Accessibility grant
    ```
+   Run from a shell, `ballast doctor` reports the *terminal's* Accessibility
+   grant, which only matters for `ballast run` from that terminal; a `!` there
+   is fine. **Tools ▸ Run Doctor…** in the menu bar shows Ballast.app's own
+   grant. The command exits 1 only when something else is wrong.
 
 To update, run steps 2 and 4 again. The installer keeps your Start at Login
 choice. To remove Ballast, run `scripts/install.sh --uninstall`; your config
@@ -165,10 +169,14 @@ or where the window will land on the other display.
 
 ### Configuration
 
-Ballast reads `~/.config/ballast/config.toml`. To use a different file, set
-`$BALLAST_CONFIG` or `$XDG_CONFIG_HOME`, or pass `--config PATH`. Without a
+Ballast reads `~/.config/ballast/config.toml`. To use a different file for
+`ballast run` or the CLI commands (`check-config`, `spaces`), set
+`$BALLAST_CONFIG` or `$XDG_CONFIG_HOME` in your shell, or pass `--config PATH`.
+The installed Ballast.app doesn't read your shell environment: it uses the
+default path (or `launchctl setenv BALLAST_CONFIG …` before login), and
+**Settings → General** shows the path it's using. Without a
 config file, Ballast uses built-in defaults and has **no hotkeys**. Choose
-**Open Config File** in the menu to create a starter file.
+**Open Config File** in the menu or in Settings to create a starter file.
 
 ```toml
 [layout]                     # unset keys follow the screen: one full-screen deck on small displays, feature left on large ones
@@ -238,8 +246,10 @@ ballast [run]                       start the window manager (menu bar app)
 ballast doctor                      check permissions, Spaces settings, private API availability
 ballast spaces                      list display UUIDs plus Space UUIDs and ordinals for [[space]] config
 ballast check-config [PATH]         validate a config file without applying it
-ballast send <command>              send a command to the running instance
+ballast send <command>              send a command to the running instance (fails if none is running)
 ballast login-item [on|off|status]  start at login; launchd restarts Ballast after a crash
+ballast help                        print usage and the command list
+--config PATH | --config=PATH       use this config file instead of the default
 ```
 
 ## Limitations

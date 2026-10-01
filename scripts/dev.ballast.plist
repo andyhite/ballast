@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Bundled at Ballast.app/Contents/Library/LaunchAgents/dev.ballast.plist by
      scripts/build-app.sh and registered with SMAppService ("Start at Login" in
-     the menu, or `ballast login-item on`). Never copied to ~/Library.
+     Settings ▸ General, or `ballast login-item on`). Never copied to ~/Library.
      Starts Ballast at login; restarts it only if it exits abnormally (crash).
      "Quit Ballast" from the menu exits cleanly and is respected. -->
 <plist version="1.0">

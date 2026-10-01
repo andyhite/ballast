@@ -38,10 +38,11 @@ public struct MissingPrivateSymbols: Error, CustomStringConvertible {
     }
 }
 
-/// `SpaceProvider` implementation backed by private SkyLight calls plus one
+/// Space provider backed by private SkyLight calls plus one
 /// private HIServices call (`_AXUIElementGetWindow`). Read-only: no symbol
 /// resolved here ever mutates Space membership or window placement.
-public final class SkyLightSpaceProvider: SpaceProvider {
+// Sendable: every stored property is an immutable let (C function pointers, connection id).
+public final class SkyLightSpaceProvider: Sendable {
 
     // MARK: - C function signatures
 
@@ -177,17 +178,24 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return .failure(MissingPrivateSymbols(names: missing))
     }
 
-    // MARK: - SpaceProvider
+    // MARK: - Queries
 
+    /// Display and Space layout. Nil when SkyLight returned malformed data.
+    /// MAIN THREAD ONLY: reads `DisplayInfo.current()`, which uses `NSScreen.screens`.
     public func snapshot() -> SpaceSnapshot? {
         guard let managed = slsCopyManagedDisplaySpaces(connectionID)?.takeRetainedValue() as? [AnyObject] else {
             return nil
         }
-
-        var displays: [DisplaySpaces] = []
-        displays.reserveCapacity(managed.count)
         let builtin = DisplayInfo.builtinUUIDs()
         let small = Set(DisplayInfo.current().filter { $0.visibleFrame.width < LayoutSettings.smallWidth }.map(\.uuid))
+        return Self.parse(managed, builtin: builtin, small: small)
+    }
+
+    /// Pure parse of `SLSCopyManagedDisplaySpaces`'s array. Entries without a
+    /// display identifier or Space id are skipped, never trapped on.
+    static func parse(_ managed: [AnyObject], builtin: Set<String>, small: Set<String>) -> SpaceSnapshot {
+        var displays: [DisplaySpaces] = []
+        displays.reserveCapacity(managed.count)
 
         for entry in managed {
             guard let dict = entry as? [String: AnyObject] else { continue }
@@ -199,17 +207,9 @@ public final class SkyLightSpaceProvider: SpaceProvider {
                 return spaceID(fromEntry: current)
             }()
 
-            guard let rawSpaces = dict["Spaces"] as? [AnyObject] else {
-                displays.append(DisplaySpaces(displayUUID: displayUUID, spaces: [], activeSpace: activeSpaceID,
-                                              builtin: builtin.contains(displayUUID), small: small.contains(displayUUID)))
-                continue
-            }
-
             var spaces: [SpaceInfo] = []
-            spaces.reserveCapacity(rawSpaces.count)
-            for rawSpace in rawSpaces {
-                guard let spaceDict = rawSpace as? [String: AnyObject] else { continue }
-                guard let id = spaceID(fromEntry: spaceDict) else { continue }
+            for rawSpace in (dict["Spaces"] as? [AnyObject]) ?? [] {
+                guard let spaceDict = rawSpace as? [String: AnyObject], let id = spaceID(fromEntry: spaceDict) else { continue }
                 let uuid = (spaceDict["uuid"] as? String) ?? ""
                 let rawType = (spaceDict["type"] as? NSNumber)?.intValue ?? 0
                 spaces.append(SpaceInfo(id: id, uuid: uuid, kind: SpaceKind(rawType: rawType)))
@@ -222,6 +222,9 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return SpaceSnapshot(displays: displays)
     }
 
+    /// The Space currently shown on each display. Read live with no display
+    /// metadata, so safe off the main thread (`discoverWindows` calls it from
+    /// per-app worker queues). Nil when SkyLight returned malformed data.
     public func activeSpaceIDs() -> Set<SpaceID>? {
         guard let managed = slsCopyManagedDisplaySpaces(connectionID)?.takeRetainedValue() as? [AnyObject] else {
             return nil
@@ -230,14 +233,14 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         for entry in managed {
             guard let dict = entry as? [String: AnyObject],
                   let current = dict["Current Space"] as? [String: AnyObject],
-                  let id = spaceID(fromEntry: current) else { continue }
+                  let id = Self.spaceID(fromEntry: current) else { continue }
             active.insert(id)
         }
         return active
     }
 
     /// Extracts a Space id from a SkyLight dictionary, trying both known keys.
-    private func spaceID(fromEntry dict: [String: AnyObject]) -> SpaceID? {
+    private static func spaceID(fromEntry dict: [String: AnyObject]) -> SpaceID? {
         if let number = dict["ManagedSpaceID"] as? NSNumber {
             return number.uint64Value
         }
@@ -247,6 +250,8 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return nil
     }
 
+    /// Ids of every window on `space`: all levels and owners, on screen or
+    /// not. Empty when SkyLight returned malformed data. Any thread.
     public func windowIDs(onSpace space: SpaceID) -> [WindowID] {
         let spaceArray = [NSNumber(value: space)] as CFArray
         var setTags: UInt64 = 0
@@ -261,6 +266,8 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return result.compactMap { ($0 as? NSNumber)?.uint32Value }
     }
 
+    /// Spaces `window` is on: more than one only for a sticky window (shown
+    /// on every Space); empty when unknown. Any thread.
     public func spaces(forWindow window: WindowID) -> [SpaceID] {
         let windowArray = [NSNumber(value: window)] as CFArray
         guard
@@ -271,6 +278,7 @@ public final class SkyLightSpaceProvider: SpaceProvider {
         return result.compactMap { ($0 as? NSNumber)?.uint64Value }
     }
 
+    /// The window id behind an AX window element; nil when it has none. Any thread.
     public func windowID(for element: AXUIElement) -> WindowID? {
         var windowID: UInt32 = 0
         let error = axUIElementGetWindow(element, &windowID)

@@ -8,6 +8,7 @@ import SwiftUI
 /// every global setting and the `[layout]` defaults live here. Ballast is an
 /// `.accessory` app (no Dock icon, no menu bar menu bar item beyond the
 /// status item), so this window has to activate itself explicitly.
+@MainActor
 enum PreferencesWindow {
     private static var controller: NSWindowController?
     private static var model: ConfigModel?
@@ -184,16 +185,14 @@ struct GeneralPane: View {
             }
 
             Section("Config File") {
-                Text(manager.configURL.path)
+                Text(manager.configStore.url.path)
                     .font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 HStack {
-                    Button("Open Config File") { NSWorkspace.shared.open(manager.configURL) }
-                    Button("Reveal in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([manager.configURL])
-                    }
+                    Button("Open Config File") { editError = StatusBar.openConfig(manager: manager)?.description }
+                    Button("Reveal in Finder") { editError = StatusBar.openConfig(manager: manager, reveal: true)?.description }
                 }
             }
 
@@ -206,7 +205,7 @@ struct GeneralPane: View {
     }
 
     private func commit(_ key: String, _ value: ConfigValue?, in section: ConfigSection = .settings) {
-        if let error = manager.editConfig({ $0.set(key, value, in: section) }) {
+        if let error = manager.configStore.edit({ $0.set(key, value, in: section) }) {
             editError = error.description
         } else {
             editError = nil
@@ -214,6 +213,7 @@ struct GeneralPane: View {
     }
 
     private func setLoginItem(_ enabled: Bool) {
+        var quitAfter = false
         if !enabled, loginItemStatus == .enabled {
             // Unregistering boots the LaunchAgent out, and with it this
             // process (the agent is what's running us while it is enabled).
@@ -226,12 +226,15 @@ struct GeneralPane: View {
                 loginToggleID += 1
                 return
             }
+            quitAfter = true
         }
         do {
             // Enabling makes launchd start a second copy right away; it loses
             // the single-instance lock and exits, so this one keeps running.
             try LoginItem.setEnabled(enabled)
             loginItemError = nil
+            // This process may not be the agent's (opened from Applications), so launchd won't kill it.
+            if quitAfter { NSApp.terminate(nil) }
         } catch {
             loginItemError = error.localizedDescription
         }

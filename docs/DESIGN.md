@@ -42,7 +42,7 @@ flowchart LR
   subgraph Observation [main thread]
     AXO[AXObserver per app<br/>+ Dock Exposé events]
     WS[NSWorkspace / screen-param<br/>notifications]
-    SL[SpaceProvider<br/>SkyLight, read-only]
+    SL[SkyLightSpaceProvider<br/>SkyLight, read-only]
   end
   subgraph Core [BallastCore — pure values, no I/O]
     E[Engine<br/>windows, SpaceStates,<br/>rules, weights, BSP, grids, decks]
@@ -60,7 +60,9 @@ flowchart LR
 ```
 
 - **Observation** (`Sources/BallastApp/AX/AppObserver.swift`, the
-  `WindowManager` notification handlers, `PrivateAPI/SkyLight.swift`).
+  `WindowManager` notification handlers, `WindowDiscovery.swift` for window and
+  native-tab discovery, `DragController.swift` for drag tracking and drop
+  targets, `PrivateAPI/SkyLight.swift`).
   Everything is push-based: `AXObserver` notifications (window
   created/destroyed/moved/resized/(de)miniaturized/title-changed, focused and
   main window changed), `NSWorkspace` notifications (app
@@ -92,7 +94,14 @@ flowchart LR
   turns them into events (learn a minimum size, keep the frame it observed).
   They never throw into the core.
 - Every AX element gets a 1 s messaging timeout. A hung app blocks only its
-  own queue, and each read on the main thread is bounded by that timeout.
+  own queue; the few AX calls left on the main thread (§4) are bounded by
+  that timeout.
+- The package builds in Swift 6 language mode. `WindowManager`, `ConfigStore`,
+  `DragController`, `StatusBar`, the overlays and the preferences models are
+  `@MainActor`. Worker-queue closures capture only values (AX elements are
+  thread-safe CF objects, imported `@preconcurrency`) and hop back with
+  `DispatchQueue.main.async`; C and notification callbacks that are already on
+  the main thread enter isolation with `MainActor.assumeIsolated`.
 
 ### 2.2 The Rift crash class, and why it can't happen here
 
@@ -115,12 +124,15 @@ construction:
   `scripts/lint-core.sh` greps for these constructs; unchecked indexing on
   untrusted positions is covered by code review and the fuzz tests below,
   not by the lint script.
-- `Tests/BallastCoreTests/FuzzTests.swift` replays thousands of seeded random
-  interleavings of add, remove, re-parent (setSpace), snapshot changes that
-  delete Spaces or unplug displays, config reloads, and every command. After
+- `Tests/BallastCoreTests/FuzzTests.swift` replays seeded random
+  interleavings (12 seeds of 3000 steps) of add, remove, re-parent
+  (setSpace), hide, native-tab swap, direct swap, snapshot changes that
+  delete Spaces or unplug displays, config reloads (with random split axis,
+  weight shares and gaps), and every command. After
   **every** step it checks the structural invariants: tree leaves equal the
   Space's members equal its ideal order equal its manual order, and every
-  tiled window belongs to exactly one Space.
+  tiled window belongs to exactly one Space. A resize that reports success
+  must also move the focused tile in the requested direction.
 
 ### 2.3 What Swift cannot give us
 
@@ -178,8 +190,8 @@ Each `SpaceState` holds:
   its tree as the balanced ideal on every structural change: the rank order
   is cut where the running weight sum is closest to half the total, each
   side recursively, giving an equal-area grid (four equal-weight windows are
-  quarters) whichever window had focus. With a feature, the tree holds only
-  the non-featured tiles; the feature tiles are laid out separately.
+  quarters) whichever window had focus. With a feature, the tree still holds
+  every tile; the feature tiles are pruned from it when drawn.
 - `monocle`, transient feature-size and feature-count overrides,
   and `frameOverrides` (adopted frames). The overrides are transient:
   a setting command applies one instantly, then the platform layer writes it
@@ -216,14 +228,15 @@ setting command (`feature-size`, `feature-count`, feature
 `grow`/`shrink`/`balance`), or the Preferences window is written to
 `~/.config/ballast/config.toml` so it survives restarts. Sources:
 
-- **Menu bar / Preferences**: call `WindowManager.editConfig` or
-  `setSpaceSetting` directly, synchronously, on the edit.
+- **Menu bar / Preferences**: call `ConfigStore.edit` or
+  `ConfigStore.setSpaceSetting` (`Sources/BallastApp/ConfigStore.swift`)
+  directly, synchronously, on the edit.
 - **Setting commands** (hotkeys, `ballast send …`, the menu's own arrangement
   items — all funnel through `Engine.perform`): `CommandOutcome.settings`
-  carries what changed; `WindowManager` merges it per-Space and flushes
+  carries what changed; `ConfigStore.schedulePersist` merges it per-Space and flushes
   after a ~300ms debounce.
 
-`WindowManager.editConfig` resolves `configURL`'s symlinks first (so a
+`ConfigStore.edit` resolves the config URL's symlinks first (so a
 dotfiles-managed symlink is edited in place, never replaced by a plain
 file), reads the current text, applies the requested change with
 `ConfigEditor` — a text-preserving TOML editor that keeps comments and
@@ -236,7 +249,7 @@ replaced as a whole: setting it drops that table and writes the value
 inline, and removing it drops the table. Removing a
 key from a section that doesn't exist yet (clearing an already-absent
 setting) is a no-op: it never creates a phantom section or override just to
-leave it empty. If the file is missing, `editConfig` falls back to the
+leave it empty. If the file is missing, `edit` falls back to the
 built-in starter template only when no real config has ever been
 successfully loaded from disk; once one has, a later disappearance (moved,
 renamed, briefly absent during a dotfiles restore) fails the edit instead of
@@ -321,7 +334,8 @@ Space (focused windows before never-focused ones), then creation order, then
 window id, so the result is deterministic.
 
 - **Feature area**: the feature tiles are `liveOrder.prefix(feature_count)`
-  in every arrangement except `float`; the rest go to the arrangement in the
+  in every arrangement except `float`, where for `dwindle`/`balanced`
+  `liveOrder` is the tree's leaf order (`tree.leaves.prefix`); the rest go to the arrangement in the
   remaining area. `feature` picks the side (`left`, `right`, `top`,
   `bottom`) or `center`. `feature_size` divides the area between the feature
   and the grid; featured windows share the feature area's length in
@@ -331,7 +345,9 @@ window id, so the result is deterministic.
   the feature keeps `feature_size` of the space and the two halves split the
   remainder evenly. `feature = "none"` uses the whole area for the grid. When
   a Space isn't manual, a weight-10 window launching next to a weight-1
-  featured window takes the feature slot on the same layout pass.
+  featured window takes the feature slot on the same layout pass, except in
+  `dwindle`, where a new window splits the focused leaf and the feature stays
+  put until the tree is rebuilt.
 - **fixed**: `columns` × `rows`. Columns are always vertical lines side by
   side and rows always stack top to bottom within a column, whatever side
   the feature is on (under a `top` or `bottom` feature the grid region is the
@@ -364,8 +380,11 @@ window id, so the result is deterministic.
   `sum(first subtree weights) / sum(both)`, clamped to
   `[weight_share_min, weight_share_max]` (the Weight Share Limit). A manual
   ratio wins. Learned AX minimum sizes are honored on top of this (see §4).
-  With a feature, the tree lays out only the non-featured tiles, in the
-  area left after the feature; resize, balance and swap stay total.
+  With a feature, the tree still holds every tile; the feature tiles are
+  pruned at render time and the rest are laid out in the area left after the
+  feature. Resize judges the pruned (drawn) splits, and says "nothing to
+  resize" instead of pinning the Space manual when no drawn split changes;
+  resize, balance and swap stay total.
 - **Resizing**: `grow`, `shrink` and `balance` change `feature_size` in
   `fixed` and `adaptive` when a feature is on, and BSP split ratios in
   `dwindle` and `balanced`; when neither applies they do nothing and say so.
@@ -395,7 +414,7 @@ Manual decks (`deck`/`undeck`), overflow decks (the last `fixed` column past
 `columns * rows`), 1×1 grids and monocle all use it. Each overflow deck is
 evaluated independently. In a `fixed` grid a column scrolls once it holds more
 than `rows` tiles. With `rows = 0` nothing scrolls. The deck planner in
-`MainLayout.swift` computes the geometry for a deck:
+`DeckLayout` (`Decks.swift`) computes the geometry for a deck:
 
 - **Deck with peeks.** `rows` equal-size slots (one for a manual deck or
   monocle) fill the deck's area.
@@ -464,6 +483,16 @@ than `rows` tiles. With `rows = 0` nothing scrolls. The deck planner in
   the pass. Passes run on the main thread, so two passes never overlap.
 - **Parallel, per-app mutation.** `FrameApplier` keeps one serial queue per
   pid. Electron and Java apps only delay their own windows.
+- **AX off the main thread.** Observer subscription (`AppObserver.subscribe`),
+  per-window notification registration, window discovery, title and fact
+  re-reads, drag probes and frame verification all run on the app's queue and
+  apply on main. Registration stops at the first `.cannotComplete`, and one
+  attach chain per app is in flight at a time. Frames the main thread needs
+  (cascade, floating placement, flash, tab matching, Space fallback) come
+  from `CGWindowListCopyWindowInfo` bounds, not AX. Remaining main-thread AX
+  calls are single-window and bounded by the 1 s timeout: the facts read of a
+  live `AXWindowCreated`, `_AXUIElementGetWindow` in `windowID(_:)`, and the
+  Dock observer's startup.
 - **Ordering.** If a window is shrinking, the size is set before the
   position. If it is growing, the position is set first. After the final
   write, the frame is read back once, and the origin is corrected if the
@@ -532,9 +561,11 @@ next frame (per-window generation counter).
 
 - **One file**: `Sources/BallastApp/PrivateAPI/SkyLight.swift`. No other file
   references a private symbol.
-- **One protocol**: `SpaceProvider` (`snapshot()`, `windowIDs(onSpace:)`,
-  `spaces(forWindow:)`, `windowID(for:)`). The engine only ever sees the plain
-  `SpaceSnapshot` value.
+- **One class**: `SkyLightSpaceProvider` (`snapshot()`, `activeSpaceIDs()`,
+  `windowIDs(onSpace:)`, `spaces(forWindow:)`, `windowID(for:)`). Only
+  `snapshot()` is main-thread-only (it reads `NSScreen`); `activeSpaceIDs()`
+  and the window queries are also called from per-app worker queues. The
+  engine only ever sees the plain `SpaceSnapshot` value.
 - **Read-only symbols**: `SLSMainConnectionID`,
   `SLSCopyManagedDisplaySpaces`, `SLSCopySpacesForWindows`,
   `SLSCopyWindowsWithOptionsAndTags`, and HIServices' `_AXUIElementGetWindow`.
@@ -665,12 +696,21 @@ back in different tiles.
 
 ## 9. Config
 
-See `docs/config.example.toml`. It is TOML, with a zero-dependency TOML 1.0
-parser in `BallastCore/TOML.swift`.
+See `docs/config.example.toml`. It is TOML, parsed by a zero-dependency
+subset parser in `BallastCore/TOML.swift` (no datetimes or radix integers).
 
 **Validation.** Unknown keys, bad values, bad UUIDs, duplicate `[[space]]`
 entries, bad regexes, invalid hotkeys, invalid commands, and duplicate
 hotkeys are all errors, each reported with its path (`rule[3].weight: …`).
+
+**Write-back editor.** `ConfigEditor` edits the text line by line, so
+comments and ordering survive. It keeps the file's own line ending (CRLF or
+LF). New `[[space]]`/`[[rule]]` blocks go above the comments attached to the
+header they precede, and a new first section goes after the file's header
+comment. It refuses to edit (and the caller reports "could not parse
+document") when a `[rule.x]`/`[space.x]` child table doesn't directly follow
+its entry, because TOML would attach it to a different entry than the line
+order suggests.
 
 **Hot reload.** `ConfigWatcher` watches the file and directory chains for
 both the configured path and its resolved symlink target. It handles atomic
@@ -685,8 +725,10 @@ file is fixed. It never silently falls back to defaults.
 
 Hotkeys (Carbon `RegisterEventHotKey`, which needs no event tap) and the menu
 both call `WindowManager.perform(Command)`. `ballast send <command>` posts a
-distributed notification to the running instance. It is fire-and-forget, the
-same trust level as any local user process, and not a scripting API.
+distributed notification to the running instance; it first checks that some
+process holds the run lock (§12) and fails with exit 1 otherwise. Delivery is
+still fire-and-forget (no acknowledgement), at the same trust level as any
+local user process, and not a scripting API.
 `dump-state` writes `~/Library/Caches/dev.ballast/state.json`; the smoke test
 uses it.
 
@@ -697,29 +739,16 @@ rule that overrides that), its weight and rule index, and its Space
 id/uuid/ordinal and display uuid/id. Its AX reads run on the inspected
 app's `FrameApplier` worker queue, so a hung app blocks only its own
 inspection, and it refreshes on `WindowManager.stateDidChange` — no polling.
-Its float/tile buttons write a rule through `WindowManager.editConfig`, the
+Its float/tile buttons write a rule through `ConfigStore.edit`, the
 same path as every other config edit (§3.2.1).
 
 ## 11. Testing
 
-`swift test` runs these suites:
-
-- TOML parser
-- hotkeys
-- config validation
-- weight resolution and tiebreaks
-- BSP subtree-weight ratios and clamping
-- fixed/adaptive/dwindle/balanced geometry, the feature area, deck geometry and view selection, and monocle
-- default-floating heuristics (`WindowFacts.floatReason` precedence)
-- engine behavior:
-  - continuous weight-driven feature slot
-  - manual override persistence and reset
-  - reload keeps live state
-  - focus fallback on close
-  - Space deletion and ordinal shift
-- invariant fuzzing (engine and BSP)
-
-The platform glue is covered by the manual smoke test in `docs/SMOKE_TEST.md`.
+`swift test` covers the TOML parser, config validation, hotkeys, the layout
+arrangements, and the engine, plus seeded invariant fuzzing (§2.2). CLI
+argument parsing and exit codes, the `doctor` report logic, and the
+Preferences helpers are covered in `Tests/BallastAppTests`. The rest of the
+platform glue is covered by the manual smoke test in `docs/SMOKE_TEST.md`.
 
 ## 12. Build and install
 

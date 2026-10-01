@@ -16,6 +16,20 @@ struct HotkeyTests {
         }
     }
 
+    @Test("every nameable key code round-trips through parse")
+    func keyNameRoundTrips() {
+        let named = (UInt32(0)...0xFF).compactMap { code in Hotkey.keyName(forKeyCode: code).map { (code, $0) } }
+        #expect(named.count > 80)
+        for (code, name) in named {
+            guard case .success(let hotkey) = Hotkey.parse("cmd+\(name)") else {
+                Issue.record("\(name) (\(code)) does not parse")
+                continue
+            }
+            #expect(hotkey.keyCode == code, "\(name)")
+            #expect(hotkey.keyName == name, "\(name)")
+        }
+    }
+
     @Test("modifier aliases resolve to the same modifier")
     func modifierAliases() {
         let commandSpecs = ["cmd+a", "command+a", "\u{2318}+a"]

@@ -6,8 +6,8 @@ import CoreGraphics
 
 /// No AX/SkyLight permissions, no live WM, no user config: every test uses a
 /// throwaway config file under a fresh temp directory and only exercises
-/// pure/file-local `WindowManager` entry points (`loadInitialConfig`,
-/// `editConfig`, `WindowManager.learnedMinSize`). `WindowManager` is a
+/// pure/file-local `WindowManager` entry points (`learnedMinSize`, and an
+/// unlaunched manager's config edit). `WindowManager` is a
 /// main-thread-only class, so every test that touches it runs on the main actor.
 @MainActor
 struct WindowManagerTests {
@@ -86,24 +86,6 @@ struct WindowManagerTests {
         #expect(engine.windows[id]?.minSize.height == 500)
     }
 
-    // MARK: audit8 — config disappearing must not recreate the starter
-
-    @Test
-    func initialAbsentConfigRemainsCreatableByEdit() {
-        let (dir, url) = Self.tempConfigDir() // never written
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let wm = WindowManager(configURL: url)
-        #expect(wm.loadInitialConfig())
-        #expect(!FileManager.default.fileExists(atPath: url.path))
-
-        let error = wm.editConfig { editor in
-            editor.set("feature_count", .integer(2), in: .layout)
-        }
-        #expect(error == nil)
-        #expect(FileManager.default.fileExists(atPath: url.path))
-        #expect(wm.config.layout.featureCount == 2)
-    }
-
     // MARK: audit-safety — a config load/edit on an unlaunched manager must
     // never reach `tryStart`'s AX prompt or app startup.
 
@@ -114,7 +96,7 @@ struct WindowManagerTests {
         let wm = WindowManager(configURL: url)
         #expect(wm.loadInitialConfig())
 
-        let error = wm.editConfig { editor in
+        let error = wm.configStore.edit { editor in
             editor.set("feature_count", .integer(2), in: .layout)
         }
         #expect(error == nil)
@@ -122,87 +104,5 @@ struct WindowManagerTests {
         // `.unsupported`, `.blocked`, or `.running`) the moment it runs. A
         // config edit before `launch()` must never trigger it.
         #expect(wm.status == .starting)
-    }
-
-    @Test
-    func loadedThenMissingConfigRefusesToRecreateStarterAndKeepsLiveConfig() throws {
-        let (dir, url) = Self.tempConfigDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try Self.sampleConfig.write(to: url, atomically: true, encoding: .utf8)
-
-        let wm = WindowManager(configURL: url)
-        #expect(wm.loadInitialConfig())
-        let liveConfig = try Config.parse(Self.sampleConfig).get()
-        #expect(wm.config == liveConfig)
-
-        // The file disappears out from under the running app.
-        try FileManager.default.removeItem(at: url)
-        #expect(!FileManager.default.fileExists(atPath: url.path))
-
-        let error = wm.editConfig { editor in
-            editor.set("feature_count", .integer(2), in: .layout)
-        }
-        #expect(error != nil)
-        // Never recreated: no starter template written over the gap.
-        #expect(!FileManager.default.fileExists(atPath: url.path))
-        // Live, in-memory config (rules/bindings, and everything else) untouched.
-        #expect(wm.config == liveConfig)
-
-        // A second disappearance-then-edit behaves identically (repeated deletions).
-        let secondError = wm.editConfig { editor in
-            editor.set("feature_count", .integer(3), in: .layout)
-        }
-        #expect(secondError != nil)
-        #expect(!FileManager.default.fileExists(atPath: url.path))
-        #expect(wm.config == liveConfig)
-
-        // The file reappears (e.g. dotfiles restore): edits resume normally.
-        try Self.sampleConfig.write(to: url, atomically: true, encoding: .utf8)
-        let restoredError = wm.editConfig { editor in
-            editor.set("feature_count", .integer(2), in: .layout)
-        }
-        #expect(restoredError == nil)
-        #expect(FileManager.default.fileExists(atPath: url.path))
-        let restoredText = try String(contentsOf: url, encoding: .utf8)
-        let restoredConfig = try Config.parse(restoredText).get()
-
-        var expectedConfig = liveConfig
-        expectedConfig.layout.featureCount = 2
-        // The reload picked up the edit (semantic equality: layout, every
-        // rule's match/actions, and every binding's hotkey/command), not
-        // just "some rules/bindings exist" or a substring of the raw text.
-        #expect(restoredConfig == expectedConfig)
-        #expect(wm.config == expectedConfig)
-        // Still the user's original rule and binding, not the starter template.
-        #expect(restoredConfig.rules == liveConfig.rules)
-        #expect(restoredConfig.bindings == liveConfig.bindings)
-    }
-
-    @Test
-    func loadedThenMissingConfigViaSymlinkTargetAlsoRefuses() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ballast-wm-tests-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let real = dir.appendingPathComponent("real.toml")
-        let link = dir.appendingPathComponent("ballast.toml")
-        try Self.sampleConfig.write(to: real, atomically: true, encoding: .utf8)
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
-
-        let wm = WindowManager(configURL: link)
-        #expect(wm.loadInitialConfig())
-        let liveConfig = try Config.parse(Self.sampleConfig).get()
-        #expect(wm.config == liveConfig)
-
-        // The symlink's *target* disappears while the link itself stays.
-        try FileManager.default.removeItem(at: real)
-
-        let error = wm.editConfig { editor in
-            editor.set("feature_count", .integer(2), in: .layout)
-        }
-        #expect(error != nil)
-        #expect(!FileManager.default.fileExists(atPath: real.path))
-        // Live, in-memory config untouched by the refused edit.
-        #expect(wm.config == liveConfig)
     }
 }

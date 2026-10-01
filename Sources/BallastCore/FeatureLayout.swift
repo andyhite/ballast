@@ -134,6 +134,9 @@ public enum FeatureLayout {
                 regionMin = axis == .horizontal
                     ? columnWidthMins[index].reduce(0, +) + gap * Double(max(columnWidthMins[index].count - 1, 0))
                     : columnHeightMins[index].max() ?? 0
+            } else {
+                // Adaptive/BSP grids can't be forced narrower than their most demanding window.
+                regionMin = extentMin(halves[index])
             }
             let region = (half: Optional(index), min: regionMin, weight: halfWeight)
             if feature.gridFollows == (index == 0) || feature == .off { regions.append(region) } else { regions.insert(region, at: 0) }

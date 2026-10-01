@@ -7,6 +7,7 @@ import BallastCore
 /// running hides it at once. One borderless, click-through window at the
 /// floating level, so the app raise that follows a focus change never covers
 /// it. Created on first use and reused; shows on whichever Space is active.
+@MainActor
 final class FocusFlash {
     private var window: NSWindow?
     /// The window the border marks while it is up.

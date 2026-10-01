@@ -115,6 +115,13 @@ struct EngineFuzzTests {
         if rng.next() % 3 != 0 { o.featureCount = Int(rng.next() % 16) + 1 }
         if rng.next() % 3 != 0 { o.featureSize = 0.06 + Double(rng.next() % 89) / 100 }
         if rng.next() % 3 != 0 { o.deckPeek = Double(rng.next() % 201) }
+        if rng.next() % 3 != 0 { o.split = .some([Axis.horizontal, .vertical, nil].randomElement(using: &rng)!) }
+        if rng.next() % 3 != 0 {
+            o.weightShareMin = 0.05 + Double(rng.next() % 41) / 100
+            o.weightShareMax = 0.55 + Double(rng.next() % 41) / 100
+        }
+        if rng.next() % 3 != 0 { o.gapsInner = Double(rng.next() % 40) }
+        if rng.next() % 3 != 0 { o.gapsOuter = Double(rng.next() % 120) }
         return o
     }
 
@@ -393,7 +400,7 @@ struct EngineFuzzTests {
         return !common.isNull && common.width > 0 && common.height > 0
     }
 
-    @Test("random operation sequences preserve Engine invariants", arguments: [UInt64(1), 2, 3, 4, 5])
+    @Test("random operation sequences preserve Engine invariants", arguments: (1...12).map { UInt64($0) })
     func randomOperations(seed: UInt64) {
         var rng = SplitMix64(seed: seed)
         var engine = Engine(config: seed % 2 == 1 ? Self.configA() : Self.randomConfig(&rng))
@@ -401,7 +408,7 @@ struct EngineFuzzTests {
         var knownIDs: [WindowID] = []
 
         for step in 0..<3000 {
-            switch rng.next() % 11 {
+            switch rng.next() % 15 {
             case 0, 1:
                 // addWindow: random id incl. duplicates.
                 let id: WindowID
@@ -460,7 +467,15 @@ struct EngineFuzzTests {
                 // tiled member instead of missing on an unrelated Space.
                 let focusedSpace = engine.focused.flatMap { engine.windows[$0]?.space }
                 let space: SpaceID? = (focusedSpace != nil && rng.next() % 5 != 0) ? focusedSpace : Self.randomSpace(&rng)
-                let outcome = engine.perform(Self.randomCommand(&rng), space: space, areas: Self.displayAreas)
+                let command = Self.randomCommand(&rng)
+                let before = Self.focusedExtent(engine, space: space)
+                let outcome = engine.perform(command, space: space, areas: Self.displayAreas)
+                if case .resize(let d) = command, d != 0, outcome.message == nil, let before,
+                   let after = Self.focusedExtent(engine, space: space) {
+                    // Rounding may cost a point or two; a wrong-direction resize costs far more.
+                    #expect((after - before) * (d > 0 ? 1 : -1) >= -2.01,
+                            "seed \(seed) step \(step): resize(\(d)) moved the focused tile \(before) -> \(after)")
+                }
                 if let change = outcome.settings {
                     if let size = change.featureSize {
                         #expect(size > 0.05 && size < 0.95, "seed \(seed) step \(step): SettingsChange featureSize \(size) out of range")
@@ -469,10 +484,35 @@ struct EngineFuzzTests {
                         #expect((1...16).contains(count), "seed \(seed) step \(step): SettingsChange featureCount \(count) out of range")
                     }
                 }
+            case 11:
+                // Native tab switch between arbitrary windows (incl. unknown ids and decked ones).
+                let ids = knownIDs + [WindowID(rng.next() % 40)]
+                _ = engine.swapTab(hiding: ids.randomElement(using: &rng) ?? 0, showing: ids.randomElement(using: &rng) ?? 1)
+            case 12:
+                guard let id = knownIDs.randomElement(using: &rng) else { break }
+                if Bool.random(using: &rng) { _ = engine.setHidden(id, Bool.random(using: &rng)) }
+                else { _ = engine.setBackgroundTab(id, Bool.random(using: &rng)) }
+            case 13:
+                let space = Self.randomSpace(&rng) ?? 1
+                if Bool.random(using: &rng) { engine.adoptIdealTree(space) }
+                else { engine.clearSettingOverrides(space, featureSize: Bool.random(using: &rng), featureCount: Bool.random(using: &rng)) }
+            case 14:
+                let ids = knownIDs + [WindowID(rng.next() % 40)]
+                _ = engine.swap(ids.randomElement(using: &rng) ?? 0, ids.randomElement(using: &rng) ?? 1,
+                                on: Self.randomSpace(&rng) ?? 1)
             default: break
             }
             Self.assertInvariants(engine, seed: seed, step: step)
         }
+    }
+
+    /// The focused tile's width + height on `space`, nil when it isn't a plainly drawn tile there.
+    static func focusedExtent(_ engine: Engine, space: SpaceID?) -> Double? {
+        guard let space, let f = engine.focused, engine.windows[f]?.space == space,
+              let state = engine.spaces[space], state.members.contains(f), !state.monocle, !state.isDecked(f),
+              let display = engine.snapshot.key(for: space)?.display, let area = displayAreas[display],
+              let frame = engine.layout(space: space, area: area).frames[f] else { return nil }
+        return Double(frame.width + frame.height)
     }
 }
 

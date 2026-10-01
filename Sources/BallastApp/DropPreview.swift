@@ -7,6 +7,7 @@ import BallastCore
 /// underneath but never the window in hand. Created on first use and reused
 /// for every drag; it never becomes key, shows on whichever Space is active,
 /// and Mission Control hides it.
+@MainActor
 final class DropPreview {
     private var window: NSWindow?
 
@@ -45,6 +46,7 @@ final class DropPreview {
 }
 
 /// Borderless, click-through overlay windows drawn over other apps' windows.
+@MainActor
 enum Overlay {
     /// Never becomes key, shows on whichever Space is active, and Mission
     /// Control hides it. Its layer-backed content view has the system window
