@@ -70,4 +70,29 @@ public enum SystemSettings {
     public static var macOSVersion: OperatingSystemVersion {
         ProcessInfo.processInfo.operatingSystemVersion
     }
+
+    /// Process names of other window managers that move windows on their own,
+    /// with their display names. Matched against every running process, so
+    /// launchd daemons (`brew services start yabai`) count too.
+    static let knownWindowManagers: [String: String] = [
+        "yabai": "yabai", "aerospace": "AeroSpace", "amethyst": "Amethyst", "rift": "Rift", "omniwm": "OmniWM",
+    ]
+
+    /// Display names of the known window managers running now, sorted.
+    public static var runningWindowManagers: [String] {
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        var name = [UInt8](repeating: 0, count: 256)
+        var found = Set<String>()
+        for pid in pids.prefix(Int(max(count, 0))) where pid > 0 && pid != getpid() {
+            let length = proc_name(pid, &name, UInt32(name.count))
+            guard length > 0 else { continue }
+            if let wm = knownWindowManagers[String(decoding: name.prefix(Int(length)), as: UTF8.self).lowercased()] {
+                found.insert(wm)
+            }
+        }
+        return found.sorted()
+    }
 }

@@ -17,6 +17,26 @@ public enum Direction: String, CaseIterable, Equatable, Sendable {
     /// Whether moving this way increases the coordinate along `axis`
     /// (screen coordinates are top-left origin, y grows downward).
     public var isForward: Bool { self == .right || self == .down }
+    public var opposite: Direction {
+        switch self {
+        case .left: return .right
+        case .right: return .left
+        case .up: return .down
+        case .down: return .up
+        }
+    }
+}
+
+extension CGRect {
+    /// The coordinate of the side facing `direction`.
+    func edge(_ direction: Direction) -> Double {
+        switch direction {
+        case .left: return minX
+        case .right: return maxX
+        case .up: return minY
+        case .down: return maxY
+        }
+    }
 }
 
 /// Gap sizes in points.
@@ -87,6 +107,21 @@ extension CGRect {
     }
 
     public var center: CGPoint { CGPoint(x: midX, y: midY) }
+
+    /// This rect's size, shrunk to fit `area`, centered in it.
+    public func centered(in area: CGRect) -> CGRect {
+        let w = min(width, area.width), h = min(height, area.height)
+        return CGRect(x: area.midX - w / 2, y: area.midY - h / 2, width: w, height: h).integral
+    }
+
+    /// Less than half of this rect lies on `screens` (assumed not to overlap).
+    public func isMostlyOffscreen(_ screens: [CGRect]) -> Bool {
+        let onScreen = screens.reduce(0.0) { sum, screen in
+            let common = intersection(screen)
+            return common.isNull ? sum : sum + common.width * common.height
+        }
+        return onScreen < width * height / 2
+    }
 }
 
 /// Divides `total` points into one segment per entry of `mins`, separated by

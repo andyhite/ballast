@@ -186,7 +186,7 @@ struct EngineFuzzTests {
     static func randomCommand(_ rng: inout SplitMix64) -> Command {
         let direction = [Direction.left, .right, .up, .down].randomElement(using: &rng) ?? .left
         let cycle: Cycle = Bool.random(using: &rng) ? .next : .prev
-        switch rng.next() % 21 {
+        switch rng.next() % 22 {
         case 0: return .focus(direction)
         case 1: return .swap(direction)
         case 2: return .focusLast
@@ -206,6 +206,7 @@ struct EngineFuzzTests {
         case 17: return .monocle
         case 18: return .focus(direction)
         case 19: return .swap(direction)
+        case 20: return .focusCycle(cycle)
         default: return .focusDisplay(cycle)
         }
     }
@@ -447,7 +448,21 @@ struct EngineFuzzTests {
                 guard let id = knownIDs.randomElement(using: &rng) else { break }
                 let frame = CGRect(x: Double(rng.next() % 500), y: Double(rng.next() % 500),
                                     width: Double(rng.next() % 800), height: Double(rng.next() % 800))
-                _ = engine.adoptFrame(id, frame)
+                if Bool.random(using: &rng) {
+                    _ = engine.adoptFrame(id, frame)
+                } else {
+                    // A user drag of the tile's edges, from its planned frame or an arbitrary one.
+                    let area = engine.windows[id]?.space.flatMap { engine.snapshot.key(for: $0) }
+                        .flatMap { Self.displayAreas[$0.display] } ?? .zero
+                    let planned = engine.windows[id]?.space.flatMap { engine.layout(space: $0, area: area).frames[id] } ?? frame
+                    let dragged = planned.insetBy(dx: Double(Int(rng.next() % 401) - 200) / 2,
+                                                  dy: Double(Int(rng.next() % 401) - 200) / 2)
+                        .offsetBy(dx: Double(Int(rng.next() % 101) - 50), dy: Double(Int(rng.next() % 101) - 50))
+                    let outcome = engine.resizeTile(id, from: planned, to: dragged, area: area)
+                    if let size = outcome.settings?.featureSize {
+                        #expect(size > 0.05 && size < 0.95, "seed \(seed) step \(step): drag featureSize \(size) out of range")
+                    }
+                }
             case 9:
                 switch rng.next() % 4 {
                 case 0: _ = engine.applyConfig(Self.configA())

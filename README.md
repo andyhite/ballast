@@ -88,7 +88,9 @@ each **(display, Space)** pair using that pair's arrangement settings.
 
 If either setting is wrong, Ballast shows `! SET` in the menu bar and does not
 manage any windows. Stage Manager doesn't stop Ballast, but while it is on,
-every desktop floats.
+every desktop floats. Another tiling window manager running at the same time
+(yabai, AeroSpace, Amethyst, Rift, OmniWM) turns the menu bar title red with a
+`! ` prefix, and `ballast doctor` warns about it: quit one of them.
 
 ## Install
 
@@ -165,7 +167,11 @@ buttons to float or tile it by rule.
 
 Drag a window onto another tile to swap the two, or onto another display to
 move it there. While you drag, a highlight marks the window you'd swap with,
-or where the window will land on the other display.
+or where the window will land on the other display. Drag a tile's edge to
+resize: the feature boundary or the BSP split under that edge moves to where
+you let go, and the tiles around it follow (the feature size is saved like
+`feature-size`). An edge on the screen border, between fixed-grid columns, or
+between adaptive cells gets the rule's `on_self_move` (snap back by default).
 
 ### Configuration
 
@@ -229,11 +235,14 @@ You can bind any command to a hotkey in `[bindings]`, or send it with
 | Command | Effect |
 |---|---|
 | `focus left\|right\|up\|down`, `focus-last`, `focus-feature` | Move focus; at a display edge, continue onto the nearest display in that direction. `focus-feature` toggles focus to and from the feature |
+| `focus next\|prev` | Focus the next or previous tiled window on this desktop in layout order, decks included, wrapping around |
 | `swap left\|right\|up\|down`, `promote` | Rearrange tiles (makes the desktop manual). `promote` swaps the focused tile into the first feature slot |
 | `deck left\|right\|up\|down`, `undeck` | Put the focused window in the tile of its neighbor that way (a *deck*: windows sharing one tile, shown like an overflow deck with the neighbors peeking; `deck_peek` sets the strip), or take it out into its own tile right after the deck. Makes the desktop manual. `focus up`/`down` move through a deck's windows. A deck left with one window dissolves; `reset` dissolves them all; float ignores them |
 | `reset` | Drop the manual arrangement; re-rank by weight |
 | `relayout` | Fix a garbled desktop: re-read its windows, forget learned minimum sizes, re-send every frame. Keeps the arrangement |
 | `monocle`, `float` | Toggle monocle (a temporary full-area deck of every tiled window) / float the focused window |
+| `close`, `fullscreen` | Press the focused window's close button (the app may ask to save) / toggle its native full screen |
+| `raise-floats`, `rescue` | Bring every floating window on this desktop to the front, keeping their order (focus moves to the frontmost one) / move floating windows that are mostly off-screen to the middle of the current display |
 | `grow [n]`, `shrink [n]`, `balance` | Resize: the feature size in `fixed` and `adaptive` when a feature is on, BSP split ratios in `dwindle` and `balanced`. Does nothing, and says so, when neither applies |
 | `feature-size <±d>`, `feature-count <±d>` | Adjust the feature area (size clamped strictly between 5% and 95%, never reversing direction near a bound) |
 | `send-to-display next\|prev`, `focus-display next\|prev` | Move a window or focus to the next/previous display |

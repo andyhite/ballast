@@ -11,6 +11,8 @@ public enum Command: Equatable, Sendable {
     case focus(Direction)
     case swap(Direction)
     case focusLast
+    /// Focus the next or previous tiled window on the Space, in layout order, wrapping.
+    case focusCycle(Cycle)
     /// Focus the feature (first tile); from the feature, return to the window
     /// focused before it.
     case focusFeature
@@ -26,6 +28,14 @@ public enum Command: Equatable, Sendable {
     case relayout
     case monocle
     case toggleFloat
+    /// Close the focused window (its close button).
+    case close
+    /// Toggle native macOS full screen on the focused window.
+    case fullscreen
+    /// Bring every floating window on the Space to the front.
+    case raiseFloats
+    /// Move floating windows that are mostly off-screen back onto the current display.
+    case rescue
     /// Grow (positive) or shrink (negative) the focused tile's share.
     case resize(Double)
     case featureSize(Double)
@@ -37,9 +47,9 @@ public enum Command: Equatable, Sendable {
     case dumpState
 
     public static let reference: [String] = [
-        "focus left|right|up|down", "focus-last", "focus-feature", "swap left|right|up|down",
+        "focus left|right|up|down", "focus next|prev", "focus-last", "focus-feature", "swap left|right|up|down",
         "deck left|right|up|down", "undeck",
-        "promote", "reset", "relayout", "monocle", "float",
+        "promote", "reset", "relayout", "monocle", "float", "close", "fullscreen", "raise-floats", "rescue",
         "grow [amount]", "shrink [amount]", "feature-size <+/-delta>", "feature-count <+/-delta>",
         "balance", "send-to-display next|prev", "focus-display next|prev", "reload", "dump-state",
     ]
@@ -83,6 +93,7 @@ public enum Command: Equatable, Sendable {
         case "focus":
             if arg == "last", args.count == 1 { return .success(.focusLast) }
             if arg == "feature", args.count == 1 { return .success(.focusFeature) }
+            if let arg, args.count == 1, ["next", "prev", "previous"].contains(arg) { return cycle().map(Command.focusCycle) }
             if let arg, args.count == 1, let message = LegacyNames.commandMessage("focus \(arg)") {
                 return .failure(.init(message))
             }
@@ -97,6 +108,10 @@ public enum Command: Equatable, Sendable {
         case "relayout", "re-layout": return noArgs(.relayout)
         case "monocle", "zoom": return noArgs(.monocle)
         case "float": return noArgs(.toggleFloat)
+        case "close": return noArgs(.close)
+        case "fullscreen": return noArgs(.fullscreen)
+        case "raise-floats": return noArgs(.raiseFloats)
+        case "rescue": return noArgs(.rescue)
         case "grow": return number(default: 0.05).map { .resize(abs($0)) }
         case "shrink": return number(default: 0.05).map { .resize(-abs($0)) }
         case "feature-size": return number(default: nil).map(Command.featureSize)

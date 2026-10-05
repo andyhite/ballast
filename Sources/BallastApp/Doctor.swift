@@ -84,6 +84,7 @@ public enum Doctor {
         checks.append(autoRearrangeCheck())
         checks.append(stageManagerCheck())
         checks.append(macOSVersionCheck())
+        checks.append(windowManagerConflictCheck())
         checks.append(contentsOf: privateSymbolChecks())
         checks.append(skyLightSanityCheck())
 
@@ -147,6 +148,15 @@ public enum Doctor {
             )
         }
         return DoctorCheck(name: stageManagerCheckName, status: .pass, detail: "off")
+    }
+
+    private static func windowManagerConflictCheck() -> DoctorCheck {
+        let name = "Other window managers"
+        let running = SystemSettings.runningWindowManagers
+        if running.isEmpty { return DoctorCheck(name: name, status: .pass, detail: "none running") }
+        return DoctorCheck(
+            name: name, status: .warn,
+            detail: "\(running.joined(separator: ", ")) running — quit it; two window managers fight over every window")
     }
 
     private static func macOSVersionCheck() -> DoctorCheck {

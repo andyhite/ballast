@@ -1410,6 +1410,86 @@ struct EngineTests {
         #expect(!engine.settings(for: 1).hasFeature && engine.settings(for: 1).rows == 1)
         #expect(engine.settings(for: 4).hasFeature)
     }
+
+    @Test("focus next/prev walks the tiled windows in layout order, wraps, and skips floaters")
+    func focusCycleWraps() {
+        var engine = Self.makeEngine()
+        for id: WindowID in 1...4 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        _ = engine.focus(3)
+        _ = engine.perform(.toggleFloat, space: 1, areas: Self.areas) // 3 floats, keeps focus
+        let order = engine.spaces[1]!.liveOrder
+        #expect(order.count == 3 && !order.contains(3))
+        _ = engine.focus(order[2])
+        #expect(engine.perform(.focusCycle(.next), space: 1, areas: Self.areas).focus == order[0])
+        _ = engine.focus(order[0])
+        #expect(engine.perform(.focusCycle(.prev), space: 1, areas: Self.areas).focus == order[2])
+        // From a floating window: next starts at the first tile, prev at the last.
+        _ = engine.focus(3)
+        #expect(engine.perform(.focusCycle(.next), space: 1, areas: Self.areas).focus == order[0])
+        #expect(engine.perform(.focusCycle(.prev), space: 1, areas: Self.areas).focus == order[2])
+    }
+
+    @Test("dragging a tile's edge moves the feature boundary under it, from either side; other edges move nothing")
+    func dragResizeMovesFeatureBoundary() {
+        var engine = Self.makeEngine()
+        for id: WindowID in 1...3 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        let order = engine.spaces[1]!.liveOrder
+        let feature = order[0], grid = order[1]
+        func frames() -> [WindowID: CGRect] { engine.layout(space: 1, area: Self.area).frames }
+
+        let before = frames()
+        var wider = before[feature]!
+        wider.size.width += 100
+        let out = engine.resizeTile(feature, from: before[feature]!, to: wider, area: Self.area)
+        #expect(out.dirty == [1] && out.settings?.featureSize == engine.settings(for: 1).featureSize)
+        #expect(abs(frames()[feature]!.maxX - wider.maxX) <= 1)
+        #expect(abs(frames()[grid]!.minX - (wider.maxX + 8)) <= 1)
+
+        let middle = frames()
+        var narrower = middle[grid]!
+        narrower.origin.x += 50
+        narrower.size.width -= 50
+        _ = engine.resizeTile(grid, from: middle[grid]!, to: narrower, area: Self.area)
+        #expect(abs(frames()[feature]!.maxX - (narrower.minX - 8)) <= 1)
+
+        // The area's border and the row boundary inside the fixed column size nothing.
+        let now = frames()
+        var outer = now[grid]!
+        outer.size.width += 40
+        #expect(engine.resizeTile(grid, from: now[grid]!, to: outer, area: Self.area).dirty.isEmpty)
+        var taller = now[grid]!
+        taller.size.height += 40
+        #expect(engine.resizeTile(grid, from: now[grid]!, to: taller, area: Self.area).dirty.isEmpty)
+        #expect(frames() == now)
+    }
+
+    @Test("dragging a dwindle tile's edge sets the ratio of the split it sits on and makes the Space manual")
+    func dragResizeMovesBSPCut() {
+        var config = Self.baseConfig()
+        config.layout.arrange = .dwindle
+        config.layout.feature = .off
+        var engine = Self.makeEngine(config: config)
+        for id: WindowID in 1...3 { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        // a | (b over c) on the wide area.
+        let leaves = engine.spaces[1]!.tree!.leaves
+        let (a, b, c) = (leaves[0], leaves[1], leaves[2])
+        func frames() -> [WindowID: CGRect] { engine.layout(space: 1, area: Self.area).frames }
+
+        let before = frames()
+        var lower = before[b]!
+        lower.size.height += 60
+        #expect(engine.resizeTile(b, from: before[b]!, to: lower, area: Self.area).dirty == [1])
+        #expect(engine.spaces[1]!.manual)
+        #expect(abs(frames()[b]!.maxY - lower.maxY) <= 1 && abs(frames()[c]!.minY - (lower.maxY + 8)) <= 1)
+        #expect(frames()[a] == before[a])
+
+        let middle = frames()
+        var wider = middle[b]!
+        wider.origin.x -= 50
+        wider.size.width += 50
+        _ = engine.resizeTile(b, from: middle[b]!, to: wider, area: Self.area)
+        #expect(abs(frames()[a]!.maxX - (wider.minX - 8)) <= 1 && abs(frames()[c]!.minX - wider.minX) <= 1)
+    }
 }
 
 @Suite("Engine review regressions")

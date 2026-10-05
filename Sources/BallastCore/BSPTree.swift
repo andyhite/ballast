@@ -291,6 +291,39 @@ extension BSPNode {
         }
     }
 
+    /// Path to the split whose cut is `id`'s `edge` (false = first child,
+    /// true = second), read from where layout drew the leaves: the deepest
+    /// split along `edge`'s axis with `id` on the near side of its cut.
+    /// Leaves without a frame are not drawn (laid out elsewhere, like a
+    /// feature), so a split with one side undrawn is no cut. `nil` when
+    /// `edge` lies on no cut (the region's own border).
+    public func cutPath(beside id: WindowID, _ edge: Direction, frames: [WindowID: CGRect]) -> [Bool]? {
+        guard case .split(let s) = self, contains(id) else { return nil }
+        let inSecond = s.second.contains(id)
+        if let deeper = (inSecond ? s.second : s.first).cutPath(beside: id, edge, frames: frames) {
+            return [inSecond] + deeper
+        }
+        func drawn(_ node: BSPNode) -> CGRect? {
+            node.leaves.compactMap { frames[$0] }.reduce(nil) { $0?.union($1) ?? $1 }
+        }
+        guard let a = drawn(s.first), let b = drawn(s.second) else { return nil }
+        let cut: Axis? = a.maxX <= b.minX + 1.5 ? .horizontal : (a.maxY <= b.minY + 1.5 ? .vertical : nil)
+        // A forward edge (right, bottom) is the cut only from the first side.
+        return cut == edge.axis && inSecond != edge.isForward ? [] : nil
+    }
+
+    /// Pins the ratio of the split at `path` (see `cutPath`).
+    public func settingRatio(_ ratio: Double, at path: ArraySlice<Bool>) -> BSPNode {
+        guard case .split(var s) = self else { return self }
+        guard let second = path.first else {
+            s.ratio = ratio
+            return .split(s)
+        }
+        if second { s.second = s.second.settingRatio(ratio, at: path.dropFirst()) }
+        else { s.first = s.first.settingRatio(ratio, at: path.dropFirst()) }
+        return .split(s)
+    }
+
     // MARK: Layout
 
     public func layout(in rect: CGRect, context: BSPLayoutContext) -> [WindowID: CGRect] {

@@ -405,6 +405,7 @@ struct ConfigTests {
         #expect(Command.parse("focus-feature") == .success(.focusFeature))
         #expect(Command.parse("focus feature") == .success(.focusFeature))
         #expect(Command.parse("focus left") == .success(.focus(.left)))
+        #expect(Command.parse("focus prev") == .success(.focusCycle(.prev)))
         #expect(Command.parse("deck") != .success(.deck(.left)))
         #expect(Command.parse("feature-count 1.5") != .success(.featureCount(1)))
         #expect(Command.parse("feature-size") != .success(.featureSize(0)))

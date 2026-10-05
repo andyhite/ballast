@@ -207,4 +207,11 @@ placement = { x = 0.74, y = 0.72, w = 0.25, h = 0.25 }
 "alt+comma" = "send-to-display prev"
 "alt+shift+period" = "focus-display next"
 "alt+shift+comma" = "focus-display prev"
+# Window commands (uncomment to use)
+# "alt+n" = "focus next"
+# "alt+p" = "focus prev"
+# "alt+w" = "close"
+# "alt+f" = "fullscreen"
+# "alt+shift+t" = "raise-floats"
+# "alt+shift+o" = "rescue"
 "hyper+r" = "reload"

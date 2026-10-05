@@ -46,8 +46,8 @@ final class StatusBar: NSObject, NSMenuDelegate {
               let space = engine.snapshot.activeSpace(ofDisplay: display.uuid) else { return ("–", manager.configStore.error != nil) }
         let ordinal = engine.snapshot.key(for: space).map { String($0.ordinal) } ?? "FS"
         let monocle = engine.spaces[space]?.monocle == true ? " ⤢" : ""
-        let prefix = manager.configStore.error != nil ? "! " : ""
-        return ("\(prefix)\(ordinal) · \(engine.glyph(for: space))\(monocle)", manager.configStore.error != nil)
+        let warn = manager.configStore.error != nil || !manager.otherWindowManagers.isEmpty
+        return ("\(warn ? "! " : "")\(ordinal) · \(engine.glyph(for: space))\(monocle)", warn)
     }
 
 
@@ -58,6 +58,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     // Global settings and `[layout]` defaults live only in the Settings window.
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        manager.checkWindowManagers()
         menu.removeAllItems()
         let configOK = manager.configStore.error == nil
 
@@ -500,6 +501,9 @@ final class StatusBar: NSObject, NSMenuDelegate {
             lines += error.split(separator: "\n").prefix(5).map(String.init)
         }
         lines += manager.hotkeyFailures.map { "Hotkey not registered — \($0)" }
+        if !manager.otherWindowManagers.isEmpty {
+            lines.append("\(manager.otherWindowManagers.joined(separator: ", ")) is also running — quit it")
+        }
         return lines
     }
 

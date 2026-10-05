@@ -71,6 +71,8 @@ final class WindowManager {
     /// Bumped by every WM-initiated focus, so a superseded deferred raise never runs.
     private var focusGeneration: UInt64 = 0
     private var axTrustObserverTarget: AXTrustObserverTarget?
+    /// Other window managers running (see `SystemSettings.runningWindowManagers`).
+    private(set) var otherWindowManagers: [String] = []
 
     init(configURL: URL) {
         configStore = ConfigStore(url: configURL)
@@ -177,9 +179,24 @@ final class WindowManager {
             observeModifiers()
         }
         attachDock(attempt: 0)
+        checkWindowManagers()
         for app in NSWorkspace.shared.runningApplications { observe(app, restoring: true) }
         fullResync()
         Log.wm.info("managing \(self.engine.windows.count) windows")
+    }
+
+    /// Re-scans for other window managers; notifies when one newly appears.
+    /// Runs at start, on app launch/quit, and when the menu opens: no polling.
+    func checkWindowManagers() {
+        let running = SystemSettings.runningWindowManagers
+        guard running != otherWindowManagers else { return }
+        let added = running.filter { !otherWindowManagers.contains($0) }
+        otherWindowManagers = running
+        if !added.isEmpty {
+            Notifier.post(title: "\(added.joined(separator: ", ")) is also running",
+                          body: "Two window managers fight over every window. Quit one of them.")
+        }
+        refreshSurfaces()
     }
 
     /// Dock posts the Mission Control (Exposé) notifications. Re-attached when
@@ -216,6 +233,7 @@ final class WindowManager {
             if app.bundleIdentifier == "com.apple.dock" { self?.attachDock(attempt: 0); return }
             self?.recordLaunchBinding(app)
             self?.observe(app)
+            self?.checkWindowManagers()
         }
         on(NSWorkspace.didTerminateApplicationNotification) { [weak self] note in
             guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -225,6 +243,7 @@ final class WindowManager {
                 return
             }
             self?.forget(pid: app.processIdentifier)
+            self?.checkWindowManagers()
         }
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -813,10 +832,15 @@ final class WindowManager {
         }
     }
 
-    /// A user drag between tiles is always a swap intent (or a display move).
+    /// A user drag between tiles is always a swap intent (or a display move);
+    /// a drag of a tile's edge resizes the layout around it.
     private func userDragged(_ id: WindowID, to current: CGRect, from want: CGRect, at point: CGPoint) {
-        guard !DragController.isResize(current, from: want), let space = engine.windows[id]?.space else {
+        guard let space = engine.windows[id]?.space else {
             selfMoved(id, to: current)
+            return
+        }
+        if DragController.isResize(current, from: want) {
+            userResized(id, to: current, from: want, on: space)
             return
         }
         switch drag.dropTarget(for: id, at: point) {
@@ -830,6 +854,24 @@ final class WindowManager {
             break
         }
         reapply(id)
+    }
+
+    /// Moves the boundaries under the dragged edges (`Engine.resizeTile`);
+    /// an edge on no boundary falls back to the rule's `on_self_move`.
+    private func userResized(_ id: WindowID, to current: CGRect, from want: CGRect, on space: SpaceID) {
+        guard let key = engine.snapshot.key(for: space), let display = displays.with(uuid: key.display) else {
+            selfMoved(id, to: current)
+            return
+        }
+        let outcome = engine.resizeTile(id, from: want, to: current, area: display.visibleFrame)
+        guard !outcome.dirty.isEmpty else {
+            selfMoved(id, to: current)
+            return
+        }
+        if let change = outcome.settings { configStore.schedulePersist(change) }
+        reapply(id)
+        markDirty(outcome.dirty)
+        refreshSurfaces()
     }
 
     /// App (or user resize) changed a managed frame: apply the rule's `on_self_move`.
@@ -999,6 +1041,10 @@ final class WindowManager {
         case .reload?: reloadConfig()
         case .relayout(let space)?: relayout(space)
         case .dumpState?: dumpState()
+        case .close(let id)?: close(id)
+        case .fullscreen(let id)?: toggleFullscreen(id)
+        case .raiseFloats(let ids)?: raiseFloats(ids)
+        case .rescue?: rescue()
         case nil: break
         }
         if engine.focused != focusedBefore { flashFocus() }
@@ -1033,10 +1079,7 @@ final class WindowManager {
         guard let element = slots[id]?.element, let w = engine.windows[id],
               let frame = slots[id]?.expected ?? Self.windowBounds(of: id),
               let target = neighborDisplay(from: displays.best(for: frame), cycle) else { return }
-        let area = target.visibleFrame
-        let size = CGSize(width: min(frame.width, area.width), height: min(frame.height, area.height))
-        let destination = CGRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2,
-                                 width: size.width, height: size.height).integral
+        let destination = frame.centered(in: target.visibleFrame)
         // Only a window that's actually a member of a laid-out Space's plan
         // gets its departure cleaned up by `layout()`; setting `expected`
         // for a floating window (or one on a float-mode desktop) would
@@ -1053,6 +1096,57 @@ final class WindowManager {
             if engine.config.cursorFollowsFocus, let actual = outcome.actual, displays.best(for: actual)?.uuid == target.uuid {
                 CGWarpMouseCursorPosition(actual.center) // cursor follows the moved window
             }
+        }
+    }
+
+    /// Presses `id`'s close button: the app decides what closing means (it may ask to save).
+    private func close(_ id: WindowID) {
+        guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid else { return }
+        applier.perform(pid: pid) {
+            guard let button = AX.element(element, kAXCloseButtonAttribute) else { return }
+            AXUIElementPerformAction(button, kAXPressAction as CFString)
+        }
+    }
+
+    private func toggleFullscreen(_ id: WindowID) {
+        guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid else { return }
+        applier.perform(pid: pid) {
+            AX.setBool(element, "AXFullScreen", !(AX.bool(element, "AXFullScreen") ?? false))
+        }
+    }
+
+    /// Brings `ids` forward back to front in their current stacking, one at a
+    /// time: each app's AX runs on its own worker, so the next waits for the
+    /// last. A plain `AXRaise` never lifts a window above the active app's, so
+    /// each window's app is activated too; focus ends on the frontmost float.
+    private func raiseFloats(_ ids: [WindowID]) {
+        let stacking = Self.windowsFrontToBack()
+        let rank = Dictionary(stacking.enumerated().map { ($1, $0) }, uniquingKeysWith: min)
+        raiseInOrder(ids.sorted { (rank[$0] ?? .max) > (rank[$1] ?? .max) }[...])
+    }
+
+    private func raiseInOrder(_ ids: ArraySlice<WindowID>) {
+        guard let id = ids.first else { return }
+        guard let element = slots[id]?.element, let pid = engine.windows[id]?.pid else { raiseInOrder(ids.dropFirst()); return }
+        NSRunningApplication(processIdentifier: pid)?.activate()
+        applier.perform(pid: pid) { [weak self] in
+            AX.setBool(element, kAXMainAttribute, true)
+            AX.raise(element)
+            DispatchQueue.main.async { self?.raiseInOrder(ids.dropFirst()) }
+        }
+    }
+
+    /// Centers every floating window on a visible Space that is mostly off
+    /// the displays on the current display.
+    private func rescue() {
+        guard let target = currentDisplay else { return }
+        let screens = displays.map(\.frame)
+        let bounds = Self.windowBounds()
+        for (id, w) in engine.windows where w.isManaged && !engine.isTiled(id) && !w.minimized && !w.hidden
+            && !w.backgroundTab && isOnActiveSpace(id) {
+            guard let frame = bounds[id], frame.isMostlyOffscreen(screens), let element = slots[id]?.element else { continue }
+            applier.apply(.init(window: id, pid: w.pid, element: element, target: frame.centered(in: target.visibleFrame),
+                                animation: nil)) { _, _, _ in }
         }
     }
 

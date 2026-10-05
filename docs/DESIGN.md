@@ -605,6 +605,7 @@ next frame (per-window generation counter).
 | Display unplugged or replugged, sleep/wake | `didChangeScreenParameters` / `didWake` trigger a full resync. Config overrides for the returning display re-apply by UUID. |
 | Native fullscreen | Windows with `AXFullScreen` are skipped. Windows on a fullscreen-type Space are never tiled. |
 | Stage Manager on | `engine.passthrough`: every Space renders as floating, and the menu says so. |
+| Another window manager running | `SystemSettings.runningWindowManagers` matches every process name (`proc_listallpids`, so launchd daemons like yabai count) against a short list of tilers. Checked at start, on app launch and quit, and when the menu opens, never polled. Ballast keeps managing; the title turns red with `! `, the menu names it, a notification fires once, and `doctor` warns. |
 | Window moved to another display (command or drag) | A plain AX move into the target display's visible frame. macOS reassigns the Space, Ballast reconciles, and the cursor follows. |
 | Directional focus at a display edge | If the active Space has no tile farther in that direction, focus enters the nearest display beyond that edge through its nearest visible tile. Displays without a focusable tile are skipped. |
 | Moving between Spaces on one display | Not a WM function (a non-goal). |
@@ -678,6 +679,21 @@ back in different tiles.
     dragged one (`order(.below, relativeTo:)`), so it tints the tiles
     underneath while the window in hand stays on top: public API, no window
     capture.
+  - If the window changed size while the button was down, it is a user
+    **resize**. `Engine.resizeTile` takes each dragged edge in turn,
+    measured against the tile's region (`tilePlan`, before decks expand,
+    shifted by the window's own delta so a deck window works too). An edge
+    on the feature's inner side, or a grid tile's edge facing it across the
+    inner gap, sets the feature size; an edge on a BSP cut (`cutPath`: the
+    deepest split along that axis with the tile on the near side, judged
+    from the drawn frames, featured leaves left out) sets that split's
+    ratio and makes the Space manual. The value comes from bisecting the
+    parameter over real layouts until the edge lands at the drop, so
+    learned minimum sizes, gaps and a centered feature need no special
+    cases; results stay inside the feature-size bounds and the weight
+    share limit. Neighbors follow on release, not live. An edge on no
+    boundary (the area's border, fixed-grid columns, adaptive cells) falls
+    through to `on_self_move` below.
   - Otherwise the rule's `on_self_move` applies. `snap_back` re-applies the
     frame. `adopt` records the window's own frame as a manual override for
     that Space.
@@ -748,6 +764,18 @@ still fire-and-forget (no acknowledgement), at the same trust level as any
 local user process, and not a scripting API.
 `dump-state` writes `~/Library/Caches/dev.ballast/state.json`; the smoke test
 uses it.
+
+**Window commands.** The engine only names the target; the AX work runs on
+the window's app worker. `close` presses `kAXCloseButtonAttribute` (the app
+may ask to save) and `fullscreen` flips `AXFullScreen`; both act on the
+frontmost tracked window, managed or not. `raise-floats` brings the Space's
+managed floating windows forward back to front in their current stacking,
+chaining one app worker after the next so the order holds across apps. A
+bare `AXRaise` never lifts a window above the active app's, so each app is
+activated too and focus ends on the frontmost float. `rescue`
+centers, on the current display, every managed floating window on a visible
+Space that has less than half its area on any display. `focus next|prev`
+walks the Space's tiled windows in layout order, decks expanded, wrapping.
 
 **Window Inspector.** A non-activating floating panel
 (`Sources/BallastApp/Inspector.swift`, opened from the menu) shows the

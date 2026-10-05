@@ -122,6 +122,14 @@ public enum PlatformAction: Equatable, Sendable {
     /// even frames the platform already requested.
     case relayout(SpaceID)
     case dumpState
+    /// Press the window's close button.
+    case close(WindowID)
+    /// Toggle the window's native full screen.
+    case fullscreen(WindowID)
+    /// Raise these floating windows, back to front.
+    case raiseFloats([WindowID])
+    /// Bring mostly off-screen floating windows back onto the current display.
+    case rescue
 }
 
 /// Per-Space settings a command changed instantly, pending persistence to
@@ -543,6 +551,76 @@ public struct Engine: Sendable {
         return [space]
     }
 
+    /// The user dragged edges of tiled window `id` from `old` (its planned
+    /// frame) to `new`. Each dragged edge on a boundary Ballast sizes — the
+    /// feature's, or a BSP split's — moves that boundary so the edge lands
+    /// where it was dropped, within the usual bounds. Edges on the area's
+    /// border, between fixed-grid columns or adaptive cells move nothing. A
+    /// feature size comes back in `settings` for persisting, like
+    /// `feature-size`; a split ratio makes the Space manual, like `grow`.
+    /// `dirty` is empty when no dragged edge moved a boundary.
+    public mutating func resizeTile(_ id: WindowID, from old: CGRect, to new: CGRect, area: CGRect) -> CommandOutcome {
+        var out = CommandOutcome()
+        guard let space = windows[id]?.space, let start = spaces[space], start.members.contains(id), !start.monocle,
+              start.frameOverrides[id] == nil, settings(for: space).arrange != .float else { return out }
+        let tile = start.tile(of: id)
+        for edge in Direction.allCases {
+            let delta = new.edge(edge) - old.edge(edge)
+            guard delta.isFinite, abs(delta) > 2, let state = spaces[space] else { continue }
+            let s = settings(for: space)
+            let inner = area.insetClamped(by: s.gaps.outer)
+            let tiles = tilePlan(state, s, in: inner).frames
+            guard let rect = tiles[tile] else { continue }
+            let target = rect.edge(edge) + delta
+            let featured = featuredTiles(state, s)
+            /// Where `probe` lays out the dragged edge.
+            func edgeAt(_ probe: Engine) -> Double? {
+                guard let state = probe.spaces[space] else { return nil }
+                return probe.tilePlan(state, probe.settings(for: space), in: inner).frames[tile]?.edge(edge)
+            }
+            let region = featured.compactMap { tiles[$0] }.reduce(nil as CGRect?) { $0?.union($1) ?? $1 }
+            if let region, featured.count < state.tileCount, edge.axis == s.effectiveFeature.primaryAxis,
+               featured.contains(tile)
+                   ? abs(rect.edge(edge) - inner.edge(edge)) > 1.5 // the feature's inner side, not the area's border
+                   : abs(abs(rect.edge(edge) - region.edge(edge.opposite)) - s.gaps.inner) <= 2 { // a grid tile facing it
+                guard let size = Self.solve(0.05, 0.95, target: target, edge: { f in
+                    var probe = self
+                    probe.spaces[space]?.featureSizeOverride = f
+                    return edgeAt(probe)
+                }) else { continue }
+                out.settings = SettingsChange(space: space, featureSize: adjustFeatureSize(space, by: size - s.featureSize))
+                out.dirty = [space]
+            } else if s.arrange.isTree, !featured.contains(tile), let tree = state.tree,
+                      let path = tree.cutPath(beside: tile, edge, frames: tiles.filter { !featured.contains($0.key) }) {
+                let lo = min(s.weightShareMin, s.weightShareMax), hi = max(s.weightShareMin, s.weightShareMax)
+                guard let ratio = Self.solve(lo, hi, target: target, edge: { r in
+                    var probe = self
+                    probe.spaces[space]?.tree = tree.settingRatio(r, at: path[...])
+                    return edgeAt(probe)
+                }) else { continue }
+                beginManual(space)
+                spaces[space]?.tree = tree.settingRatio(ratio, at: path[...])
+                out.dirty = [space]
+            }
+        }
+        return out
+    }
+
+    /// The parameter in `lo...hi` whose layout puts the edge closest to
+    /// `target`, by bisection over `edge`, which must be monotonic in it.
+    /// `nil` when the parameter does not move the edge.
+    static func solve(_ lo: Double, _ hi: Double, target: Double, edge: (Double) -> Double?) -> Double? {
+        guard let first = edge(lo), let last = edge(hi), abs(last - first) >= 1 else { return nil }
+        let rising = last > first
+        var lo = lo, hi = hi
+        for _ in 0..<32 {
+            let mid = (lo + hi) / 2
+            guard let at = edge(mid) else { return nil }
+            if (at < target) == rising { lo = mid } else { hi = mid }
+        }
+        return (lo + hi) / 2
+    }
+
     // MARK: Commands
 
     /// Runs a command against `space` (the Space the user is looking at).
@@ -558,6 +636,12 @@ public struct Engine: Sendable {
         case .reload: out.action = .reload; return out
         case .dumpState: out.action = .dumpState; return out
         case .focusDisplay(let c): out.action = .focusDisplay(c); return out
+        case .rescue: out.action = .rescue; return out
+        case .close, .fullscreen:
+            // Any tracked window, managed or not: the user is acting on what has focus.
+            guard let f = frontmost else { out.message = "no focused window"; return out }
+            out.action = command == .close ? .close(f) : .fullscreen(f)
+            return out
         case .sendToDisplay(let c):
             guard let f = focused else { out.message = "no focused window"; return out }
             out.action = .sendToDisplay(f, c)
@@ -580,6 +664,17 @@ public struct Engine: Sendable {
         case .focusLast:
             guard let current = focusedHere ?? spaces[space]?.focus.mostRecent else { return out }
             out.focus = spaces[space]?.focus.fallback(excluding: current) { eligibleForFocus($0, on: space) }
+        case .focusCycle(let cycle):
+            guard let state = spaces[space] else { return out }
+            let order = state.expanding(tileOrder(state)).filter { eligibleForFocus($0, on: space) }
+            guard !order.isEmpty else { return out }
+            let step = cycle == .next ? 1 : order.count - 1
+            let start = focusedHere.flatMap(order.firstIndex(of:)) ?? (cycle == .next ? order.count - 1 : 0)
+            out.focus = order[(start + step) % order.count]
+        case .raiseFloats:
+            out.action = .raiseFloats(windows.values
+                .filter { $0.space == space && $0.isManaged && !isTiled($0.id) && !$0.minimized && !$0.hidden && !$0.backgroundTab }
+                .map(\.id).sorted())
         case .focusFeature:
             guard s.hasFeature else { out.message = "no feature area in this layout"; return out }
             guard let state = spaces[space], let feature = tileOrder(state).first else { return out }
@@ -699,7 +794,7 @@ public struct Engine: Sendable {
                 out.settings = SettingsChange(space: space, featureSize: 0.5)
             }
             out.dirty = [space]
-        case .reload, .dumpState, .focusDisplay, .sendToDisplay:
+        case .reload, .dumpState, .focusDisplay, .sendToDisplay, .rescue, .close, .fullscreen:
             break
         }
         return out
