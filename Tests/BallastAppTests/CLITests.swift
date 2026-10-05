@@ -7,6 +7,21 @@ import Testing
 @MainActor
 @Suite
 struct CLITests {
+    @Test func socketRoundTrip() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("b-\(UUID().uuidString.prefix(8)).sock").path
+        let server = CommandSocket(path: path) { "ok: got \($0)" }
+        #expect(server.start())
+        let reply = await Task.detached { CommandSocket.send("focus left", path: path) }.value
+        #expect(reply == .success("ok: got focus left"))
+        let attributes = try FileManager.default.attributesOfItem(atPath: path)
+        #expect((attributes[.posixPermissions] as? Int) == 0o600)
+        server.stop()
+        #expect(!FileManager.default.fileExists(atPath: path))
+        let after = await Task.detached { CommandSocket.send("focus left", path: path) }.value
+        if case .success = after { Issue.record("send succeeded after stop") }
+    }
+
     private func tempFile(_ text: String?) throws -> String {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("ballast-cli-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

@@ -84,13 +84,14 @@ extension CGRect {
         let total = extent(axis)
         let first = max(0, min(firstLength, total - gap)).rounded()
         let secondLength = max(0, total - first - gap)
+        let secondStart = min(first + gap, total)
         switch axis {
         case .horizontal:
             return (CGRect(x: minX, y: minY, width: first, height: height),
-                    CGRect(x: minX + first + gap, y: minY, width: secondLength, height: height))
+                    CGRect(x: minX + secondStart, y: minY, width: secondLength, height: height))
         case .vertical:
             return (CGRect(x: minX, y: minY, width: width, height: first),
-                    CGRect(x: minX, y: minY + first + gap, width: width, height: secondLength))
+                    CGRect(x: minX, y: minY + secondStart, width: width, height: secondLength))
         }
     }
 
@@ -189,9 +190,10 @@ func tileLinear(_ ids: [WindowID], in rect: CGRect, axis: Axis, gap: Double,
 /// `gap` apart, with edges rounded to whole points.
 func segments(of rect: CGRect, axis: Axis, lengths: [Double], gap: Double) -> [CGRect] {
     var cursor = rect.start(axis)
+    let lo = rect.start(axis), hi = rect.end(axis)
     return lengths.map { length in
-        let start = cursor.rounded()
-        let end = (cursor + length).rounded()
+        let start = min(max(cursor.rounded(), lo), hi)
+        let end = min(max((cursor + length).rounded(), start), hi)
         cursor += length + gap
         return rect.band(axis, from: start, length: end - start)
     }

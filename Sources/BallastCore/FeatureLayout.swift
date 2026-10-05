@@ -41,7 +41,7 @@ enum GridKind {
     /// Equal cells, row-major.
     case adaptive
     /// Something else (the BSP tree) renders the region; the tile list is ignored.
-    case custom((CGRect) -> TilePlan)
+    case custom(minExtent: (Axis) -> Double, render: (CGRect) -> TilePlan)
 }
 
 /// Geometry of the feature and the grid around it.
@@ -121,7 +121,8 @@ public enum FeatureLayout {
         let columnHeightMins = halfColumns.map { $0.map { ids -> Double in
             let heights = ids.map { finite(minSize($0).height) }
             let shown = limit.map { max($0, 1) } ?? ids.count
-            if ids.count > shown { return (heights.max() ?? 0) * Double(shown) + gap * Double(shown - 1) }
+            let strips = 2 * (peek.isFinite ? max(peek, 0).rounded() : 0)
+            if ids.count > shown { return (heights.max() ?? 0) * Double(shown) + gap * Double(shown - 1) + strips }
             return heights.reduce(0, +) + gap * Double(max(heights.count - 1, 0))
         } }
         var regions: [(half: Int?, min: Double, weight: Double)] = []
@@ -135,8 +136,10 @@ public enum FeatureLayout {
                     ? columnWidthMins[index].reduce(0, +) + gap * Double(max(columnWidthMins[index].count - 1, 0))
                     : columnHeightMins[index].max() ?? 0
             } else {
-                // Adaptive/BSP grids can't be forced narrower than their most demanding window.
-                regionMin = extentMin(halves[index])
+                switch grid {
+                case .custom(let minExtent, _): regionMin = minExtent(axis)
+                default: regionMin = GridLayout.minExtent(halves[index], axis: axis, gap: gap, minSize: minSize)
+                }
             }
             let region = (half: Optional(index), min: regionMin, weight: halfWeight)
             if feature.gridFollows == (index == 0) || feature == .off { regions.append(region) } else { regions.insert(region, at: 0) }
@@ -159,11 +162,13 @@ public enum FeatureLayout {
             let region = regionRects[index]
             switch grid {
             case .fixed:
-                let mins = columnWidthMins[halfIndex]
+                // Grids left of a horizontal feature fill right to left, so the minimums reverse with them.
+                let flip = axis == .horizontal && index < featureIndex
+                let mins = flip ? Array(columnWidthMins[halfIndex].reversed()) : columnWidthMins[halfIndex]
                 let widths = distribute(total: region.width, mins: mins,
                                         weights: Array(repeating: 1, count: mins.count), maxWeightRatio: .infinity, gap: gap)
                 var columnRects = segments(of: region, axis: .horizontal, lengths: widths, gap: gap)
-                if axis == .horizontal, index < featureIndex { columnRects.reverse() }
+                if flip { columnRects.reverse() }
                 for (ids, columnRect) in zip(halfColumns[halfIndex], columnRects) {
                     let column = DeckLayout.column(ids, in: columnRect, axis: .vertical, gap: gap, limit: limit, peek: peek,
                                                    recent: recent, weight: weight, maxWeightRatio: maxWeightRatio,
@@ -172,7 +177,7 @@ public enum FeatureLayout {
                 }
             case .adaptive:
                 plan.merge(GridLayout.plan(order: half, in: region, gap: gap, minSize: minSize))
-            case .custom(let render):
+            case .custom(_, let render):
                 plan.merge(render(region))
             }
         }

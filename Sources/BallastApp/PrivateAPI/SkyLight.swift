@@ -229,14 +229,7 @@ public final class SkyLightSpaceProvider: Sendable {
         guard let managed = slsCopyManagedDisplaySpaces(connectionID)?.takeRetainedValue() as? [AnyObject] else {
             return nil
         }
-        var active = Set<SpaceID>()
-        for entry in managed {
-            guard let dict = entry as? [String: AnyObject],
-                  let current = dict["Current Space"] as? [String: AnyObject],
-                  let id = Self.spaceID(fromEntry: current) else { continue }
-            active.insert(id)
-        }
-        return active
+        return Set(Self.parse(managed, builtin: [], small: []).displays.compactMap(\.activeSpace))
     }
 
     /// Extracts a Space id from a SkyLight dictionary, trying both known keys.

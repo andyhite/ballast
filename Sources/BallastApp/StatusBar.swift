@@ -29,7 +29,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         ])
         let problem = problemLines().first
         item.button?.toolTip = problem
-        item.button?.setAccessibilityLabel(problem.map { "Ballast: \($0)" } ?? "Ballast")
+        item.button?.setAccessibilityLabel(problem.map { "Ballast: \($0)" } ?? "Ballast: \(text)")
     }
 
     private func title() -> (String, Bool) {
@@ -191,7 +191,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
 
         menu.addItem(action("Remove Desktop Overrides", enabled: enabled) { [unowned self] in
-            if let error = manager.configStore.edit({ $0.removeSpaces(for: desktop.key) }) { writeError(error) }
+            if let error = manager.configStore.removeDesktopOverrides(desktop.key, space: desktop.space) { writeError(error) }
         })
         menu.addItem(action("More in Settings…") { [unowned self] in
             PreferencesWindow.show(manager: manager, desktop: desktop.key)
@@ -226,11 +226,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     }
 
     private func addAppRuleItems(to menu: NSMenu, bundleID: String, window: WindowRecord, enabled: Bool) {
-        let ruleIndex = manager.config.rules.firstIndex { rule in
-            rule.match.appID?.caseInsensitiveCompare(bundleID) == .orderedSame &&
-                rule.match.appName == nil && rule.match.titleRegex == nil && rule.match.titleSubstring == nil &&
-                rule.match.axRole == nil && rule.match.axSubrole == nil
-        }
+        let ruleIndex = manager.config.appOnlyRuleIndex(bundleID: bundleID)
         if let ruleIndex, window.rule.ruleIndex != ruleIndex {
             menu.addItem(Self.info("A more specific rule currently sets this window's weight", color: .systemOrange))
         }
@@ -513,7 +509,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     @discardableResult
     static func openConfig(manager: WindowManager, reveal: Bool = false) -> ConfigEditError? {
         // Only a missing file needs creating; an existing (possibly invalid) one must open as is.
-        if !FileManager.default.fileExists(atPath: manager.configStore.url.resolvingSymlinksInPath().path),
+        if !FileManager.default.fileExists(atPath: manager.configStore.url.resolvingSymlinksIncludingDangling().path),
            let error = manager.configStore.edit({ _ in .success(()) }) { return error }
         if reveal {
             NSWorkspace.shared.activateFileViewerSelecting([manager.configStore.url])
@@ -555,14 +551,15 @@ final class StatusBar: NSObject, NSMenuDelegate {
     # Small displays default to one full-screen deck, large ones to a feature beside two tiles.
     feature_size = 0.6
 
-    [bindings]
-    "alt+h" = "focus left"
-    "alt+l" = "focus right"
-    "alt+j" = "focus down"
-    "alt+k" = "focus up"
-    "alt+return" = "promote"
-    "alt+r" = "reset"
-    "alt+m" = "monocle"
+    # Hotkeys: uncomment to enable, or record your own in Settings › Keyboard.
+    # [bindings]
+    # "alt+h" = "focus left"
+    # "alt+l" = "focus right"
+    # "alt+j" = "focus down"
+    # "alt+k" = "focus up"
+    # "alt+return" = "promote"
+    # "alt+r" = "reset"
+    # "alt+m" = "monocle"
 
     """
 
@@ -580,6 +577,7 @@ final class StatusBar: NSObject, NSMenuDelegate {
     private func action(_ title: String, enabled: Bool = true, _ handler: @escaping () -> Void) -> NSMenuItem {
         let item = ClosureMenuItem(title: title, handler: handler)
         item.isEnabled = enabled
+        if !enabled { item.action = nil }
         return item
     }
 }

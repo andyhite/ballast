@@ -94,9 +94,6 @@ public enum Command: Equatable, Sendable {
             if arg == "last", args.count == 1 { return .success(.focusLast) }
             if arg == "feature", args.count == 1 { return .success(.focusFeature) }
             if let arg, args.count == 1, ["next", "prev", "previous"].contains(arg) { return cycle().map(Command.focusCycle) }
-            if let arg, args.count == 1, let message = LegacyNames.commandMessage("focus \(arg)") {
-                return .failure(.init(message))
-            }
             return direction().map(Command.focus)
         case "focus-last": return noArgs(.focusLast)
         case "focus-feature": return noArgs(.focusFeature)
@@ -126,7 +123,7 @@ public enum Command: Equatable, Sendable {
         case "reload": return noArgs(.reload)
         case "dump-state": return noArgs(.dumpState)
         default:
-            return .failure(.init(LegacyNames.commandMessage(verb) ?? "unknown command '\(verb)'"))
+            return .failure(.init("unknown command '\(verb)'"))
         }
     }
 }

@@ -65,6 +65,17 @@ struct EngineFuzzTests {
         return SpaceSnapshot(displays: [a])
     }
 
+    /// Both surviving ids swap ordinals relative to `snapshotFull`: display A lists 2, 1, then the fullscreen Space.
+    static func snapshotReordered(smallA: Bool = false, smallB: Bool = false) -> SpaceSnapshot {
+        let a = DisplaySpaces(displayUUID: displayA, spaces: [
+            SpaceInfo(id: 2, uuid: "a2", kind: .user),
+            SpaceInfo(id: 1, uuid: "a1", kind: .user),
+            SpaceInfo(id: 3, uuid: "a3", kind: .fullscreen),
+        ], activeSpace: 1, small: smallA)
+        let b = snapshotFull(smallA: smallA, smallB: smallB).displays[1]
+        return SpaceSnapshot(displays: [a, b])
+    }
+
     static let allSpaceIDs: [SpaceID] = [1, 2, 3, 4, 5, 6]
     static let knownAppIDs = ["com.a.app", "com.b.app", "com.ghostty.app", "com.tinyspeck.slackmacgap"]
 
@@ -137,6 +148,10 @@ struct EngineFuzzTests {
         config.rules = [
             AppRule(match: RuleMatch(appID: "com.a.app"), actions: RuleActions(weight: 3)),
         ]
+        if rng.next() % 3 == 0 {
+            config.rules.append(AppRule(match: RuleMatch(appID: knownAppIDs.randomElement(using: &rng)),
+                                        actions: RuleActions(manage: false)))
+        }
         return config
     }
 
@@ -219,6 +234,12 @@ struct EngineFuzzTests {
             #expect((1...8).contains(s.columns) && (0...16).contains(s.rows) && (1...16).contains(s.featureCount)
                         && s.featureSize > 0.05 && s.featureSize < 0.95 && (0...200).contains(s.deckPeek),
                     "seed \(seed) step \(step): settings out of range on space \(spaceID): \(s)")
+        }
+        if let focused = engine.focused {
+            #expect(engine.windows[focused]?.isManaged == true, "seed \(seed) step \(step): focused \(focused) is gone or unmanaged")
+        }
+        if let front = engine.frontmost {
+            #expect(engine.windows[front] != nil, "seed \(seed) step \(step): frontmost \(front) is gone")
         }
 
         for (spaceID, state) in engine.spaces {
@@ -382,6 +403,31 @@ struct EngineFuzzTests {
                     #expect(layout.covered[front] == nil,
                             "seed \(seed) step \(step): front \(front) tucked behind the view on space \(spaceID)")
                 }
+                // In the full-size area, nothing in view spills out of it, and with room to spare no tile is below its minimum.
+                if area == areas[0] && !layout.monocle && layout.arrangement != .float && state.frameOverrides.isEmpty {
+                    let eps = 1.0
+                    for (id, frame) in frames where layout.covered[id] == nil {
+                        #expect(frame.minX >= area.minX - eps && frame.minY >= area.minY - eps
+                                    && frame.maxX <= area.maxX + eps && frame.maxY <= area.maxY + eps,
+                                "seed \(seed) step \(step): frame \(frame) for \(id) outside \(area) on space \(spaceID)")
+                    }
+                    let finite = { (v: Double) in v.isFinite ? max(v, 0) : 0 }
+                    let gap = settings.gaps.inner, inner = area.insetClamped(by: settings.gaps.outer)
+                    let mins = state.members.map { id -> CGSize in
+                        let m = engine.windows[id]?.minSize ?? .zero
+                        return CGSize(width: finite(m.width), height: finite(m.height))
+                    }
+                    let slack = gap * Double(max(mins.count - 1, 0))
+                    if layout.covered.isEmpty && state.decks.isEmpty
+                        && mins.reduce(0, { $0 + $1.width }) + slack <= inner.width
+                        && mins.reduce(0, { $0 + $1.height }) + slack <= inner.height {
+                        for (id, frame) in frames {
+                            let m = engine.windows[id]?.minSize ?? .zero
+                            #expect(frame.width >= finite(m.width) - eps && frame.height >= finite(m.height) - eps,
+                                    "seed \(seed) step \(step): frame \(frame) for \(id) below minimum \(m) on space \(spaceID)")
+                        }
+                    }
+                }
             }
         }
 
@@ -464,16 +510,25 @@ struct EngineFuzzTests {
                     }
                 }
             case 9:
-                switch rng.next() % 4 {
+                let before = Dictionary(uniqueKeysWithValues: engine.spaces.keys.map { ($0, engine.settings(for: $0)) })
+                switch rng.next() % 5 {
                 case 0: _ = engine.applyConfig(Self.configA())
                 case 1, 2: _ = engine.applyConfig(Self.randomConfig(&rng))
+                case 3: _ = engine.setPassthrough(Bool.random(using: &rng))
                 default:
                     let smallA = rng.next() % 2 == 0, smallB = rng.next() % 2 == 0
                     _ = engine.updateSnapshot([
                         Self.snapshotFull(smallA: smallA, smallB: smallB),
                         Self.snapshotSpaceDeleted(smallA: smallA, smallB: smallB),
                         Self.snapshotDisplayUnplugged(smallA: smallA),
+                        Self.snapshotReordered(smallA: smallA, smallB: smallB),
                     ].randomElement(using: &rng)!)
+                }
+                // A settings change leaves non-manual balanced Spaces on their ideal tree.
+                for (id, state) in engine.spaces where !state.manual {
+                    guard let old = before[id], engine.settings(for: id) != old, engine.settings(for: id).arrange == .balanced else { continue }
+                    #expect(state.tree == engine.idealTree(state.idealOrder, on: id, decks: state.decks),
+                            "seed \(seed) step \(step): balanced space \(id) kept a stale tree after a settings change")
                 }
             case 10:
                 // Draw the command's Space from the focused window's Space

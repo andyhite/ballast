@@ -71,6 +71,9 @@ final class WindowManager {
     /// Bumped by every WM-initiated focus, so a superseded deferred raise never runs.
     private var focusGeneration: UInt64 = 0
     private var axTrustObserverTarget: AXTrustObserverTarget?
+    private var runningAppsObservation: NSKeyValueObservation?
+    /// AX element-destroyed events seen for windows not yet committed by discovery, per pid.
+    var destroyedBeforeCommit: [pid_t: [AXUIElement]] = [:]
     /// Other window managers running (see `SystemSettings.runningWindowManagers`).
     private(set) var otherWindowManagers: [String] = []
 
@@ -97,7 +100,7 @@ final class WindowManager {
         hotkeys = HotKeyCenter { [weak self] index in self?.runBinding(index) }
         let axTrustTarget = AXTrustObserverTarget { [weak self] in
             // Posted before the trust database settles; check shortly after.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.tryStart() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self?.accessibilityTrustChanged() }
         }
         self.axTrustObserverTarget = axTrustTarget
         DistributedNotificationCenter.default().addObserver(
@@ -105,18 +108,17 @@ final class WindowManager {
             name: Notification.Name("com.apple.accessibility.api"), object: nil,
             suspensionBehavior: .deliverImmediately
         )
-        DistributedNotificationCenter.default().addObserver(
-            forName: BallastCLI.commandNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let text = note.object as? String else { return }
-            MainActor.assumeIsolated {
-                switch Command.parse(text) {
-                case .success(let command): self?.perform(command)
-                case .failure(let error): Log.wm.error("ignored command '\(text, privacy: .public)': \(error.message, privacy: .public)")
-                }
-            }
-        }
         tryStart()
+    }
+
+    private func accessibilityTrustChanged() {
+        guard status == .running, !AXIsProcessTrusted() else { tryStart(); return }
+        for pid in Set(observers.keys).union(attaching) { forget(pid: pid) }
+        dockObserver?.stop()
+        dockObserver = nil
+        status = .needsAccessibility
+        Notifier.post(title: "Ballast lost Accessibility access",
+                      body: "Re-enable Ballast in System Settings › Privacy & Security › Accessibility; it resumes on its own.")
     }
 
     /// Idempotent: advances from any blocked state to `.running` once every
@@ -125,8 +127,11 @@ final class WindowManager {
         guard status != .running else { return }
         guard loadInitialConfig() else { return }
         guard provider != nil else {
-            status = .unsupported("Unsupported macOS version: \(providerError ?? "private SkyLight symbols missing")")
-            Notifier.post(title: "Ballast can't run", body: "This macOS version is unsupported. Run `ballast doctor`.")
+            let newStatus = Status.unsupported("Unsupported macOS version: \(providerError ?? "private SkyLight symbols missing")")
+            if status != newStatus {
+                Notifier.post(title: "Ballast can't run", body: "This macOS version is unsupported. Run `ballast doctor`.")
+            }
+            status = newStatus
             return
         }
         if !SystemSettings.displaysHaveSeparateSpaces || SystemSettings.autoRearrangeSpaces {
@@ -228,22 +233,11 @@ final class WindowManager {
                 MainActor.assumeIsolated { handler(note) }
             })
         }
-        on(NSWorkspace.didLaunchApplicationNotification) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            if app.bundleIdentifier == "com.apple.dock" { self?.attachDock(attempt: 0); return }
-            self?.recordLaunchBinding(app)
-            self?.observe(app)
-            self?.checkWindowManagers()
-        }
-        on(NSWorkspace.didTerminateApplicationNotification) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            if let self, self.dockObserver?.pid == app.processIdentifier {
-                self.dockObserver?.stop()
-                self.dockObserver = nil
-                return
-            }
-            self?.forget(pid: app.processIdentifier)
-            self?.checkWindowManagers()
+        runningAppsObservation = NSWorkspace.shared.observe(\.runningApplications, options: [.old, .new]) { @Sendable [weak self] _, change in
+            let old = Set((change.oldValue ?? []).map(\.processIdentifier))
+            let new = Set((change.newValue ?? []).map(\.processIdentifier))
+            let launched = Array(new.subtracting(old)), quit = Array(old.subtracting(new))
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.appsChanged(launched: launched, quit: quit) } }
         }
         on(NSWorkspace.didActivateApplicationNotification) { [weak self] note in
             guard let self, let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
@@ -271,6 +265,28 @@ final class WindowManager {
         workspaceTokens.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.requestResync() } })
+    }
+
+    /// Quits first (pid reuse), then launches; one window-manager rescan for the batch.
+    private func appsChanged(launched: [pid_t], quit: [pid_t]) {
+        for pid in quit {
+            if dockObserver?.pid == pid {
+                dockObserver?.stop()
+                dockObserver = nil
+            } else {
+                forget(pid: pid)
+            }
+        }
+        for pid in launched {
+            guard let app = NSRunningApplication(processIdentifier: pid) else { continue }
+            if app.bundleIdentifier == "com.apple.dock" {
+                attachDock(attempt: 0)
+            } else {
+                recordLaunchBinding(app)
+                observe(app)
+            }
+        }
+        if !launched.isEmpty || !quit.isEmpty { checkWindowManagers() }
     }
 
     private func observeMouse() {
@@ -351,6 +367,7 @@ final class WindowManager {
         observers[pid] = nil
         attaching.remove(pid)
         launchBindings[pid] = nil
+        destroyedBeforeCommit[pid] = nil
         for (id, w) in engine.windows where w.pid == pid { untrack(id) }
         applier.forget(pid: pid)
         scheduleLayout()
@@ -400,6 +417,8 @@ final class WindowManager {
                 let hadFocus = lastFocusLoss.map { $0.window == id && Date().timeIntervalSince($0.at) < 0.5 } ?? false
                 let removal = untrack(id, hadFocus: hadFocus)
                 if let fallback = removal.focusFallback, isOnActiveSpace(fallback) { focusWindow(fallback) }
+            } else {
+                destroyedBeforeCommit[observer.pid, default: []].append(element)
             }
         case kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification:
             guard let id = windowID(element) else { return }
@@ -513,7 +532,7 @@ final class WindowManager {
             return
         }
         displays = DisplayInfo.current()
-        engine.passthrough = SystemSettings.stageManagerEnabled
+        markDirty(engine.setPassthrough(SystemSettings.stageManagerEnabled))
         if let snapshot = provider.snapshot() {
             markDirty(engine.updateSnapshot(snapshot))
         }
@@ -769,6 +788,7 @@ final class WindowManager {
         if let n = slots[id]?.inFlight { slots[id]?.inFlight = max(0, n - 1) }
         guard let slot = slots[id] else { return }
         let current = slot.lastRequested == requested
+        if slot.pendingCheck { scheduleLayout() }
         guard let actual = outcome.actual else {
             // Unreadable (app busy launching): let the next event retry. A
             // superseded request says nothing about the window.
@@ -786,7 +806,6 @@ final class WindowManager {
            actual.width > requested.width + 2 || actual.height > requested.height + 2 {
             markDirty(engine.learnMinSize(id, Self.learnedMinSize(requested: requested, actual: actual)))
         }
-        if slot.pendingCheck { scheduleLayout() }
     }
 
     /// The size to feed `Engine.learnMinSize` for a completed, still-current
@@ -807,6 +826,13 @@ final class WindowManager {
     private func classifyExternalMoves() {
         let pending = slots.filter { $0.value.pendingCheck }.keys
         guard !pending.isEmpty else { return }
+        let stageManager = SystemSettings.stageManagerEnabled
+        if stageManager != engine.passthrough {
+            markDirty(engine.setPassthrough(stageManager))
+            for id in pending { slots[id]?.pendingCheck = false }
+            requestResync()
+            return
+        }
         let mouseDown = NSEvent.pressedMouseButtons & 1 != 0
         for id in pending {
             if (slots[id]?.inFlight ?? 0) > 0 { continue }
@@ -874,15 +900,20 @@ final class WindowManager {
         refreshSurfaces()
     }
 
+    /// Snap-back history filtered to the last 2 s plus `now`; `adopt` once the app has fought more than 3 times.
+    static func snapBack(history: [Date], now: Date) -> (history: [Date], adopt: Bool) {
+        let recent = history.filter { now.timeIntervalSince($0) < 2 } + [now]
+        return (recent, recent.count > 3)
+    }
+
     /// App (or user resize) changed a managed frame: apply the rule's `on_self_move`.
     private func selfMoved(_ id: WindowID, to current: CGRect) {
         guard let rule = engine.windows[id]?.rule else { return }
         var policy = rule.onSelfMove
         if policy == .snapBack {
-            let now = Date()
-            let recent = (slots[id]?.snapBackTimes ?? []).filter { now.timeIntervalSince($0) < 2 } + [now]
-            slots[id]?.snapBackTimes = recent
-            if recent.count > 3 {
+            let (history, adopt) = Self.snapBack(history: slots[id]?.snapBackTimes ?? [], now: Date())
+            slots[id]?.snapBackTimes = history
+            if adopt {
                 // The app keeps fighting (e.g. grid-snapping terminal): stop the loop.
                 Log.wm.notice("window \(id) keeps moving itself; adopting its frame")
                 policy = .adopt
@@ -958,12 +989,17 @@ final class WindowManager {
         lastMouseFocusCheck = now
         hitTestPending = true
         let point = currentMouseLocation()
+        let provider = self.provider
         hitTestQueue.async { [weak self] in
             let hit = AX.windowAtPoint(point)
+            let resolved = hit.flatMap { provider?.windowID(for: $0) }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 hitTestPending = false
-                guard let hit, let id = windowID(hit), id != engine.focused, engine.isTiled(id) else { return }
+                guard let hit else { return }
+                let id = resolved.flatMap { slots[$0] != nil ? $0 : nil }
+                    ?? slots.first { CFEqual($0.value.element, hit) }?.key
+                guard let id, id != engine.focused, engine.isTiled(id) else { return }
                 focusWindow(id, warp: false)
             }
         }
@@ -1021,11 +1057,12 @@ final class WindowManager {
         return displays.containing(currentMouseLocation()) ?? displays.first
     }
 
-    func perform(_ command: Command) {
-        if case .reload = command { reloadConfig(); return }
+    @discardableResult
+    func perform(_ command: Command) -> String? {
+        if case .reload = command { reloadConfig(); return nil }
         guard status == .running else {
             if case .dumpState = command { dumpState() }
-            return
+            return nil
         }
         let space = currentSpace
         let focusedBefore = engine.focused
@@ -1049,6 +1086,19 @@ final class WindowManager {
         }
         if engine.focused != focusedBefore { flashFocus() }
         refreshSurfaces()
+        return outcome.message
+    }
+
+    /// Runs one command line from the command socket; the reply is `ok`, `ok: <msg>` or `error: <msg>`.
+    func handleCommand(_ text: String) -> String {
+        switch Command.parse(text) {
+        case .failure(let e): return "error: \(e.message)"
+        case .success(let command):
+            if status != .running, !(command == .reload || command == .dumpState) {
+                return "error: Ballast isn't managing windows right now; open its menu bar item to see why"
+            }
+            return perform(command).map { "ok: \($0)" } ?? "ok"
+        }
     }
 
     /// Forces every tile on `space` to be re-sent (identical requests are

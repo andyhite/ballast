@@ -34,6 +34,20 @@ public enum ConfigSection: Hashable, Sendable {
     case bindings
 }
 
+fileprivate extension ConfigSection {
+    /// Header path of the plain table sections; nil for `[[space]]`/`[[rule]]` entries.
+    var tablePath: [String]? {
+        switch self {
+        case .settings: return ["settings"]
+        case .animation: return ["settings", "animation"]
+        case .focusFlash: return ["settings", "focus_flash"]
+        case .layout: return ["layout"]
+        case .bindings: return ["bindings"]
+        case .space, .rule: return nil
+        }
+    }
+}
+
 public struct ConfigEditError: Error, Equatable, CustomStringConvertible {
     public let message: String
     public init(_ message: String) { self.message = message }
@@ -78,6 +92,13 @@ public struct ConfigEditor: Sendable {
                 if droppedChild != nil { text = joinLines(lines) }
                 return .success(())
             }
+            if section == .animation || section == .focusFlash {
+                let name = section == .animation ? "animation" : "focus_flash"
+                if let settings = blocks.first(where: { $0.header?.path == ["settings"] && $0.header?.isArrayTable == false }),
+                   !findKeySpans(bodyStart: settings.bodyStart, bodyEnd: settings.bodyEnd, lines: lines, where: { $0.first == name }).isEmpty {
+                    return .failure(ConfigEditError("[settings] already sets \(name) as an inline table or dotted keys; edit that entry in the config file"))
+                }
+            }
             // Section missing: create it, then retry the set inside it.
             switch createSection(section, lines: &lines) {
             case .failure(let e): return .failure(e)
@@ -112,7 +133,7 @@ public struct ConfigEditor: Sendable {
     @discardableResult
     public mutating func appendRule(_ fields: [ConfigField]) -> Result<Int, ConfigEditError> {
         guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+        let ruleBlocks = entries("rule", in: blocks)
         let insertAfterLine: Int
         var needsBlankBefore = false
         if let last = ruleBlocks.last {
@@ -143,7 +164,7 @@ public struct ConfigEditor: Sendable {
     @discardableResult
     public mutating func removeRule(at index: Int) -> Result<Void, ConfigEditError> {
         guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+        let ruleBlocks = entries("rule", in: blocks)
         guard index >= 0, index < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index \(index) out of range"))
         }
@@ -157,7 +178,7 @@ public struct ConfigEditor: Sendable {
     @discardableResult
     public mutating func moveRule(from: Int, to: Int) -> Result<Void, ConfigEditError> {
         guard let (lines, blocks) = parsedDocument() else { return .failure(Self.parseFailure) }
-        let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+        let ruleBlocks = entries("rule", in: blocks)
         guard from >= 0, from < ruleBlocks.count, to >= 0, to < ruleBlocks.count else {
             return .failure(ConfigEditError("rule index out of range"))
         }
@@ -172,7 +193,7 @@ public struct ConfigEditor: Sendable {
         removeLineRange(fromStart...fromEnd, lines: &working)
 
         let blocks2 = parseBlocks(working)
-        let ruleBlocks2 = blocks2.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+        let ruleBlocks2 = entries("rule", in: blocks2)
         // Determine insertion point in the post-removal document.
         let insertAfterLine: Int
         if to >= ruleBlocks2.count {
@@ -198,9 +219,7 @@ public struct ConfigEditor: Sendable {
         guard case (var lines, let blocks)? = parsedDocument() else { return .failure(Self.parseFailure) }
         guard let block = findSpaceBlock(address, blocks: blocks, lines: lines) else {
             // A [[space]] whose body can't be parsed might be the one asked for.
-            let unreadable = blocks.contains {
-                $0.header?.tableKind == "space" && $0.header?.isArrayTable == true && spaceBody($0, lines: lines) == nil
-            }
+            let unreadable = entries("space", in: blocks).contains { spaceBody($0, lines: lines) == nil }
             return unreadable ? .failure(ConfigEditError("could not read a [[space]] entry")) : .success(())
         }
         let (start, end) = entryRangeWithLeadingComment(block, allBlocks: blocks, lines: lines)
@@ -281,17 +300,28 @@ public struct ConfigEditor: Sendable {
         var currentHeader: HeaderInfo?
         var currentHeaderLine = 0
         var bodyStart = 1
-        for (i, line) in lines.enumerated() {
+        var i = 0
+        while i < lines.count {
             let lineNo = i + 1
-            if let header = parseHeaderLine(line) {
+            if let header = parseHeaderLine(lines[i]) {
                 blocks.append(Block(header: currentHeader, headerLine: currentHeaderLine, bodyStart: bodyStart, bodyEnd: lineNo - 1))
                 currentHeader = header
                 currentHeaderLine = lineNo
                 bodyStart = lineNo + 1
+                i += 1
+            } else if let (_, _, afterEquals) = parseKeyLine(lines[i]) {
+                // Skip the whole value: a multi-line string can hold `[x]` lines.
+                i = max(scanValueExtent(startLine: lineNo, afterEquals: afterEquals, lines: lines, bodyEnd: lines.count), lineNo)
+            } else {
+                i += 1
             }
         }
         blocks.append(Block(header: currentHeader, headerLine: currentHeaderLine, bodyStart: bodyStart, bodyEnd: lines.count))
         return blocks
+    }
+
+    private func entries(_ kind: String, in blocks: [Block]) -> [Block] {
+        blocks.filter { $0.header?.tableKind == kind && $0.header?.isArrayTable == true }
     }
 
     /// Parses a `[x.y]` / `[[x.y]]` header line, tolerating leading
@@ -379,27 +409,18 @@ public struct ConfigEditor: Sendable {
     }
 
     private func resolveSectionRange(_ section: ConfigSection, blocks: [Block], lines: [String]) -> SectionRange? {
+        if let path = section.tablePath {
+            return blocks.first { $0.header?.path == path && $0.header?.isArrayTable == false }
+                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
+        }
         switch section {
-        case .settings:
-            return blocks.first { $0.header?.normalizedPath == "settings" && $0.header?.isArrayTable == false }
-                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
-        case .animation:
-            return blocks.first { $0.header?.normalizedPath == "settings.animation" && $0.header?.isArrayTable == false }
-                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
-        case .focusFlash:
-            return blocks.first { $0.header?.normalizedPath == "settings.focus_flash" && $0.header?.isArrayTable == false }
-                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
-        case .layout:
-            return blocks.first { $0.header?.normalizedPath == "layout" && $0.header?.isArrayTable == false }
-                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
-        case .bindings:
-            return blocks.first { $0.header?.normalizedPath == "bindings" && $0.header?.isArrayTable == false }
-                .map { SectionRange(bodyStart: $0.bodyStart, bodyEnd: $0.bodyEnd) }
+        case .settings, .animation, .focusFlash, .layout, .bindings:
+            return nil
         case .space(let address):
             guard let block = findSpaceBlock(address, blocks: blocks, lines: lines) else { return nil }
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
         case .rule(let index):
-            let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+            let ruleBlocks = entries("rule", in: blocks)
             guard index >= 0, index < ruleBlocks.count else { return nil }
             let block = ruleBlocks[index]
             return SectionRange(bodyStart: block.bodyStart, bodyEnd: block.bodyEnd)
@@ -416,17 +437,14 @@ public struct ConfigEditor: Sendable {
             let end = ownedBodyEnd(for: entry, allBlocks: blocks)
             return blocks.filter { $0.headerLine > entry.headerLine && $0.headerLine <= end }
         }
+        if let path = section.tablePath { return table(path + [key], in: blocks) }
         switch section {
-        case .settings: return table(["settings", key], in: blocks)
-        case .animation: return table(["settings", "animation", key], in: blocks)
-        case .focusFlash: return table(["settings", "focus_flash", key], in: blocks)
-        case .layout: return table(["layout", key], in: blocks)
-        case .bindings: return table(["bindings", key], in: blocks)
+        case .settings, .animation, .focusFlash, .layout, .bindings: return nil
         case .space(let address):
             guard let entry = findSpaceBlock(address, blocks: blocks, lines: lines) else { return nil }
             return table(["space", key], in: owned(by: entry))
         case .rule(let index):
-            let ruleBlocks = blocks.filter { $0.header?.tableKind == "rule" && $0.header?.isArrayTable == true }
+            let ruleBlocks = entries("rule", in: blocks)
             guard index >= 0, index < ruleBlocks.count else { return nil }
             return table(["rule", key], in: owned(by: ruleBlocks[index]))
         }
@@ -437,7 +455,7 @@ public struct ConfigEditor: Sendable {
     }
 
     private func findSpaceBlock(_ address: SpaceAddress, blocks: [Block], lines: [String]) -> Block? {
-        let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
+        let spaceBlocks = entries("space", in: blocks)
         for block in spaceBlocks {
             guard let t = spaceBody(block, lines: lines) else { continue }
             switch address {
@@ -463,7 +481,7 @@ public struct ConfigEditor: Sendable {
             return .success(())
         case .animation, .focusFlash:
             // A [settings.*] subtable goes right after the last existing one, else after [settings].
-            let header = section == .animation ? "[settings.animation]" : "[settings.focus_flash]"
+            let header = "[" + (section.tablePath ?? []).joined(separator: ".") + "]"
             if let anchor = lastSettingsBlock(parseBlocks(lines)) {
                 insertBlockAfter(anchor, header: header, lines: &lines)
             } else {
@@ -490,7 +508,7 @@ public struct ConfigEditor: Sendable {
             return .success(())
         case .space(let address):
             let blocks = parseBlocks(lines)
-            let spaceBlocks = blocks.filter { $0.header?.tableKind == "space" && $0.header?.isArrayTable == true }
+            let spaceBlocks = entries("space", in: blocks)
             var body = ["[[space]]"]
             switch address {
             case .uuid(let uuid):
@@ -571,6 +589,14 @@ public struct ConfigEditor: Sendable {
     }
 
     private mutating func setKey(_ key: String, _ value: ConfigValue?, bodyStart: Int, bodyEnd: Int, lines: inout [String]) -> Result<Void, ConfigEditError> {
+        // Dotted keys under `key` (`gaps.inner = 4`) are replaced as a whole,
+        // like a child table.
+        var bodyEnd = bodyEnd
+        for dotted in findDottedKeySpans(key, bodyStart: bodyStart, bodyEnd: bodyEnd, lines: lines).reversed() {
+            let before = lines.count
+            removeKeyLines(dotted, lines: &lines)
+            bodyEnd -= before - lines.count
+        }
         if let span = findKeyLineSpan(key, bodyStart: bodyStart, bodyEnd: bodyEnd, lines: lines) {
             if let value {
                 replaceValue(key, value, span: span, lines: &lines)
@@ -590,6 +616,16 @@ public struct ConfigEditor: Sendable {
     /// strings) that belong to *other* keys, using bracket/string-state
     /// tracking rather than regex.
     private func findKeyLineSpan(_ key: String, bodyStart: Int, bodyEnd: Int, lines: [String]) -> KeySpan? {
+        findKeySpans(bodyStart: bodyStart, bodyEnd: bodyEnd, lines: lines) { $0 == [key] }.first
+    }
+
+    /// Spans of dotted-key lines under `key` (`key.sub = ...`).
+    private func findDottedKeySpans(_ key: String, bodyStart: Int, bodyEnd: Int, lines: [String]) -> [KeySpan] {
+        findKeySpans(bodyStart: bodyStart, bodyEnd: bodyEnd, lines: lines) { $0.count > 1 && $0[0] == key }
+    }
+
+    private func findKeySpans(bodyStart: Int, bodyEnd: Int, lines: [String], where matches: ([String]) -> Bool) -> [KeySpan] {
+        var spans: [KeySpan] = []
         var i = bodyStart
         while i <= bodyEnd, i <= lines.count {
             let line = lines[i - 1]
@@ -598,54 +634,66 @@ public struct ConfigEditor: Sendable {
                 i += 1
                 continue
             }
-            guard let (foundKey, indent, afterEquals) = parseKeyLine(line) else {
+            guard let (path, indent, afterEquals) = parseKeyLine(line) else {
                 i += 1
                 continue
             }
             let valueEnd = scanValueExtent(startLine: i, afterEquals: afterEquals, lines: lines, bodyEnd: bodyEnd)
-            if foundKey == key {
+            if matches(path) {
                 let commentCol = trailingCommentColumn(lines[valueEnd - 1])
-                return KeySpan(keyLineIndex: i, valueEndLineIndex: valueEnd, commentColumn: commentCol, indent: indent)
+                spans.append(KeySpan(keyLineIndex: i, valueEndLineIndex: valueEnd, commentColumn: commentCol, indent: indent))
             }
             i = valueEnd + 1
         }
-        return nil
+        return spans
     }
 
     /// Parses a `key = ...` line start (bare/basic/literal key), returning
     /// the decoded key, its leading indent, and the column right after `=`.
-    private func parseKeyLine(_ line: String) -> (key: String, indent: String, afterEquals: String.Index)? {
+    private func parseKeyLine(_ line: String) -> (path: [String], indent: String, afterEquals: String.Index)? {
         var idx = line.startIndex
-        let indentStart = idx
-        while idx < line.endIndex, line[idx] == " " || line[idx] == "\t" { idx = line.index(after: idx) }
-        let indent = String(line[indentStart..<idx])
-        guard idx < line.endIndex else { return nil }
-        var key = ""
-        if line[idx] == "\"" || line[idx] == "'" {
-            let quote = line[idx]
-            idx = line.index(after: idx)
-            while idx < line.endIndex, line[idx] != quote {
-                if quote == "\"" && line[idx] == "\\" {
+        func skipSpace() {
+            while idx < line.endIndex, line[idx] == " " || line[idx] == "\t" { idx = line.index(after: idx) }
+        }
+        func segment() -> String? {
+            guard idx < line.endIndex else { return nil }
+            var key = ""
+            if line[idx] == "\"" || line[idx] == "'" {
+                let quote = line[idx]
+                idx = line.index(after: idx)
+                while idx < line.endIndex, line[idx] != quote {
+                    if quote == "\"" && line[idx] == "\\" {
+                        key.append(line[idx])
+                        idx = line.index(after: idx)
+                        if idx >= line.endIndex { return nil }
+                    }
                     key.append(line[idx])
                     idx = line.index(after: idx)
-                    if idx >= line.endIndex { return nil }
                 }
-                key.append(line[idx])
-                idx = line.index(after: idx)
+                guard idx < line.endIndex else { return nil }
+                idx = line.index(after: idx) // past closing quote
+                return quote == "\"" ? unescapeBasicString(key) : key
             }
-            guard idx < line.endIndex else { return nil }
-            idx = line.index(after: idx) // past closing quote
-            if quote == "\"" { key = unescapeBasicString(key) }
-        } else {
             guard isBareKeyStart(line[idx]) else { return nil }
             let start = idx
             while idx < line.endIndex, isBareKeyChar(line[idx]) { idx = line.index(after: idx) }
-            key = String(line[start..<idx])
+            return String(line[start..<idx])
         }
-        while idx < line.endIndex, line[idx] == " " || line[idx] == "\t" { idx = line.index(after: idx) }
-        guard idx < line.endIndex, line[idx] == "=" else { return nil }
+        skipSpace()
+        let indent = String(line[line.startIndex..<idx])
+        var path: [String] = []
+        while true {
+            guard let seg = segment() else { return nil }
+            path.append(seg)
+            skipSpace()
+            guard idx < line.endIndex else { return nil }
+            guard line[idx] == "." else { break }
+            idx = line.index(after: idx)
+            skipSpace()
+        }
+        guard line[idx] == "=" else { return nil }
         idx = line.index(after: idx)
-        return (key, indent, idx)
+        return (path, indent, idx)
     }
 
     private func isBareKeyStart(_ c: Character) -> Bool {
@@ -799,16 +847,14 @@ public struct ConfigEditor: Sendable {
 
     private mutating func removeKeyLines(_ span: KeySpan, lines: inout [String]) {
         var upperInclusive = span.valueEndLineIndex
-        // Check for a following orphaned comment-continuation line aligned
-        // to the same comment column, e.g. a wrapped trailing comment.
-        if let col = span.commentColumn, upperInclusive < lines.count {
-            let next = lines[upperInclusive]
-            let trimmed = next.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("#") {
-                let leading = next.prefix { $0 == " " || $0 == "\t" }
-                if leading.count == col {
-                    upperInclusive += 1
-                }
+        // Also drop every following orphaned comment-continuation line
+        // aligned to the same comment column (a wrapped trailing comment).
+        if let col = span.commentColumn {
+            while upperInclusive < lines.count {
+                let next = lines[upperInclusive]
+                guard next.trimmingCharacters(in: .whitespaces).hasPrefix("#"),
+                      next.prefix(while: { $0 == " " || $0 == "\t" }).count == col else { break }
+                upperInclusive += 1
             }
         }
         lines.removeSubrange((span.keyLineIndex - 1)..<upperInclusive)
@@ -881,7 +927,7 @@ public struct ConfigEditor: Sendable {
         // removal (the trailing blank alone still separates the neighbors).
         // At the top of the file there is no leading separator, so the
         // trailing blank goes instead of becoming a stray first line.
-        if start == block.headerLine, blankAfter {
+        if blankAfter {
             if start == 1 {
                 end += 1
             } else if lines[start - 2].trimmingCharacters(in: .whitespaces).isEmpty {

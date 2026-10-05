@@ -96,6 +96,32 @@ struct ConfigWatcherTests {
         #expect(await wait { counter.count == 2 })
     }
 
+    @Test func danglingThenRecreatedTargetIsNoticed() async throws {
+        let dir = try Self.tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fm = FileManager.default
+        let target = dir.appendingPathComponent("real.toml")
+        try write("one", to: target)
+        let link = dir.appendingPathComponent("config.toml")
+        try fm.createSymbolicLink(at: link, withDestinationURL: target)
+        let counter = Counter()
+        let watcher = ConfigWatcher(url: link) { counter.count += 1 }
+        watcher.start()
+        defer { watcher.stop() }
+
+        var seen = counter.count
+        try fm.removeItem(at: target)
+        #expect(await wait { counter.count > seen })
+        await settle()
+        seen = counter.count
+        try write("two", to: target)
+        #expect(await wait { counter.count > seen })
+        await settle()
+        seen = counter.count
+        try write("three", to: target)
+        #expect(await wait { counter.count > seen })
+    }
+
     @Test func deletedAndRecreatedDirectoryRearms() async throws {
         let dir = try Self.tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }

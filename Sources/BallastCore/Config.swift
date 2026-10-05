@@ -309,6 +309,19 @@ public struct ConfigError: Error, Equatable, CustomStringConvertible {
 // MARK: - Parsing
 
 extension Config {
+    /// Index of the first rule matching only this app (by bundle ID, case-insensitive).
+    public func appOnlyRuleIndex(bundleID: String) -> Int? {
+        rules.firstIndex { rule in
+            let match = rule.match
+            guard let appID = match.appID else { return false }
+            return appID.caseInsensitiveCompare(bundleID) == .orderedSame
+                && match.appName == nil && match.titleRegex == nil && match.titleSubstring == nil
+                && match.axRole == nil && match.axSubrole == nil
+        }
+    }
+}
+
+extension Config {
     public static func parse(_ text: String) -> Result<Config, ConfigError> {
         let root: TOMLTable
         do {
@@ -603,7 +616,7 @@ struct Reader {
 
     func allowOnly(_ keys: Set<String>) {
         for key in table.keys where !keys.contains(key) {
-            error(key, LegacyNames.keyMessage(key) ?? "unknown key")
+            error(key, "unknown key")
         }
     }
 

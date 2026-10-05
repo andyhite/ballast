@@ -15,7 +15,7 @@ public typealias SpaceID = UInt64
 /// (native-fullscreen Spaces are not counted, so full-screening an app never
 /// shifts ordinals). `uuid` is empty when SkyLight reports none. Equality
 /// covers all three fields; config lookups go through `addresses`.
-public struct SpaceKey: Hashable, Comparable, Sendable, CustomStringConvertible {
+public struct SpaceKey: Hashable, Sendable, CustomStringConvertible {
     public let display: String
     public let ordinal: Int
     public let uuid: String
@@ -24,10 +24,6 @@ public struct SpaceKey: Hashable, Comparable, Sendable, CustomStringConvertible 
         self.display = display
         self.ordinal = ordinal
         self.uuid = uuid
-    }
-
-    public static func < (a: SpaceKey, b: SpaceKey) -> Bool {
-        a.display == b.display ? a.ordinal < b.ordinal : a.display < b.display
     }
 
     public var description: String { "\(display)#\(ordinal)" }
@@ -137,16 +133,6 @@ public struct SpaceSnapshot: Equatable, Sendable {
         return nil
     }
 
-    public func spaceID(for key: SpaceKey) -> SpaceID? {
-        guard let display = displays.first(where: { $0.displayUUID == key.display }) else { return nil }
-        var ordinal = 0
-        for info in display.spaces where info.kind == .user {
-            ordinal += 1
-            if ordinal == key.ordinal { return info.id }
-        }
-        return nil
-    }
-
     /// Resolves a Space UUID (as used by Dock app-bindings) to its Space id.
     public func spaceID(forUUID uuid: String) -> SpaceID? {
         for display in displays {
@@ -165,10 +151,6 @@ public struct SpaceSnapshot: Equatable, Sendable {
 
     public func activeSpace(ofDisplay uuid: String) -> SpaceID? {
         displays.first { $0.displayUUID == uuid }?.activeSpace
-    }
-
-    public func isBuiltin(display uuid: String) -> Bool {
-        displays.first { $0.displayUUID == uuid }?.builtin ?? false
     }
 
     public func isSmall(display uuid: String) -> Bool {

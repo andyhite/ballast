@@ -104,8 +104,9 @@ There is no prebuilt download yet. Build Ballast from source.
 2. **Build and install:**
    ```sh
    scripts/build-app.sh   # → build/Ballast.app, signed with "Ballast Dev"
-   scripts/install.sh     # → /Applications, Start at Login on, `ballast` CLI in /usr/local/bin
+   scripts/install.sh     # → /Applications, Start at Login on, `ballast` CLI linked into $BIN_DIR
    ```
+   If `/usr/local/bin` isn't writable, the script prints the one command to run (or use `BIN_DIR=~/.local/bin`).
 3. **Grant Accessibility** when prompted: System Settings → Privacy & Security →
    Accessibility. Ballast starts managing windows right away; you don't need to
    restart it.

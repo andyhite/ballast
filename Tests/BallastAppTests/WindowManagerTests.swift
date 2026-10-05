@@ -11,6 +11,20 @@ import CoreGraphics
 /// main-thread-only class, so every test that touches it runs on the main actor.
 @MainActor
 struct WindowManagerTests {
+    @Test func snapBackAdoptsAfterThreeRecentMoves() {
+        let now = Date()
+        let recent = [0.1, 0.2, 0.3].map { now.addingTimeInterval(-$0) }
+        #expect(WindowManager.snapBack(history: recent, now: now).adopt == true)
+        #expect(WindowManager.snapBack(history: Array(recent.prefix(2)), now: now).adopt == false)
+    }
+
+    @Test func snapBackDropsStaleStamps() {
+        let now = Date()
+        let result = WindowManager.snapBack(history: [now.addingTimeInterval(-2.5), now.addingTimeInterval(-1)], now: now)
+        #expect(result.history.count == 2)
+        #expect(result.history.last == now)
+    }
+
     /// A fresh temp directory plus the config path inside it. Callers must
     /// `defer` the cleanup so the directory is removed on every exit path,
     /// including an early `throw` or assertion failure.

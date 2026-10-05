@@ -52,17 +52,23 @@ struct BindingsPane: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityLabel("Add Hotkey")
+                .help("Add Hotkey")
                 Button {
                     editSelected()
                 } label: {
                     Image(systemName: "pencil")
                 }
+                .accessibilityLabel("Edit Hotkey")
+                .help("Edit Hotkey")
                 .disabled(selection == nil)
                 Button {
                     deleteSelected()
                 } label: {
                     Image(systemName: "minus")
                 }
+                .accessibilityLabel("Remove Hotkey")
+                .help("Remove Hotkey")
                 .disabled(selection == nil)
                 Spacer()
             }

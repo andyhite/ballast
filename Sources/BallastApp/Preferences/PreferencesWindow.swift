@@ -17,10 +17,8 @@ enum PreferencesWindow {
     static func show(manager: WindowManager, desktop: SpaceKey? = nil) {
         let model = model ?? ConfigModel(manager: manager)
         Self.model = model
+        model.refresh()
         if let desktop {
-            // Desktops only refresh on config changes; make sure the one we
-            // point the picker at is listed.
-            model.refresh()
             model.tab = .layout
             model.layoutScope = .desktop(desktop)
         }

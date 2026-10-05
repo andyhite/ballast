@@ -109,7 +109,7 @@ public final class ConfigWatcher {
     private func refreshWatchers() {
         guard isRunning else { return }
 
-        resolvedTargetPath = originalURL.resolvingSymlinksInPath().path
+        resolvedTargetPath = originalURL.resolvingSymlinksIncludingDangling().path
 
         originalChainWatcher?.rearm(leafParent: originalURL.deletingLastPathComponent().path, followSymlinks: false)
         targetChainWatcher?.rearm(leafParent: (resolvedTargetPath as NSString).deletingLastPathComponent, followSymlinks: true)
@@ -339,5 +339,17 @@ private final class DirectoryChainWatcher {
             }
             candidate = parent
         }
+    }
+}
+
+extension URL {
+    /// `resolvingSymlinksInPath()`, but also follows a final symlink whose target is missing (≤ 8 hops).
+    func resolvingSymlinksIncludingDangling() -> URL {
+        var url = standardizedFileURL
+        for _ in 0..<8 {
+            guard let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) else { break }
+            url = URL(fileURLWithPath: dest, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+        }
+        return url.resolvingSymlinksInPath()
     }
 }

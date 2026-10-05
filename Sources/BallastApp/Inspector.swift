@@ -475,7 +475,7 @@ final class InspectorModel: ObservableObject {
 
     func setAlwaysFloat(_ float: Bool) {
         guard let bundleID = snapshot.bundleID else { return }
-        let existingIndex = appOnlyRuleIndex(bundleID: bundleID)
+        let existingIndex = manager.config.appOnlyRuleIndex(bundleID: bundleID)
         let error = manager.configStore.edit { editor -> Result<Void, ConfigEditError> in
             if let existingIndex {
                 return editor.set("float", .bool(float), in: .rule(existingIndex))
@@ -488,15 +488,6 @@ final class InspectorModel: ObservableObject {
         editError = error?.description
     }
 
-    private func appOnlyRuleIndex(bundleID: String) -> Int? {
-        manager.config.rules.firstIndex { rule in
-            let match = rule.match
-            guard let appID = match.appID else { return false }
-            return appID.caseInsensitiveCompare(bundleID) == .orderedSame
-                && match.appName == nil && match.titleRegex == nil && match.titleSubstring == nil
-                && match.axRole == nil && match.axSubrole == nil
-        }
-    }
 }
 
 private func describe(_ value: Bool?, yes: String = "yes", no: String = "no") -> String {

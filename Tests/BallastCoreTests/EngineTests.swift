@@ -974,7 +974,7 @@ struct EngineTests {
     func passthroughForcesFloat() {
         var engine = Self.makeEngine()
         _ = engine.addWindow(1, pid: 1, facts: WindowFacts(), space: 1)
-        engine.passthrough = true
+        _ = engine.setPassthrough(true)
         #expect(engine.arrangement(for: 1) == .float)
         let layout = engine.layout(space: 1, area: Self.area)
         #expect(layout.frames.isEmpty)
@@ -1342,10 +1342,10 @@ struct EngineTests {
         #expect(engine.settings(for: 1).columns == 2, "runtime overrides touch only their own fields")
         #expect(engine.settings(for: 2).featureSize == 0.6, "and only their own Space")
 
-        engine.passthrough = true
+        _ = engine.setPassthrough(true)
         #expect(engine.settings(for: 1).arrange == .float)
         #expect(engine.arrangement(for: 2) == .float)
-        engine.passthrough = false
+        _ = engine.setPassthrough(false)
         #expect(engine.arrangement(for: 1) == .fixed)
 
         engine.clearSettingOverrides(1, featureSize: true, featureCount: true)
@@ -1378,7 +1378,7 @@ struct EngineTests {
         #expect(engine.isMonocle(1) && !engine.isMonocle(2))
         #expect(engine.glyph(for: 1) == "A")
 
-        engine.passthrough = true
+        _ = engine.setPassthrough(true)
         #expect(engine.glyph(for: 1) == "⋯")
     }
 

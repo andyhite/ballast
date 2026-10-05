@@ -64,6 +64,31 @@ enum WindowDiscovery {
         guard let a, let b else { return .infinity }
         return abs(a.minX - b.minX) + abs(a.minY - b.minY) + abs(a.width - b.width) + abs(a.height - b.height)
     }
+
+    /// A window as the tab reconciler sees it.
+    struct TabState {
+        let id: WindowID
+        let onActiveSpace: Bool
+        let minimized: Bool
+        let backgroundTab: Bool
+    }
+
+    /// Which windows dropped out of an app's `AXWindows` list (`vanished`) and which came back or arrived (`appeared`, sorted).
+    static func tabChanges(_ windows: [TabState], visible: Set<WindowID>, tracked: Set<WindowID>,
+                           fresh: Set<WindowID>) -> (vanished: [WindowID], appeared: [WindowID]) {
+        var vanished: [WindowID] = []
+        var appeared: [WindowID] = []
+        for w in windows where !w.minimized {
+            // Only windows on a visible Space are expected in `AXWindows`.
+            guard w.onActiveSpace else { continue }
+            if !visible.contains(w.id) {
+                if !w.backgroundTab, tracked.contains(w.id) { vanished.append(w.id) }
+            } else if w.backgroundTab || fresh.contains(w.id) {
+                appeared.append(w.id)
+            }
+        }
+        return (vanished, appeared.sorted())
+    }
 }
 
 extension WindowManager {
@@ -116,7 +141,9 @@ extension WindowManager {
             DispatchQueue.main.async { [weak self] in
                 MainActor.assumeIsolated {
                     guard let self else { completion?(focused); return }
-                    for w in found {
+                    guard self.observers[observer.pid] === observer else { completion?(focused); return }
+                    let destroyed = self.destroyedBeforeCommit.removeValue(forKey: observer.pid) ?? []
+                    for w in found where !destroyed.contains(where: { CFEqual($0, w.element) }) {
                         self.commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized,
                                            registered: true, restoring: restoring)
                     }
@@ -154,18 +181,13 @@ extension WindowManager {
         // An empty list is a failed read, not an app with no windows; a
         // hidden app's windows are already out of the layout.
         guard !visible.isEmpty, NSRunningApplication(processIdentifier: pid)?.isHidden != true else { return }
-        var vanished: [WindowID] = []
-        var appeared: [WindowID] = []
-        for (id, w) in engine.windows where w.pid == pid && !w.minimized {
-            // Only windows on a visible Space are expected in `AXWindows`.
-            guard let space = w.space, engine.snapshot.isActive(space) else { continue }
-            if !visible.contains(id) {
-                if !w.backgroundTab, tracked.contains(id) { vanished.append(id) }
-            } else if w.backgroundTab || fresh.contains(id) {
-                appeared.append(id)
-            }
+        let states = engine.windows.filter { $0.value.pid == pid }.map { id, w in
+            WindowDiscovery.TabState(id: id, onActiveSpace: w.space.map(engine.snapshot.isActive) ?? false,
+                                     minimized: w.minimized, backgroundTab: w.backgroundTab)
         }
-        appeared.sort()
+        let changes = WindowDiscovery.tabChanges(states, visible: visible, tracked: tracked, fresh: fresh)
+        let vanished = changes.vanished
+        var appeared = changes.appeared
         if !vanished.isEmpty {
             let bounds = Self.windowBounds()
             let pairs = WindowDiscovery.successors(

@@ -56,6 +56,37 @@ struct ConfigStoreTests {
     }
 
     @Test
+    func danglingSymlinkConfigIsCreatedAtItsTargetAndStaysALink() throws {
+        let (dir, url) = Self.tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let target = dir.appendingPathComponent("real.toml")
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: target)
+        let store = ConfigStore(url: url)
+        let live = Live(store)
+        Self.load(store, into: live)
+
+        #expect(store.edit { $0.set("feature_count", .integer(2), in: .layout) } == nil)
+        #expect(try FileManager.default.destinationOfSymbolicLink(atPath: url.path) == target.path)
+        #expect(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    @Test
+    func starterConfigHasNoLiveBindings() throws {
+        let config = try Config.parse(StatusBar.starterConfig).get()
+        #expect(config.bindings.isEmpty)
+    }
+
+    @Test
+    func startupConfigErrorIsRecorded() throws {
+        let (dir, url) = Self.tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "[layout\nnope".write(to: url, atomically: true, encoding: .utf8)
+        let store = ConfigStore(url: url)
+        _ = store.loadInitial()
+        #expect(store.error != nil)
+    }
+
+    @Test
     func loadedThenMissingConfigRefusesToRecreateStarterAndKeepsLiveConfig() throws {
         let (dir, url) = Self.tempConfigDir()
         defer { try? FileManager.default.removeItem(at: dir) }

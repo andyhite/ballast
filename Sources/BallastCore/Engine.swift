@@ -64,6 +64,8 @@ public struct SpaceState: Equatable, Sendable {
     public internal(set) var manual = false
     /// Live tile order while `manual`.
     public internal(set) var manualOrder: [WindowID] = []
+    /// The manual order came from `adoptArrangement`, so discovery may read it back again.
+    public internal(set) var adopted = false
     /// Live BSP tree (always maintained, rendered by dwindle and balanced).
     public internal(set) var tree: BSPNode?
     /// Frames adopted from windows that moved themselves (`on_self_move = adopt`).
@@ -182,7 +184,7 @@ public struct Engine: Sendable {
     /// window that currently holds keyboard focus.
     public private(set) var frontmost: WindowID?
     /// Stage Manager on: every Space is floating passthrough.
-    public var passthrough = false
+    public private(set) var passthrough = false
     private var nextCreation: UInt64 = 0
 
     public init(config: Config, snapshot: SpaceSnapshot = SpaceSnapshot(displays: [])) {
@@ -296,10 +298,10 @@ public struct Engine: Sendable {
             let featured = Set(order.prefix(FeatureLayout.featuredCount(feature: feature, count: s.featureCount, total: order.count)))
             let tree = state.tree?.without(featured)
             let context = bspContext(s, decks: state.decks)
-            grid = .custom { rect in
+            grid = .custom(minExtent: { axis in tree?.lowerBoundExtent(axis, context: context) ?? 0 }, render: { rect in
                 let frames = tree?.layout(in: rect, context: context) ?? [:]
                 return TilePlan(frames: frames, navigation: frames)
-            }
+            })
         }
         return FeatureLayout.plan(
             order: order, in: inner, feature: feature, featureCount: s.featureCount, size: s.featureSize,
@@ -336,6 +338,7 @@ public struct Engine: Sendable {
     /// exist and returns Spaces whose config key changed (ordinal shift).
     public mutating func updateSnapshot(_ new: SpaceSnapshot) -> Set<SpaceID> {
         let old = snapshot
+        let oldSettings = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0)) })
         snapshot = new
         let alive = new.userSpaceIDs
         var dirty = Set<SpaceID>()
@@ -350,9 +353,10 @@ public struct Engine: Sendable {
         }
         let small = { (snapshot: SpaceSnapshot, id: SpaceID) in snapshot.key(for: id).map { snapshot.isSmall(display: $0.display) } }
         for id in spaces.keys where old.key(for: id) != new.key(for: id) || small(old, id) != small(new, id) { dirty.insert(id) }
-        // Windows now on a fullscreen Space stop tiling.
-        for (id, w) in windows {
-            if let space = w.space, new.isFullscreen(space) { dirty.formUnion(detach(id, from: space)) }
+        // A Space whose config key moved may now resolve other settings.
+        for (id, before) in oldSettings where spaces[id] != nil && settings(for: id) != before {
+            reconcile(id, from: before, reshape: true)
+            dirty.insert(id)
         }
         return dirty
     }
@@ -360,29 +364,38 @@ public struct Engine: Sendable {
     public mutating func applyConfig(_ new: Config) -> Set<SpaceID> {
         let oldSettings = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0)) })
         config = new
-        // A changed `split` takes effect on Spaces still in their weight-default
-        // arrangement; manually arranged Spaces keep theirs until `reset`.
-        var reshaped = Set<SpaceID>()
-        for (id, old) in oldSettings {
-            let now = settings(for: id)
-            guard var s = spaces[id], !s.manual else { continue }
-            if now.split != old.split { s.tree = s.tree?.withAxis(now.split) }
-            if now.arrange.isTree, old.arrange != now.arrange { reshaped.insert(id) }
-            spaces[id] = s
-        }
         for id in windows.keys.sorted() {
             guard var w = windows[id] else { continue }
             w.rule = RuleResolver.resolve(w.facts, rules: new.rules)
             windows[id] = w
             syncMembership(id)
         }
-        for id in Array(spaces.keys) { recomputeIdeal(id) }
-        // Dwindle and balanced differ in their weight-default tree.
-        for id in reshaped.sorted() {
-            guard var s = spaces[id], !s.manual else { continue }
+        for id in Array(spaces.keys) { reconcile(id, from: oldSettings[id] ?? settings(for: id), reshape: true) }
+        return Set(spaces.keys)
+    }
+
+    /// Re-derives a Space's structure after its settings may have changed from `old`.
+    /// A changed `split` takes effect on Spaces still in their weight-default
+    /// arrangement; manually arranged Spaces keep theirs until `reset`. Dwindle
+    /// and balanced differ in their weight-default tree, so an arrange change
+    /// rebuilds it when `reshape`.
+    private mutating func reconcile(_ id: SpaceID, from old: LayoutSettings, reshape: Bool) {
+        let now = settings(for: id)
+        if var s = spaces[id], !s.manual, now.split != old.split { s.tree = s.tree?.withAxis(now.split); spaces[id] = s }
+        recomputeIdeal(id)
+        if reshape, var s = spaces[id], !s.manual, now.arrange.isTree, old.arrange != now.arrange {
             s.tree = idealTree(s.idealOrder, on: id, decks: s.decks)
             spaces[id] = s
         }
+    }
+
+    /// Stage Manager on/off; returns the Spaces to lay out again.
+    public mutating func setPassthrough(_ on: Bool) -> Set<SpaceID> {
+        guard on != passthrough else { return [] }
+        let old = Dictionary(uniqueKeysWithValues: spaces.keys.map { ($0, settings(for: $0)) })
+        passthrough = on
+        // The dwindle tree is maintained during passthrough, so no reshape; balanced trees still rebuild.
+        for (id, before) in old { reconcile(id, from: before, reshape: false) }
         return Set(spaces.keys)
     }
 
@@ -412,6 +425,7 @@ public struct Engine: Sendable {
         }
         windows[id] = nil
         if focused == id { focused = nil }
+        if frontmost == id { frontmost = nil }
         return removal
     }
 
@@ -882,8 +896,14 @@ public struct Engine: Sendable {
     /// on manual, monocle and float Spaces.
     public mutating func adoptArrangement(_ space: SpaceID, area: CGRect, frames: [WindowID: CGRect]) -> Set<SpaceID> {
         let s = settings(for: space)
-        guard var state = spaces[space], !state.manual, !state.monocle, s.arrange != .float, !state.tiles.isEmpty,
+        guard var state = spaces[space], !state.manual || state.adopted, !state.monocle, s.arrange != .float, !state.tiles.isEmpty,
               state.tiles.allSatisfy({ frames[$0] != nil }) else { return [] }
+        if state.adopted {
+            // A restored arrangement read back again: start from the ideal, as discovery did the first time.
+            state.manual = false
+            state.manualOrder = []
+            spaces[space] = state
+        }
         func distance(_ id: WindowID, _ slot: CGRect) -> Double {
             let f = frames[id] ?? .null
             return abs(f.minX - slot.minX) + abs(f.minY - slot.minY) + abs(f.maxX - slot.maxX) + abs(f.maxY - slot.maxY)
@@ -914,6 +934,21 @@ public struct Engine: Sendable {
             state.idealOrder = order
             state.tree = idealTree(order, on: space, decks: state.decks)
         }
+        let weightOf = tileWeight(decks: state.decks)
+        let rank = { (id: WindowID) -> Double in let w = weightOf(id); return w.isFinite ? w : 0 }
+        let position = Dictionary(state.idealOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        let weightSorted = state.idealOrder.sorted { a, b in
+            rank(a) != rank(b) ? rank(a) > rank(b) : (position[a] ?? 0) < (position[b] ?? 0)
+        }
+        let pin = state.idealOrder != weightSorted || (state.tree?.hasManualRatio ?? false)
+            || (s.arrange == .balanced && state.tree != idealTree(state.idealOrder, on: space, decks: state.decks))
+        if pin {
+            state.manual = true
+            state.manualOrder = state.idealOrder
+            state.adopted = true
+        } else {
+            state.adopted = false
+        }
         spaces[space] = state
         return [space]
     }
@@ -923,6 +958,7 @@ public struct Engine: Sendable {
     public mutating func reset(_ space: SpaceID) {
         guard var s = spaces[space] else { return }
         s.manual = false
+        s.adopted = false
         s.manualOrder = []
         s.frameOverrides = [:]
         // Decks are arrangement: every window is a tile of its own again.
@@ -985,7 +1021,7 @@ public struct Engine: Sendable {
     /// Balanced splits the feature tiles off first and balances the grid on its
     /// own: the layout prunes the feature from the tree, which would otherwise
     /// leave a lopsided, dwindle-like grid.
-    private func idealTree(_ order: [WindowID], on space: SpaceID, decks: [WindowID: [WindowID]]) -> BSPNode? {
+    func idealTree(_ order: [WindowID], on space: SpaceID, decks: [WindowID: [WindowID]]) -> BSPNode? {
         let s = settings(for: space)
         switch s.arrange {
         case .balanced:
@@ -1059,9 +1095,12 @@ public struct Engine: Sendable {
     }
 
     private mutating func beginManual(_ space: SpaceID) {
-        guard var s = spaces[space], !s.manual else { return }
-        s.manual = true
-        s.manualOrder = s.idealOrder
+        guard var s = spaces[space] else { return }
+        s.adopted = false
+        if !s.manual {
+            s.manual = true
+            s.manualOrder = s.idealOrder
+        }
         spaces[space] = s
     }
 
@@ -1077,6 +1116,7 @@ public struct Engine: Sendable {
             attach(id, to: target)
             dirty.insert(target)
         }
+        if focused == id, windows[id]?.isManaged != true { focused = nil }
         return dirty
     }
 
@@ -1092,9 +1132,15 @@ public struct Engine: Sendable {
         }
         s.recentTiles.insert(id, at: rank)
         let inTree = { (id: WindowID) in s.tree?.contains(id) == true }
-        let anchor = focused.map { s.tile(of: $0) }.flatMap { inTree($0) ? $0 : nil }
+        let set = settings(for: space)
+        var anchor = focused.map { s.tile(of: $0) }.flatMap { inTree($0) ? $0 : nil }
             ?? s.focus.entries.map { s.tile(of: $0) }.first(where: inTree)
-        let axis = settings(for: space).split
+        // The newcomer is inserted after its anchor; never let that land inside a multi-tile feature.
+        if set.arrange.isTree, let leaves = s.tree?.leaves, let a = anchor, let i = leaves.firstIndex(of: a) {
+            let featured = FeatureLayout.featuredCount(feature: set.effectiveFeature, count: set.featureCount, total: leaves.count)
+            if i < featured - 1 { anchor = leaves[featured - 1] }
+        }
+        let axis = set.split
         if let tree = s.tree {
             if case .success(let next) = tree.inserting(id, nextTo: anchor, axis: axis) { s.tree = next }
         } else {

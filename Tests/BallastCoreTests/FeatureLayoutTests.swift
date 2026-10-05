@@ -595,7 +595,8 @@ struct FeatureLayoutTests {
         let adaptive = Self.plan([1, 2], size: 0.6, grid: .adaptive, minSize: minSize).frames
         #expect(abs(adaptive[2]!.width - 650) < 0.001)
         var region: CGRect?
-        _ = Self.plan([1, 2], size: 0.6, grid: .custom({ r in region = r; return TilePlan() }), minSize: minSize)
+        _ = Self.plan([1, 2], size: 0.6, grid: .custom(minExtent: { $0 == .horizontal ? 650 : 0 },
+                                                      render: { r in region = r; return TilePlan() }), minSize: minSize)
         #expect(abs((region?.width ?? 0) - 650) < 0.001)
     }
 
@@ -604,7 +605,7 @@ struct FeatureLayoutTests {
     @Test("a custom grid renderer is called once with the grid region's rect and its plan is merged in")
     func customRendererGetsTheRegion() {
         var received: [CGRect] = []
-        let plan = Self.plan([1, 2, 3], size: 0.5, grid: .custom({ region in
+        let plan = Self.plan([1, 2, 3], size: 0.5, grid: .custom(minExtent: { _ in 0 }, render: { region in
             received.append(region)
             return TilePlan(frames: [9: region], navigation: [9: region])
         }), gap: 10)
@@ -619,17 +620,44 @@ struct FeatureLayoutTests {
     func customRendererRegions() {
         var received: [CGRect] = []
         let render: (CGRect) -> TilePlan = { received.append($0); return TilePlan() }
-        _ = Self.plan([1, 2, 3], feature: .off, grid: .custom(render))
+        _ = Self.plan([1, 2, 3], feature: .off, grid: .custom(minExtent: { _ in 0 }, render: render))
         #expect(received == [Self.rect])
         received = []
-        _ = Self.plan([1, 2, 3, 4], feature: .center, size: 0.5, grid: .custom(render))
+        _ = Self.plan([1, 2, 3, 4], feature: .center, size: 0.5, grid: .custom(minExtent: { _ in 0 }, render: render))
         #expect(received == [CGRect(x: 500, y: 0, width: 500, height: 500)]) // one region right of the feature
     }
 
     @Test("a custom renderer is not called when every window is featured")
     func customRendererSkippedWhenAllFeatured() {
         var calls = 0
-        _ = Self.plan([1, 2], count: 2, grid: .custom({ _ in calls += 1; return TilePlan() }))
+        _ = Self.plan([1, 2], count: 2, grid: .custom(minExtent: { _ in 0 }, render: { _ in calls += 1; return TilePlan() }))
         #expect(calls == 0)
+    }
+
+    @Test("a fixed grid left of the feature keeps each column's width, as to its right")
+    func fixedGridLeftOfFeatureKeepsColumnWidths() {
+        let minSize: (WindowID) -> CGSize = { $0 == 2 ? CGSize(width: 300, height: 0) : .zero }
+        let left = Self.plan([1, 2, 3], feature: .left, grid: .fixed(columns: 2, limit: nil), minSize: minSize).frames
+        let right = Self.plan([1, 2, 3], feature: .right, grid: .fixed(columns: 2, limit: nil), minSize: minSize).frames
+        #expect(right[2]!.width == left[2]!.width)
+        #expect(right[3]!.width == left[3]!.width)
+    }
+
+    @Test("an adaptive grid's feature boundary leaves room for every window's minimum width")
+    func adaptiveGridReservesRowMinimums() {
+        let minSize: (WindowID) -> CGSize = { $0 == 2 || $0 == 3 ? CGSize(width: 300, height: 0) : .zero }
+        let frames = Self.plan([1, 2, 3, 4, 5], feature: .left, size: 0.6, grid: .adaptive, minSize: minSize).frames
+        #expect(frames[2]!.width >= 300)
+        #expect(frames[3]!.width >= 300)
+    }
+
+    @Test("a decking column's peek strips count toward its minimum height")
+    func deckPeekCountsTowardMinimumHeight() {
+        let plan = FeatureLayout.plan(
+            order: [1, 2, 3, 4], in: CGRect(x: 0, y: 0, width: 1000, height: 1000), feature: .top, featureCount: 1,
+            size: 0.7, grid: .fixed(columns: 1, limit: 1), gap: 0, peek: 30,
+            minSize: { $0 == 1 ? .zero : CGSize(width: 0, height: 400) })
+        let view = plan.inView.compactMap { plan.frames[$0] }.reduce(CGRect.null) { $0.union($1) }
+        #expect(view.height >= 400)
     }
 }

@@ -2,11 +2,7 @@ import AppKit
 import BallastCore
 
 extension WindowManager {
-    static var stateDumpURL: URL {
-        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            .map { $0.appendingPathComponent("dev.ballast/state.json") }
-            ?? URL(fileURLWithPath: "/tmp/ballast-state.json")
-    }
+    static var stateDumpURL: URL { BallastCLI.lockDirectory.appendingPathComponent("state.json") }
 
     /// Writes a JSON snapshot of live state (used by the smoke test).
     func dumpState() {

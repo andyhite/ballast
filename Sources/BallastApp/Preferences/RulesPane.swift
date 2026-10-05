@@ -60,11 +60,15 @@ struct RulesPane: View {
                 } label: {
                     Image(systemName: "plus")
                 }
+                .accessibilityLabel("Add Rule")
+                .help("Add Rule")
                 Button {
                     deleteSelected()
                 } label: {
                     Image(systemName: "minus")
                 }
+                .accessibilityLabel("Remove Rule")
+                .help("Remove Rule")
                 .disabled(selection == nil)
                 Divider().frame(height: 16)
                 Button {
@@ -72,12 +76,16 @@ struct RulesPane: View {
                 } label: {
                     Image(systemName: "arrow.up")
                 }
+                .accessibilityLabel("Move Rule Up")
+                .help("Move Rule Up")
                 .disabled(!canMove(by: -1))
                 Button {
                     move(by: 1)
                 } label: {
                     Image(systemName: "arrow.down")
                 }
+                .accessibilityLabel("Move Rule Down")
+                .help("Move Rule Down")
                 .disabled(!canMove(by: 1))
                 Spacer()
             }

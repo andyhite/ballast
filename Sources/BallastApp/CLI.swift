@@ -5,9 +5,6 @@ import Darwin
 /// `ballast [run|doctor|spaces|check-config|send|login-item|help] [--config PATH]`
 @MainActor
 public enum BallastCLI {
-    /// Distributed notification carrying a command string to the running instance.
-    public static let commandNotification = Notification.Name("dev.ballast.command")
-
     public static func main(_ arguments: [String], env: [String: String] = ProcessInfo.processInfo.environment) -> Int32 {
         var args: [String] = []
         var configOverride: String?
@@ -67,9 +64,10 @@ public enum BallastCLI {
     // MARK: Subcommands
 
     private static var manager: WindowManager?
+    private static var commandSocket: CommandSocket?
     private static var lockFileDescriptor: Int32 = -1
 
-    private static var lockDirectory: URL {
+    static var lockDirectory: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/dev.ballast")
     }
 
@@ -118,6 +116,14 @@ public enum BallastCLI {
         let wm = WindowManager(configURL: configURL)
         manager = wm
         wm.launch()
+        let socket = CommandSocket(path: CommandSocket.defaultPath) { wm.handleCommand($0) }
+        if !socket.start() {
+            FileHandle.standardError.write(Data("ballast: command socket unavailable; `ballast send` won't work\n".utf8))
+        }
+        commandSocket = socket
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { commandSocket?.stop() }
+        }
         app.run()
         return 0
     }
@@ -179,9 +185,14 @@ public enum BallastCLI {
             return fail("\(error.message)\ncommands:\n  " + Command.reference.joined(separator: "\n  "))
         }
         guard instanceIsRunning() else { return fail("no running Ballast instance (start it with `ballast run` or open Ballast.app)") }
-        DistributedNotificationCenter.default().postNotificationName(
-            commandNotification, object: text, userInfo: nil, deliverImmediately: true)
-        return 0
+        switch CommandSocket.send(text, path: CommandSocket.defaultPath) {
+        case .failure(let e): return fail("cannot reach the running Ballast: \(e)")
+        case .success(let reply):
+            if reply == "ok" { return 0 }
+            if reply.hasPrefix("ok: ") { print(reply.dropFirst(4)); return 0 }
+            if reply.hasPrefix("error: ") { return fail(String(reply.dropFirst(7))) }
+            return fail("unexpected reply: \(reply)")
+        }
     }
 
     private static func loginItem(_ action: String) -> Int32 {

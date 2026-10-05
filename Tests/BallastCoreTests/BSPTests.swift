@@ -296,8 +296,8 @@ struct BSPTests {
             Issue.record("expected split")
             return
         }
-        #expect((s.ratio ?? 0) >= before - 0.0001)
-        #expect(abs((s.ratio ?? 0) - 0.97) < 0.0001)
+        #expect(next == tree, "a resize that changes nothing pins nothing")
+        #expect(abs(BSPNode.effectiveRatio(s, weight: ctx.weight, minRatio: ctx.minRatio, maxRatio: ctx.maxRatio) - 0.97) < 0.0001)
     }
 
     @Test("shrinking at the configured min ratio mirrors the max-ratio boundary")
@@ -313,8 +313,8 @@ struct BSPTests {
             Issue.record("expected split")
             return
         }
-        #expect((s.ratio ?? 1) <= before + 0.0001)
-        #expect(abs((s.ratio ?? 1) - 0.02) < 0.0001)
+        #expect(next == tree, "a resize that changes nothing pins nothing")
+        #expect(abs(BSPNode.effectiveRatio(s, weight: ctx.weight, minRatio: ctx.minRatio, maxRatio: ctx.maxRatio) - 0.02) < 0.0001)
     }
 
     @Test("resizing root leaf errors")
@@ -373,14 +373,22 @@ struct BSPTests {
         #expect(abs(frames[2]!.width - 200) < 0.001)
     }
 
-    @Test("manual ratio outside bounds clamps to maxRatio")
-    func manualRatioClampsToMaxRatio() {
+    @Test("manual ratio outside bounds clamps to the structural bound, not the weight-share band")
+    func manualRatioClampsToStructuralBound() {
         let tree = BSPNode.split(BSPSplit(axis: .horizontal, ratio: 0.99, first: .leaf(1), second: .leaf(2)))
         let ctx = Self.context(minRatio: 0.25, maxRatio: 0.75)
         let rect = CGRect(x: 0, y: 0, width: 400, height: 200)
         let frames = tree.layout(in: rect, context: ctx)
-        #expect(abs(frames[1]!.width - 300) < 0.001)
-        #expect(abs(frames[2]!.width - 100) < 0.001)
+        #expect(abs(frames[1]!.width - 380) < 0.001)
+        #expect(abs(frames[2]!.width - 20) < 0.001)
+    }
+
+    @Test("balanced equalizes every tile even with a narrow weight-share band")
+    func balancedIgnoresWeightShareBand() {
+        let tree = BSPNode.ideal([1, 2, 3, 4, 5], axis: .horizontal)!.balanced()
+        let ctx = Self.context(minRatio: 0.25, maxRatio: 0.75)
+        let frames = tree.layout(in: CGRect(x: 0, y: 0, width: 1000, height: 200), context: ctx)
+        for id: WindowID in 1...5 { #expect(abs(frames[id]!.width - 200) <= 1) }
     }
 
     @Test("NaN manual ratio falls back to weight-derived split")

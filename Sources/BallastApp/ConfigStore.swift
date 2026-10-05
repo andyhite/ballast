@@ -61,6 +61,7 @@ final class ConfigStore {
             return .success(Config())
         }
         let result = read()
+        if case .failure(let f) = result { error = f.message }
         if case .success = result {
             note = nil
             loaded = true
@@ -112,7 +113,7 @@ final class ConfigStore {
     /// the edit can be retried once the file reappears.
     @discardableResult
     func edit(_ change: (inout ConfigEditor) -> Result<Void, ConfigEditError>) -> ConfigEditError? {
-        let resolvedURL = url.resolvingSymlinksInPath()
+        let resolvedURL = url.resolvingSymlinksIncludingDangling()
         let missing = !FileManager.default.fileExists(atPath: resolvedURL.path)
         if missing, everLoadedFromDisk {
             let editError = ConfigEditError("Config file missing at \(resolvedURL.path); not recreating it")
@@ -193,6 +194,14 @@ final class ConfigStore {
         case "feature_count": clearOverrides(space, false, true)
         default: break
         }
+        return nil
+    }
+
+    /// The one "Remove Desktop Overrides" path: drops the `[[space]]` blocks and any pending or runtime overrides.
+    @discardableResult
+    func removeDesktopOverrides(_ key: SpaceKey, space: SpaceID?) -> ConfigEditError? {
+        if let error = edit({ $0.removeSpaces(for: key) }) { return error }
+        if let space { pending[space] = nil; clearOverrides(space, true, true) }
         return nil
     }
 

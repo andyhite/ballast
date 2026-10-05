@@ -367,30 +367,13 @@ struct ConfigTests {
         #expect(Self.messages(Self.space("bogus_key = 1")).contains { $0.hasPrefix("space[1].bogus_key:") && $0.contains("unknown key") })
     }
 
-    @Test("every renamed or removed key fails in [layout] and [[space]] with its replacement")
-    func legacyKeysAreErrors() {
-        let cases: [(key: String, value: String, message: String)] = [
-            ("master_ratio", "0.5", "renamed to feature_size"),
-            ("master_count", "2", "renamed to feature_count"),
-            ("grid_columns", "2", "renamed to columns"),
-            ("grid_max", "2", "renamed to rows"),
-            ("stack_peek", "12", "renamed to deck_peek"),
-            ("bsp_min_ratio", "0.25", "renamed to weight_share_min"),
-            ("bsp_max_ratio", "0.75", "renamed to weight_share_max"),
-            ("stack_side", "\"left\"", "removed; use feature (the opposite side)"),
-            ("stack_both_sides", "true", "removed; use feature = \"center\""),
-            ("bsp_shape", "\"dwindle\"", "removed; use arrange = \"dwindle\" | \"balanced\""),
-            ("mode", "\"bsp\"", "removed; use arrange and feature"),
-        ]
-        for (key, value, message) in cases {
-            #expect(Self.messages("[layout]\n\(key) = \(value)") == ["layout.\(key): \(message)"], "[layout] \(key)")
-            #expect(Self.messages(Self.space("\(key) = \(value)")) == ["space[1].\(key): \(message)"], "[[space]] \(key)")
-        }
-    }
-
-    @Test("renamed and removed commands fail in bindings naming the replacement")
-    func legacyBindingCommand() {
-        #expect(Self.messages("[bindings]\n\"hyper+m\" = \"focus-master\"").contains { $0.contains("(renamed to 'focus-feature')") })
+    @Test("app-only rule lookup is case-insensitive and ignores narrowed rules")
+    func appOnlyRuleIndex() {
+        var config = Config()
+        config.rules = [AppRule(match: RuleMatch(appID: "Com.Foo"), actions: RuleActions(float: true))]
+        #expect(config.appOnlyRuleIndex(bundleID: "com.foo") == 0)
+        config.rules[0].match.titleSubstring = "x"
+        #expect(config.appOnlyRuleIndex(bundleID: "com.foo") == nil)
     }
 
     @Test("new commands parse to their cases")
@@ -409,26 +392,6 @@ struct ConfigTests {
         #expect(Command.parse("deck") != .success(.deck(.left)))
         #expect(Command.parse("feature-count 1.5") != .success(.featureCount(1)))
         #expect(Command.parse("feature-size") != .success(.featureSize(0)))
-    }
-
-    @Test("every legacy command fails naming its replacement")
-    func legacyCommands() {
-        func error(_ text: String) -> String? {
-            if case .failure(let e) = Command.parse(text) { return e.description }
-            return nil
-        }
-        let renamed: [(old: String, name: String, new: String)] = [
-            ("master-ratio +0.1", "master-ratio", "feature-size"),
-            ("master-count 1", "master-count", "feature-count"),
-            ("focus-master", "focus-master", "focus-feature"),
-            ("focus master", "focus master", "focus feature"),
-        ]
-        for (old, name, new) in renamed {
-            #expect(error(old)?.contains("unknown command '\(name)' (renamed to '\(new)')") == true, "\(old): \(error(old) ?? "parsed")")
-        }
-        for text in ["layout main_tile", "layout grid", "layout"] {
-            #expect(error(text)?.contains("unknown command 'layout' (removed; set arrange in the menu, Settings, or config)") == true, "\(text)")
-        }
     }
 
     @Test("glyph and summary describe the arrangement and feature")

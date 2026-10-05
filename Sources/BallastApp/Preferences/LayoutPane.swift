@@ -110,6 +110,7 @@ struct LayoutPane: View {
                     ) {
                         Text("\(effective.columns)").monospacedDigit()
                     }
+                    .accessibilityLabel("Columns")
                 }
                 fieldRow("Rows", inherited: overrides?.rows == nil,
                          builtin: builtin(config.layout.rows != nil) { $0.rows == 0 ? "no cap" : "\($0.rows)" }) {
@@ -119,6 +120,7 @@ struct LayoutPane: View {
                     ) {
                         Text(effective.rows == 0 ? "No cap" : "\(effective.rows)").monospacedDigit()
                     }
+                    .accessibilityLabel("Rows")
                 }
                 fieldRow("Deck Peek", inherited: overrides?.deckPeek == nil,
                          builtin: builtin(config.layout.deckPeek != nil) { "\(Int($0.deckPeek)) pt" }) {
@@ -128,6 +130,7 @@ struct LayoutPane: View {
                     ) {
                         Text("\(Int(effective.deckPeek)) pt").monospacedDigit()
                     }
+                    .accessibilityLabel("Deck Peek")
                 }
             }
             .disabled(editingDisabled)
@@ -459,11 +462,7 @@ struct LayoutPane: View {
     }
 
     private func removeAllOverrides(_ key: SpaceKey) {
-        if let space = spaceID(for: key) {
-            _ = manager.configStore.setSpaceSetting("feature_size", nil, space: space)
-            _ = manager.configStore.setSpaceSetting("feature_count", nil, space: space)
-        }
-        setError(manager.configStore.edit { $0.removeSpaces(for: key) })
+        setError(manager.configStore.removeDesktopOverrides(key, space: spaceID(for: key)))
     }
 
     private func removeSpace(_ address: SpaceAddress) {

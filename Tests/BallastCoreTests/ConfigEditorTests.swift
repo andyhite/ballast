@@ -751,6 +751,54 @@ struct ConfigEditorTests {
         #expect(editor.text == text)
     }
 
+    @Test("a header-looking line inside a multi-line string is not a block boundary")
+    func headerInsideMultilineString() {
+        let text = "[[rule]]\napp_id = \"com.a\"\ntitle_regex = '''\n[Ss]ettings'''\nfloat = true\n"
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("float", .bool(false), in: .rule(0)))
+        #expect(editor.text.contains("title_regex = '''\n[Ss]ettings'''\n"))
+        guard case .success(let config) = editor.validated() else { Issue.record("expected valid"); return }
+        #expect(config.rules.count == 1)
+        #expect(config.rules[0].match.titleRegex != nil)
+        #expect(config.rules[0].actions.float == false)
+    }
+
+    @Test("dotted keys are replaced or removed as a whole")
+    func dottedKeysReplaced() {
+        let uuid = "06577405-6B31-4676-9725-A2F69D4232F4"
+        let text = "[[space]]\nuuid = \"\(uuid)\"\ngaps.inner = 4\n"
+        var removed = ConfigEditor(text: text)
+        expectSuccess(removed.set("gaps", nil, in: .space(.uuid(uuid))))
+        #expect(removed.text == "[[space]]\nuuid = \"\(uuid)\"\n")
+        var replaced = ConfigEditor(text: text)
+        expectSuccess(replaced.set("gaps", .inlineTable([ConfigField("inner", .float(10))]), in: .space(.uuid(uuid))))
+        guard case .success(let config) = replaced.validated() else { Issue.record("expected valid"); return }
+        #expect(config.spaces[.uuid(uuid)]?.gapsInner == 10)
+    }
+
+    @Test("creating [settings.animation] next to an inline/dotted animation fails clearly")
+    func animationDottedRefused() {
+        var editor = ConfigEditor(text: "[settings]\nanimation.enabled = false\n")
+        guard case .failure(let error) = editor.set("duration_ms", .integer(100), in: .animation) else { Issue.record("expected failure"); return }
+        #expect(error == ConfigEditError("[settings] already sets animation as an inline table or dotted keys; edit that entry in the config file"))
+    }
+
+    @Test("removing a rule from the example config leaves no double blank line")
+    func removeRuleNoTripleNewline() {
+        var editor = ConfigEditor(text: Self.example)
+        expectSuccess(editor.removeRule(at: 2))
+        #expect(!editor.text.contains("\n\n\n"))
+    }
+
+    @Test("removing a key drops every aligned continuation comment")
+    func removeKeyDropsAllContinuations() {
+        let pad = String(repeating: " ", count: 13)
+        let text = "[[rule]]\napp_id = \"com.a\"\nweight = 5   # one\n\(pad)# two\n\(pad)# three\nfloat = true\n"
+        var editor = ConfigEditor(text: text)
+        expectSuccess(editor.set("weight", nil, in: .rule(0)))
+        #expect(editor.text == "[[rule]]\napp_id = \"com.a\"\nfloat = true\n")
+    }
+
     // MARK: - Escaping
 
     @Test("strings with control characters round-trip through the editor and TOML.parse")

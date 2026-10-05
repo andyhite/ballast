@@ -83,4 +83,12 @@ struct GridLayoutTests {
         #expect(plan.frames.count == 5)
         #expect(plan.frames.values.allSatisfy { $0.width >= 0 && $0.height >= 0 && $0.origin.x.isFinite })
     }
+
+    @Test("gaps larger than the rect keep every segment and split child inside it")
+    func gapsOutgrowingTheRectStayInside() {
+        let rects = segments(of: CGRect(x: 0, y: 0, width: 100, height: 10), axis: .horizontal, lengths: [0, 0, 0], gap: 60)
+        #expect(rects.allSatisfy { $0.maxX <= 100 && $0.minX >= 0 })
+        let second = CGRect(x: 0, y: 0, width: 150, height: 10).split(.horizontal, firstLength: 0, gap: 200).1
+        #expect(second.minX <= 150)
+    }
 }

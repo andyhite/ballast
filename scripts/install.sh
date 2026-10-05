@@ -105,8 +105,9 @@ if [ -w "$bin_dir" ]; then
   ln -sf "$exe" "$bin_dir/ballast"
   echo "linked $bin_dir/ballast"
 else
-  echo "$bin_dir is not writable (or missing); link the CLI yourself:"
+  echo "CLI not linked: $bin_dir is missing or not writable. Either run:"
   echo "  sudo mkdir -p $bin_dir && sudo ln -sf $exe $bin_dir/ballast"
+  echo "or re-run with BIN_DIR=\$HOME/.local/bin scripts/install.sh"
 fi
 
 if $first_install; then

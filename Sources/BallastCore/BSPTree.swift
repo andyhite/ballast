@@ -68,6 +68,12 @@ public struct BSPLayoutContext {
 extension BSPNode {
     // MARK: Queries
 
+    /// Any split carries a manual ratio.
+    var hasManualRatio: Bool {
+        guard case .split(let s) = self else { return false }
+        return s.ratio != nil || s.first.hasManualRatio || s.second.hasManualRatio
+    }
+
     public var leaves: [WindowID] {
         switch self {
         case .leaf(let id): return [id]
@@ -95,8 +101,8 @@ extension BSPNode {
     /// of subtree weight sums, clamped to `[minRatio, maxRatio]`.
     public static func effectiveRatio(_ split: BSPSplit, weight: (WindowID) -> Double,
                                       minRatio: Double, maxRatio: Double) -> Double {
-        let lo = min(minRatio, maxRatio), hi = max(minRatio, maxRatio)
-        if let manual = split.ratio, manual.isFinite { return min(max(manual, lo), hi) }
+        // A manual ratio is only structurally bounded; the weight-share band governs weight-derived ratios.
+        if let manual = split.ratio, manual.isFinite { return min(max(manual, 0.05), 0.95) }
         return weightRatio(split.first.weightSum(weight), split.second.weightSum(weight), minRatio: minRatio, maxRatio: maxRatio)
     }
 
@@ -380,7 +386,7 @@ extension BSPNode {
     /// resolution of the automatic axes below can fit — a sound one-sided
     /// veto, not an exhaustive feasibility search. It needs no rect/ratio,
     /// so it is O(subtree) with no branching and trivially cheap.
-    private func lowerBoundExtent(_ axis: Axis, context: BSPLayoutContext) -> Double {
+    func lowerBoundExtent(_ axis: Axis, context: BSPLayoutContext) -> Double {
         switch self {
         case .leaf(let id):
             let v = context.minSize(id).extent(axis)
@@ -507,10 +513,9 @@ extension BSPNode {
         drawn.second = second
         let current = Self.effectiveRatio(drawn, weight: context.weight, minRatio: context.minRatio, maxRatio: context.maxRatio)
         let lo = min(context.minRatio, context.maxRatio), hi = max(context.minRatio, context.maxRatio)
-        if first == .leaf(id) {
-            s.ratio = min(max(current + delta, lo), hi)
-        } else if second == .leaf(id) {
-            s.ratio = min(max(current - delta, lo), hi)
+        if first == .leaf(id) || second == .leaf(id) {
+            let next = min(max(first == .leaf(id) ? current + delta : current - delta, lo), hi)
+            if next != current { s.ratio = next }
         } else if s.first.contains(id) {
             s.first = s.first.resized(id, delta: delta, context: context, hidden: hidden)
         } else {
