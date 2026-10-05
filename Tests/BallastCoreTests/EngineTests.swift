@@ -298,6 +298,28 @@ struct EngineTests {
         #expect(quarters())
     }
 
+    @Test("balanced BSP beside a feature balances the grid on its own, unlike dwindle")
+    func balancedGridBesideFeature() {
+        var config = Self.baseConfig()
+        config.layout.arrange = .balanced
+        var engine = Self.makeEngine(config: config)
+        for id in 1...5 as ClosedRange<WindowID> { _ = engine.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+        func gridIsQuarters() -> Bool {
+            let frames = engine.layout(space: 1, area: Self.area).frames
+            let featured = Set(engine.spaces[1]!.tree!.leaves.prefix(engine.settings(for: 1).featureCount))
+            return Set(frames.filter { !featured.contains($0.key) }.values.map { "\(Int($0.width))x\(Int($0.height))" }).count == 1
+        }
+        #expect(gridIsQuarters(), "the four grid tiles are equal quarters")
+
+        _ = engine.perform(.featureCount(1), space: 1, areas: Self.areas)
+        _ = engine.perform(.featureCount(-1), space: 1, areas: Self.areas)
+        #expect(gridIsQuarters(), "a feature count change rebuilds the grid around the new feature")
+
+        config.layout.arrange = .dwindle
+        _ = engine.applyConfig(config)
+        #expect(!gridIsQuarters(), "dwindle stays a spiral")
+    }
+
     // MARK: - Per-(display,space) config
 
     @Test("arrangement(for:) differs per SpaceID according to Config.spaces")

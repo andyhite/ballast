@@ -191,7 +191,10 @@ Each `SpaceState` holds:
   is cut where the running weight sum is closest to half the total, each
   side recursively, giving an equal-area grid (four equal-weight windows are
   quarters) whichever window had focus. With a feature, the tree still holds
-  every tile; the feature tiles are pruned from it when drawn.
+  every tile; the feature tiles are pruned from it when drawn. The balanced
+  ideal therefore splits the feature tiles off first and balances the grid
+  tiles on their own, so the pruned grid is still balanced, and a
+  `feature-count` change rebuilds it.
 - `monocle`, transient feature-size and feature-count overrides,
   and `frameOverrides` (adopted frames). The overrides are transient:
   a setting command applies one instantly, then the platform layer writes it

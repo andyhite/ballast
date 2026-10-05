@@ -677,6 +677,7 @@ public struct Engine: Sendable {
             let clampedDelta = min(max(delta, -16), 16)
             let applied = min(max(current + clampedDelta, 1), 16)
             spaces[space, default: SpaceState(id: space)].featureCountOverride = applied
+            recomputeIdeal(space) // a balanced grid is built around the feature tiles
             out.settings = SettingsChange(space: space, featureCount: applied)
             out.dirty = [space]
         case .balance:
@@ -886,10 +887,20 @@ public struct Engine: Sendable {
     }
 
     /// The weight-default BSP tree for the tiles `order` in `space`'s arrangement.
+    /// Balanced splits the feature tiles off first and balances the grid on its
+    /// own: the layout prunes the feature from the tree, which would otherwise
+    /// leave a lopsided, dwindle-like grid.
     private func idealTree(_ order: [WindowID], on space: SpaceID, decks: [WindowID: [WindowID]]) -> BSPNode? {
         let s = settings(for: space)
         switch s.arrange {
-        case .balanced: return BSPNode.balanced(order, axis: s.split, weight: tileWeight(decks: decks))
+        case .balanced:
+            let weight = tileWeight(decks: decks)
+            let featured = FeatureLayout.featuredCount(feature: s.effectiveFeature, count: s.featureCount, total: order.count)
+            guard featured > 0, featured < order.count,
+                  let head = BSPNode.balanced(Array(order.prefix(featured)), axis: s.split, weight: weight),
+                  let grid = BSPNode.balanced(Array(order.dropFirst(featured)), axis: s.split, weight: weight)
+            else { return BSPNode.balanced(order, axis: s.split, weight: weight) }
+            return .split(BSPSplit(axis: s.split, first: head, second: grid))
         case .dwindle, .fixed, .adaptive, .float: return BSPNode.ideal(order, axis: s.split)
         }
     }
