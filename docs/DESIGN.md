@@ -221,6 +221,20 @@ applied to the existing BSP tree of every Space that is *not* manual (shape
 and ratios kept, split directions rewritten), so config edits show up without
 a `reset`; manually arranged Spaces keep their split directions until `reset`.
 
+Live arrangement is never written to disk, and discovery after a launch
+finds windows in arbitrary order (apps attach concurrently), each joining as
+a newcomer. What survives a restart is the windows themselves, still where
+the last run put them. So every window discovery finds already open (apps
+running at launch, windows on a Space first visited since) keeps the frame
+it was found at as a *seed*, and while every tile on a non-manual Space has
+one, `Engine.adoptArrangement` reads the arrangement back from the seeds:
+each tile takes the layout slot nearest its seed, and a tree arrangement
+rebuilds its BSP shape from them (`BSPNode.fromFrames`; where frames fit
+several trees, the cut layout would place closest to the measured one wins,
+and a cut off its weight share keeps its measured ratio). A window opened
+since, or a manual arrangement, ends it for that Space. Decks, monocle and
+adopted frames are not read back.
+
 ### 3.2.1 Config write-back
 
 Nothing is runtime-only: every setting the user changes from the menu bar, a

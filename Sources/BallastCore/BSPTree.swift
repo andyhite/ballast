@@ -97,10 +97,13 @@ extension BSPNode {
                                       minRatio: Double, maxRatio: Double) -> Double {
         let lo = min(minRatio, maxRatio), hi = max(minRatio, maxRatio)
         if let manual = split.ratio, manual.isFinite { return min(max(manual, lo), hi) }
-        let a = split.first.weightSum(weight)
-        let b = split.second.weightSum(weight)
+        return weightRatio(split.first.weightSum(weight), split.second.weightSum(weight), minRatio: minRatio, maxRatio: maxRatio)
+    }
+
+    /// First side's share for weight sums `a` and `b`, clamped to `[minRatio, maxRatio]`.
+    static func weightRatio(_ a: Double, _ b: Double, minRatio: Double, maxRatio: Double) -> Double {
         let raw = (a + b) > 0 ? a / (a + b) : 0.5
-        return min(max(raw, lo), hi)
+        return min(max(raw, min(minRatio, maxRatio)), max(minRatio, maxRatio))
     }
 
     // MARK: Construction
@@ -141,6 +144,44 @@ extension BSPNode {
         guard let first = balanced(Array(order[..<cut]), axis: axis, weight: weight),
               let second = balanced(Array(order[cut...]), axis: axis, weight: weight) else { return .leaf(head) }
         return .split(BSPSplit(axis: axis, first: first, second: second))
+    }
+
+    /// The tree that lays tiles out at `frames`, read back from the frames:
+    /// each region is cut along a line no frame straddles, first child
+    /// left/top, as layout places it. Several such lines (a grid, a row of
+    /// three) fit different trees; the one layout would put closest to where
+    /// it is wins, longer side and earliest line first on ties. A cut that
+    /// sits off its weight share keeps its measured ratio, as after a
+    /// resize. `nil` when the frames are no such partition (overlapping or
+    /// hand-placed windows). `axis` is the configured split: when automatic,
+    /// a cut across the longer side stays automatic.
+    public static func fromFrames(_ frames: [(id: WindowID, frame: CGRect)], axis: Axis?,
+                                  context: BSPLayoutContext) -> BSPNode? {
+        guard let head = frames.first else { return nil }
+        guard frames.count > 1 else { return .leaf(head.id) }
+        typealias Part = [(id: WindowID, frame: CGRect)]
+        let region = frames.reduce(head.frame) { $0.union($1.frame) }
+        let natural: Axis = region.width >= region.height ? .horizontal : .vertical
+        let tolerance = 1.5
+        func weight(_ part: Part) -> Double { part.reduce(0) { $0 + BSPNode.leaf($1.id).weightSum(context.weight) } }
+        var best: (miss: Double, cut: Axis, ratio: Double, first: Part, second: Part)?
+        for cut in [natural, natural.other] {
+            let available = max(0, region.extent(cut) - context.gap)
+            for edge in Set(frames.map { $0.frame.end(cut) }).sorted() {
+                let first = frames.filter { $0.frame.end(cut) <= edge + tolerance }
+                let second = frames.filter { $0.frame.end(cut) > edge + tolerance }
+                guard !first.isEmpty, !second.isEmpty, second.allSatisfy({ $0.frame.start(cut) >= edge - tolerance }) else { continue }
+                let share = weightRatio(weight(first), weight(second), minRatio: context.minRatio, maxRatio: context.maxRatio)
+                let miss = abs(region.start(cut) + available * share - edge)
+                if miss < best?.miss ?? .infinity {
+                    best = (miss, cut, available > 0 ? (edge - region.start(cut)) / available : share, first, second)
+                }
+            }
+        }
+        guard let best, let a = fromFrames(best.first, axis: axis, context: context),
+              let b = fromFrames(best.second, axis: axis, context: context) else { return nil }
+        return .split(BSPSplit(axis: axis == nil && best.cut == natural ? nil : best.cut,
+                               ratio: best.miss <= tolerance ? nil : best.ratio, first: a, second: b))
     }
 
     // MARK: Mutations (pure)

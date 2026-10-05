@@ -61,8 +61,6 @@ final class WindowManager {
     private var lastMouseFocusCheck = Date.distantPast
     /// Last focus transition, to recognise "AppKit moved focus, then the window closed".
     private var lastFocusLoss: (window: WindowID, at: Date)?
-    /// Spaces already seen by a full resync (first sighting adopts the ideal BSP tree).
-    private var seenSpaces = Set<SpaceID>()
     /// Window ids in each Space's last plan.
     private var laidOut: [SpaceID: Set<WindowID>] = [:]
     private let hitTestQueue = DispatchQueue(label: "dev.ballast.hit-test", qos: .userInteractive)
@@ -179,7 +177,7 @@ final class WindowManager {
             observeModifiers()
         }
         attachDock(attempt: 0)
-        for app in NSWorkspace.shared.runningApplications { observe(app) }
+        for app in NSWorkspace.shared.runningApplications { observe(app, restoring: true) }
         fullResync()
         Log.wm.info("managing \(self.engine.windows.count) windows")
     }
@@ -278,21 +276,23 @@ final class WindowManager {
         }) { eventMonitors.append(local) }
     }
 
-    private func observe(_ app: NSRunningApplication) {
+    /// `restoring`: the app was already running, so its windows sit where
+    /// they were left (see `restoreArrangement`).
+    private func observe(_ app: NSRunningApplication, restoring: Bool = false) {
         let pid = app.processIdentifier
         guard observers[pid] == nil, !attaching.contains(pid), pid != getpid(), app.activationPolicy != .prohibited,
               app.bundleIdentifier != "com.apple.dock" else { return }
         let observer = AppObserver(pid: pid, bundleID: app.bundleIdentifier, name: app.localizedName)
         observer.onNotification = { [weak self] in self?.appObserver($0, received: $1, element: $2) }
         attaching.insert(pid)
-        attach(observer, attempt: 0)
+        attach(observer, attempt: 0, restoring: restoring)
     }
 
     /// Launching apps are not AX-ready immediately; retry a bounded number
     /// of times. The AX subscription runs on the app's own worker, so a hung
     /// app stalls only its own queue. `attaching` keeps a second activation
     /// from starting a second chain while one is in flight.
-    private func attach(_ observer: AppObserver, attempt: Int) {
+    private func attach(_ observer: AppObserver, attempt: Int, restoring: Bool) {
         let pid = observer.pid
         guard status == .running, observers[pid] == nil, attaching.contains(pid) else { attaching.remove(pid); return }
         applier.perform(pid: pid) {
@@ -308,10 +308,10 @@ final class WindowManager {
                         // Chromium/Electron honour this: much faster resizes, no competing animation.
                         AX.setBool(observer.app, "AXEnhancedUserInterface", false)
                     }
-                    discoverWindows(observer)
+                    discoverWindows(observer, restoring: restoring)
                 } else if attempt < 8 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.25 * Double(attempt + 1)) { [weak self] in
-                        self?.attach(observer, attempt: attempt + 1)
+                        self?.attach(observer, attempt: attempt + 1, restoring: restoring)
                     }
                 } else {
                     attaching.remove(pid)
@@ -502,19 +502,15 @@ final class WindowManager {
         for observer in observers.values {
             if observer.pid == front {
                 // Focus is read on the worker and applied once discovery has committed.
-                discoverWindows(observer) { [weak self] focused in
+                discoverWindows(observer, restoring: true) { [weak self] focused in
                     guard let self, engine.focused == nil, let focused else { return }
                     focusChanged(to: focused)
                 }
             } else {
-                discoverWindows(observer)
+                discoverWindows(observer, restoring: true)
             }
         }
         reconcileMembership()
-        // A Space seen for the first time was filled in discovery order, not
-        // rank order: start its BSP tree from the weight-computed ideal.
-        for space in engine.spaces.keys where !seenSpaces.contains(space) { engine.adoptIdealTree(space) }
-        seenSpaces = Set(engine.spaces.keys).union(engine.snapshot.displays.compactMap(\.activeSpace))
         for display in engine.snapshot.displays {
             if let active = display.activeSpace { dirty.insert(active) }
         }
@@ -1181,6 +1177,8 @@ struct WindowSlot {
     /// Its moved/resized notification still needs classifying.
     var pendingCheck = false
     var snapBackTimes: [Date] = []
+    /// Where discovery found an already-open window, before Ballast moved it.
+    var seed: CGRect?
 }
 
 /// Bridges `com.apple.accessibility.api` to `WindowManager` with

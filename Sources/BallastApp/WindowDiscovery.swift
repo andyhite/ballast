@@ -81,8 +81,10 @@ extension WindowManager {
     /// after activation (e.g. following focus) must wait for it rather
     /// than assuming discovery finished synchronously.
     /// `completion` receives the app's focused window as read on the worker
-    /// (only read when `completion` is given).
-    func discoverWindows(_ observer: AppObserver, completion: (@MainActor @Sendable (AXUIElement?) -> Void)? = nil) {
+    /// (only read when `completion` is given). `restoring`: the windows found
+    /// were already open, not just opened (see `restoreArrangement`).
+    func discoverWindows(_ observer: AppObserver, restoring: Bool = false,
+                         completion: (@MainActor @Sendable (AXUIElement?) -> Void)? = nil) {
         guard let provider, let axObserver = observer.installed else { completion?(nil); return }
         // Snapshot, not a live reference: read on the worker queue below
         // without touching `self.slots` off the main thread. A window
@@ -116,7 +118,7 @@ extension WindowManager {
                     guard let self else { completion?(focused); return }
                     for w in found {
                         self.commitTracked(w.id, element: w.element, observer: observer, facts: w.facts, minimized: w.minimized,
-                                      registered: true)
+                                           registered: true, restoring: restoring)
                     }
                     self.reconcileTabs(pid: observer.pid, visible: visible, readAfter: known, activeDuringRead: activeDuringRead)
                     completion?(focused)
@@ -198,21 +200,36 @@ extension WindowManager {
     /// using facts already read from AX by either caller above. Always
     /// runs on the main thread.
     private func commitTracked(_ id: WindowID, element: AXUIElement, observer: AppObserver, facts: WindowFacts, minimized: Bool,
-                               opened: Bool = false, registered: Bool = false) {
+                               opened: Bool = false, registered: Bool = false, restoring: Bool = false) {
         guard slots[id] == nil else { return } // raced with a live notification for the same window
         guard registered || observer.observe(window: element) else {
             Log.ax.notice("window \(id) of \(facts.appName ?? "?", privacy: .public) refused AX notifications; not tracked yet")
             return
         }
-        slots[id] = WindowSlot(element: element, arrived: true)
+        slots[id] = WindowSlot(element: element, arrived: true, seed: restoring ? Self.windowBounds(of: id) : nil)
         let space = resolveSpace(for: id, pid: observer.pid)
         markDirty(engine.addWindow(id, pid: observer.pid, facts: facts, space: space))
         if minimized { markDirty(engine.setMinimized(id, true)) }
         if NSRunningApplication(processIdentifier: observer.pid)?.isHidden == true { markDirty(engine.setHidden(id, true)) }
+        if restoring, let space { restoreArrangement(on: space) }
         if space.map({ engine.arrangement(for: $0) }) != .float { placeFloating(id, element: element) }
         else if opened, !minimized, let space { cascade(id, element: element, on: space) }
         if engine.windows[id]?.rule.sticky == true {
             Log.wm.notice("sticky rule for \(facts.appName ?? "?", privacy: .public): pinning to all Spaces needs SIP changes; treated as floating")
         }
+    }
+
+    /// Discovery finds already-open windows (after a restart, or on a Space
+    /// first visited since) in arbitrary order, each joining as a newcomer;
+    /// their seed frames are where the last run left them. While every tile
+    /// on `space` was found that way, its arrangement is read back from the
+    /// seeds, so a restart leaves windows where they were. A window opened
+    /// since, or a manual arrangement, ends this for the Space.
+    // ponytail: seeds never expire; a late discovery on an untouched Space re-reads the startup frames.
+    private func restoreArrangement(on space: SpaceID) {
+        guard let key = engine.snapshot.key(for: space), let area = displays.with(uuid: key.display)?.visibleFrame,
+              let members = engine.spaces[space]?.members else { return }
+        let seeds = members.reduce(into: [WindowID: CGRect]()) { $0[$1] = slots[$1]?.seed }
+        markDirty(engine.adoptArrangement(space, area: area, frames: seeds))
     }
 }

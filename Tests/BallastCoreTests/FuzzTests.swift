@@ -494,7 +494,18 @@ struct EngineFuzzTests {
                 else { _ = engine.setBackgroundTab(id, Bool.random(using: &rng)) }
             case 13:
                 let space = Self.randomSpace(&rng) ?? 1
-                if Bool.random(using: &rng) { engine.adoptIdealTree(space) }
+                if Bool.random(using: &rng) {
+                    // Read back from the Space's own layout, or from arbitrary (overlapping, partial) frames.
+                    let area = engine.snapshot.key(for: space).flatMap { Self.displayAreas[$0.display] } ?? .zero
+                    var frames = engine.layout(space: space, area: area).frames
+                    if Bool.random(using: &rng) {
+                        for id in knownIDs where rng.next() % 4 != 0 {
+                            frames[id] = CGRect(x: Double(rng.next() % 1000), y: Double(rng.next() % 800),
+                                                width: Double(rng.next() % 800), height: Double(rng.next() % 800))
+                        }
+                    }
+                    _ = engine.adoptArrangement(space, area: area, frames: frames)
+                }
                 else { engine.clearSettingOverrides(space, featureSize: Bool.random(using: &rng), featureCount: Bool.random(using: &rng)) }
             case 14:
                 let ids = knownIDs + [WindowID(rng.next() % 40)]

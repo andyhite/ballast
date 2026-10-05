@@ -1147,6 +1147,35 @@ struct EngineTests {
         #expect(outcome.settings?.featureSize == nil)
     }
 
+    @Test("a restart reads the last run's arrangement back from where its windows sit, whatever order discovery finds them in",
+          arguments: [Arrangement.dwindle, .balanced, .fixed, .adaptive])
+    func adoptArrangementRestoresLastRun(arrange: Arrangement) {
+        for feature in [FeatureSide.off, .left] {
+            var config = Self.baseConfig()
+            config.layout.arrange = arrange
+            config.layout.feature = feature
+            config.layout.columns = 2
+            // Last run: windows opened one by one while focus moved around, then a swap and a split resize.
+            var last = Self.makeEngine(config: config)
+            for id: WindowID in 1...5 {
+                _ = last.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1)
+                _ = last.focus(id % 2 == 0 ? 1 : id)
+            }
+            _ = last.swap(2, 5, on: 1)
+            if arrange.isTree {
+                _ = last.focus(3)
+                _ = last.perform(.resize(0.1), space: 1, areas: Self.areas)
+            }
+            let frames = last.layout(space: 1, area: Self.area).frames
+
+            var restarted = Self.makeEngine(config: config)
+            for id: WindowID in [4, 2, 5, 1, 3] { _ = restarted.addWindow(id, pid: Int32(id), facts: WindowFacts(), space: 1) }
+            #expect(restarted.layout(space: 1, area: Self.area).frames != frames, "\(arrange), feature \(feature): discovery order alone already matches")
+            #expect(restarted.adoptArrangement(1, area: Self.area, frames: frames) == [1])
+            #expect(restarted.layout(space: 1, area: Self.area).frames == frames, "\(arrange), feature \(feature)")
+        }
+    }
+
     @Test("BSP resize/balance/swap/monocle/reset of non-featured tiles never emit a SettingsChange")
     func bspCommandsNeverEmitSettingsChange() {
         var config = Self.baseConfig()

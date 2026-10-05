@@ -776,13 +776,50 @@ public struct Engine: Sendable {
         return true
     }
 
-    /// Rebuilds the BSP tree of a non-manual Space from its weight-ranked
-    /// ideal (used when a Space's windows were discovered in arbitrary order).
-    /// Touches nothing else; manual Spaces are left alone.
-    public mutating func adoptIdealTree(_ space: SpaceID) {
-        guard var s = spaces[space], !s.manual else { return }
-        s.tree = idealTree(s.idealOrder, on: space, decks: s.decks)
-        spaces[space] = s
+    /// Rebuilds a non-manual Space's arrangement from where its tiles sit
+    /// now (`frames`). After a restart, windows are still where the last run
+    /// put them, while discovery finds them in arbitrary order: this
+    /// restores the last run's arrangement. Each tile takes the layout slot
+    /// nearest its frame; a tree arrangement also reads its BSP shape back
+    /// from the frames (`BSPNode.fromFrames`), falling back to the ideal
+    /// tree when they fit none. A no-op unless every tile has a frame, and
+    /// on manual, monocle and float Spaces.
+    public mutating func adoptArrangement(_ space: SpaceID, area: CGRect, frames: [WindowID: CGRect]) -> Set<SpaceID> {
+        let s = settings(for: space)
+        guard var state = spaces[space], !state.manual, !state.monocle, s.arrange != .float, !state.tiles.isEmpty,
+              state.tiles.allSatisfy({ frames[$0] != nil }) else { return [] }
+        func distance(_ id: WindowID, _ slot: CGRect) -> Double {
+            let f = frames[id] ?? .null
+            return abs(f.minX - slot.minX) + abs(f.minY - slot.minY) + abs(f.maxX - slot.maxX) + abs(f.maxY - slot.maxY)
+        }
+        // ponytail: greedy nearest-slot matching, exact when each window still sits in a slot; optimal assignment if partial overlaps matter.
+        let plan = layout(space: space, area: area).frames
+        var unplaced = state.tiles
+        var order: [WindowID] = []
+        for slot in tileOrder(state).compactMap({ plan[$0] }) {
+            guard let nearest = unplaced.min(by: { distance($0, slot) < distance($1, slot) }) else { break }
+            order.append(nearest)
+            unplaced.removeAll { $0 == nearest }
+        }
+        order += unplaced
+        if s.arrange.isTree {
+            // Feature tiles sit outside the tree's region: the tree's head, laid out apart from the rest.
+            let featured = Array(order.prefix(FeatureLayout.featuredCount(feature: s.effectiveFeature, count: s.featureCount,
+                                                                         total: order.count)))
+            let rest = order.filter { !featured.contains($0) }
+            let grid = BSPNode.fromFrames(rest.map { ($0, frames[$0] ?? .null) }, axis: s.split, context: bspContext(s, decks: state.decks))
+                ?? BSPNode.ideal(rest, axis: s.split)
+            switch (BSPNode.ideal(featured, axis: s.split), grid) {
+            case let (head?, grid?): state.tree = .split(BSPSplit(axis: s.split, first: head, second: grid))
+            case let (head, grid): state.tree = head ?? grid
+            }
+            state.idealOrder = state.tree?.leaves ?? order
+        } else {
+            state.idealOrder = order
+            state.tree = idealTree(order, on: space, decks: state.decks)
+        }
+        spaces[space] = state
+        return [space]
     }
 
     /// Discards every manual override on `space`: order, tree shape, ratios,
