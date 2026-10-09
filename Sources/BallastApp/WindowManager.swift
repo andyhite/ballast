@@ -108,7 +108,23 @@ final class WindowManager {
             name: Notification.Name("com.apple.accessibility.api"), object: nil,
             suspensionBehavior: .deliverImmediately
         )
+        observeBlockedRecovery()
         tryStart()
+    }
+
+    /// `begin()` registers the full workspace observers only once running, so a
+    /// launch blocked on Spaces settings would never notice the user fixing them.
+    /// These Space/wake/display events re-run `tryStart()` while blocked.
+    private func observeBlockedRecovery() {
+        let recheck: @Sendable (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { if case .blocked? = self?.status { self?.tryStart() } }
+        }
+        let ws = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didWakeNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main, using: recheck)
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main, using: recheck)
     }
 
     private func accessibilityTrustChanged() {
@@ -339,9 +355,10 @@ final class WindowManager {
                     attaching.remove(pid)
                     observer.install(created)
                     observers[pid] = observer
+                    // Chromium/Electron honour this: much faster resizes, no competing animation.
+                    // Skipped under VoiceOver: those apps read it as "screen reader on".
                     applier.perform(pid: pid) {
-                        // Chromium/Electron honour this: much faster resizes, no competing animation.
-                        AX.setBool(observer.app, "AXEnhancedUserInterface", false)
+                        if !NSWorkspace.shared.isVoiceOverEnabled { AX.setBool(observer.app, "AXEnhancedUserInterface", false) }
                     }
                     discoverWindows(observer, restoring: restoring)
                 } else if attempt < 8 {
@@ -1059,7 +1076,10 @@ final class WindowManager {
 
     @discardableResult
     func perform(_ command: Command) -> String? {
-        if case .reload = command { reloadConfig(); return nil }
+        if case .reload = command {
+            reloadConfig()
+            return configStore.error.map { "reload rejected: \($0)" }
+        }
         guard status == .running else {
             if case .dumpState = command { dumpState() }
             return nil
@@ -1097,7 +1117,9 @@ final class WindowManager {
             if status != .running, !(command == .reload || command == .dumpState) {
                 return "error: Ballast isn't managing windows right now; open its menu bar item to see why"
             }
-            return perform(command).map { "ok: \($0)" } ?? "ok"
+            let message = perform(command)
+            if command == .reload, let message { return "error: \(message)" }
+            return message.map { "ok: \($0)" } ?? "ok"
         }
     }
 
