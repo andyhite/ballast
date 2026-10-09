@@ -122,7 +122,10 @@ public enum BallastCLI {
         }
         commandSocket = socket
         NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated { commandSocket?.stop() }
+            MainActor.assumeIsolated {
+                manager?.configStore.flushPendingSettings()
+                commandSocket?.stop()
+            }
         }
         app.run()
         return 0

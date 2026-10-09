@@ -159,7 +159,6 @@ final class InspectorModel: ObservableObject {
     func refresh() {
         generation += 1
         let token = generation
-        editError = nil
         var target = NSWorkspace.shared.frontmostApplication
         if target?.processIdentifier == getpid() {
             target = lastTargetPID.flatMap { NSRunningApplication(processIdentifier: $0) }
@@ -169,6 +168,7 @@ final class InspectorModel: ObservableObject {
             return
         }
         let pid = app.processIdentifier
+        if pid != lastTargetPID { editError = nil }
         lastTargetPID = pid
         let bundleID = app.bundleIdentifier
         let appName = app.localizedName

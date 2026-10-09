@@ -41,6 +41,20 @@ struct ConfigStoreTests {
     }
 
     @Test
+    func initialLoadClearsErrorFromEarlierRejectedStartup() throws {
+        let (dir, url) = Self.tempConfigDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "[layout\n".write(to: url, atomically: true, encoding: .utf8)
+        let store = ConfigStore(url: url)
+        guard case .failure = store.loadInitial() else { Issue.record("expected parse failure"); return }
+        #expect(store.error != nil)
+
+        try Self.sampleConfig.write(to: url, atomically: true, encoding: .utf8)
+        guard case .success = store.loadInitial() else { Issue.record("expected success"); return }
+        #expect(store.error == nil)
+    }
+
+    @Test
     func initialAbsentConfigRemainsCreatableByEdit() {
         let (dir, url) = Self.tempConfigDir() // never written
         defer { try? FileManager.default.removeItem(at: dir) }

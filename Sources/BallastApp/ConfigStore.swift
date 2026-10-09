@@ -56,6 +56,7 @@ final class ConfigStore {
     /// First load: built-in defaults for a file that never existed, else the parsed file.
     func loadInitial() -> Result<Config, LoadError> {
         guard FileManager.default.fileExists(atPath: url.path) else {
+            error = nil
             note = "No config file; using built-in defaults"
             loaded = true
             return .success(Config())
@@ -63,6 +64,7 @@ final class ConfigStore {
         let result = read()
         if case .failure(let f) = result { error = f.message }
         if case .success = result {
+            error = nil
             note = nil
             loaded = true
             everLoadedFromDisk = true
